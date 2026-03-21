@@ -69,7 +69,8 @@ async function confirmBashCommand(
     return { block: true, reason: "Cannot confirm bash command without UI" };
   }
 
-  const commands = getAllCommands(command);
+  let commands = getAllCommands(command);
+  commands = Array.from(new Set(commands));
 
   const confirmed = await ctx.ui.confirm(
     "Confirm Bash Command",
@@ -81,8 +82,6 @@ async function confirmBashCommand(
     ctx.abort();
     return { block: true, reason: "User denied bash command" };
   }
-
-  return undefined;
 }
 
 /**
@@ -116,8 +115,6 @@ const spfyExtension = (pi: ExtensionAPI) => {
     if (isToolCallEventType("bash", event)) {
       return confirmBashCommand(event.input.command, ctx);
     }
-
-    return undefined;
   });
 };
 
