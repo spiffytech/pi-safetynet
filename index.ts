@@ -57,6 +57,31 @@ function getAllCommands(command: string): string[] {
   return extractCommandNames(ast);
 }
 
+/**
+ * Shows a confirmation dialog with options and returns the result.
+ * Options should include "Allow once", "Allow always", and "Block".
+ * Returns a binary allowed/block result plus whether "always" was selected.
+ */
+async function confirmWithOptions(
+  ctx: ExtensionContext,
+  message: string,
+  options: string[] = ["Allow once", "Allow always", "Block"],
+): Promise<{ allowed: boolean; always: boolean }> {
+  if (!ctx.hasUI) {
+    return { allowed: false, always: false };
+  }
+
+  const choice = await ctx.ui.select(message, options);
+
+  if (choice === undefined || choice === options[options.length - 1]) {
+    // User cancelled or chose the last option (Block)
+    return { allowed: false, always: false };
+  }
+
+  const always = choice === options[1]; // "Allow always" is typically second
+  return { allowed: true, always };
+}
+
 // =============================================================================
 // Bash Confirmation
 // =============================================================================
@@ -65,22 +90,23 @@ async function confirmBashCommand(
   command: string,
   ctx: ExtensionContext,
 ): Promise<{ block: true; reason: string } | undefined> {
-  if (!ctx.hasUI) {
-    return { block: true, reason: "Cannot confirm bash command without UI" };
-  }
-
   let commands = getAllCommands(command);
   commands = Array.from(new Set(commands));
 
-  const confirmed = await ctx.ui.confirm(
-    "Confirm Bash Command",
+  const result = await confirmWithOptions(
+    ctx,
     `Command will execute: ${command}\n\nParsed commands: ${commands.join(", ")}`,
   );
 
-  if (!confirmed) {
+  if (!result.allowed) {
     ctx.ui.notify("Bash command blocked by user", "warning");
     ctx.abort();
     return { block: true, reason: "User denied bash command" };
+  }
+
+  if (result.always) {
+    // TODO: Store in state for persistence
+    ctx.ui.notify("Command added to allowlist (not persisted yet)", "info");
   }
 }
 
@@ -97,17 +123,22 @@ const spfyExtension = (pi: ExtensionAPI) => {
       //  return undefined;
       //}
 
-      const confirmed = await ctx.ui.confirm(
-        "Confirm File Edit",
+      const result = await confirmWithOptions(
+        ctx,
         "Do you want to apply this edit?",
       );
 
-      if (!confirmed) {
+      if (!result.allowed) {
         if (ctx.hasUI) {
           ctx.ui.notify(`Blocked write to protected path: ${path}`, "warning");
         }
         ctx.abort();
         return { block: true, reason: `Path "${path}" is protected` };
+      }
+
+      if (result.always) {
+        // TODO: Store in state for persistence
+        ctx.ui.notify("Path added to allowlist (not persisted yet)", "info");
       }
     }
 
