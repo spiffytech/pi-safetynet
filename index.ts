@@ -119,9 +119,16 @@ const spfyExtension = (pi: ExtensionAPI) => {
     if (event.toolName === "write" || event.toolName === "edit") {
       const path = event.input.path as string;
 
-      //if (!isProtectedPath(path)) {
-      //  return undefined;
-      //}
+      // Skip confirmation for edits where oldText doesn't match (app will retry)
+      if (event.toolName === "edit") {
+        const fs = await import("fs/promises");
+        const oldText = event.input.oldText as string;
+        const content = await fs.readFile(path, "utf-8");
+        if (!content.includes(oldText)) {
+          ctx.ui.notify("Edit conflict - skipping confirmation", "warning");
+          return;
+        }
+      }
 
       const result = await confirmWithOptions(
         ctx,
