@@ -89,9 +89,13 @@ async function confirmWithOptions(
 async function confirmBashCommand(
   command: string,
   ctx: ExtensionContext,
+  alwaysAllow: string[],
+  allowCommands: (commands: string[]) => void,
 ): Promise<{ block: true; reason: string } | undefined> {
   let commands = getAllCommands(command);
   commands = Array.from(new Set(commands));
+  commands = commands.filter((command) => !alwaysAllow.includes(command));
+  if (commands.length === 0) return;
 
   const result = await confirmWithOptions(
     ctx,
@@ -105,8 +109,7 @@ async function confirmBashCommand(
   }
 
   if (result.always) {
-    // TODO: Store in state for persistence
-    ctx.ui.notify("Command added to allowlist (not persisted yet)", "info");
+    allowCommands(commands);
   }
 }
 
@@ -114,10 +117,36 @@ async function confirmBashCommand(
  * Extension entrypoint
  */
 const spfyExtension = (pi: ExtensionAPI) => {
+  let allowedPaths: string[] = [];
+  let allowedCommands: string[] = [];
+
+  const reconstruct = (ctx: ExtensionContext) => {
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (
+        entry.type === "custom" &&
+        entry.customType === "spfy:alwaysAllow:files"
+      ) {
+        allowedPaths = entry.data as typeof allowedPaths;
+      }
+      if (
+        entry.type === "custom" &&
+        entry.customType === "spfy:alwaysAllow:commands"
+      ) {
+        allowedCommands = entry.data as typeof allowedCommands;
+      }
+    }
+  };
+
+  pi.on("session_start", async (_event, ctx) => reconstruct(ctx));
+  pi.on("session_tree", async (_event, ctx) => reconstruct(ctx));
+  pi.on("session_fork", async (_event, ctx) => reconstruct(ctx));
+
   pi.on("tool_call", async (event, ctx) => {
     // Path protection for write/edit tools
     if (event.toolName === "write" || event.toolName === "edit") {
       const path = event.input.path as string;
+
+      if (allowedPaths.includes(path)) return;
 
       // Skip confirmation for edits where oldText doesn't match (app will retry)
       if (event.toolName === "edit") {
@@ -144,14 +173,22 @@ const spfyExtension = (pi: ExtensionAPI) => {
       }
 
       if (result.always) {
-        // TODO: Store in state for persistence
-        ctx.ui.notify("Path added to allowlist (not persisted yet)", "info");
+        allowedPaths.push(path);
+        pi.appendEntry("spfy:alwaysAllow:files", allowedPaths);
       }
     }
 
     // Bash command confirmation
     if (isToolCallEventType("bash", event)) {
-      return confirmBashCommand(event.input.command, ctx);
+      return confirmBashCommand(
+        event.input.command,
+        ctx,
+        allowedCommands,
+        (commands) => {
+          allowedCommands.push(...commands);
+          pi.appendEntry("spfy:alwaysAllow:commands", allowedCommands);
+        },
+      );
     }
   });
 };
