@@ -1,4 +1,5 @@
 import { parse, type SimpleCommand } from "@aliou/sh";
+import type { Statement as ShellStatement } from "@aliou/sh";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -58,6 +59,26 @@ function getAllCommands(command: string): string[] {
 }
 
 /**
+ * Detects >, >>, etc in shell commands
+ */
+function hasRedirects(stmt: ShellStatement): boolean {
+  const cmd = stmt.command;
+  if ("redirects" in cmd && cmd.redirects?.length) return true;
+  if (cmd.type === "Subshell" || cmd.type === "Block")
+    return cmd.body.some(hasRedirects);
+  if (cmd.type === "IfClause")
+    return [...cmd.cond, ...cmd.then, ...(cmd.else ?? [])].some(hasRedirects);
+  if (cmd.type === "WhileClause" || cmd.type === "ForClause")
+    return [...cmd.cond, ...cmd.body].some(hasRedirects);
+  if (cmd.type === "CaseClause")
+    return cmd.items.flatMap((i) => i.body).some(hasRedirects);
+  if (cmd.type === "Pipeline") return cmd.commands.some(hasRedirects);
+  if (cmd.type === "Logical")
+    return hasRedirects(cmd.left) || hasRedirects(cmd.right);
+  return false;
+}
+
+/**
  * Shows a confirmation dialog with options and returns the result.
  * Options should include "Allow once", "Allow always", and "Block".
  * Returns a binary allowed/block result plus whether "always" was selected.
@@ -92,6 +113,23 @@ async function confirmBashCommand(
   alwaysAllow: string[],
   allowCommands: (commands: string[]) => void,
 ): Promise<{ block: true; reason: string } | undefined> {
+  // Check for redirects first
+  const { ast } = parse(command);
+  for (const stmt of ast.body) {
+    if (hasRedirects(stmt)) {
+      const result = await confirmWithOptions(
+        ctx,
+        `Command includes redirection: ${command}`,
+      );
+      if (!result.allowed) {
+        ctx.ui.notify("Bash command blocked by user", "warning");
+        ctx.abort();
+        return { block: true, reason: "User denied bash command" };
+      }
+      break;
+    }
+  }
+
   let commands = getAllCommands(command);
   commands = Array.from(new Set(commands));
   commands = commands.filter((command) => !alwaysAllow.includes(command));
@@ -118,7 +156,76 @@ async function confirmBashCommand(
  */
 const spfyExtension = (pi: ExtensionAPI) => {
   let allowedPaths: string[] = [];
-  let allowedCommands: string[] = [];
+  let allowedCommands: string[] = [
+    // Navigation and path
+    "pwd",
+    "cd",
+    "which",
+    "type",
+    "readlink",
+    "realpath",
+    // File listing and metadata
+    "ls",
+    "file",
+    "stat",
+    "du",
+    "df",
+    "tree",
+    // File reading
+    "cat",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "bat",
+    // Search
+    "grep",
+    "rg",
+    "find",
+    "locate",
+    // Text processing (read-only)
+    "cut",
+    "sort",
+    "uniq",
+    "wc",
+    "tr",
+    "rev",
+    "tac",
+    // Environment and info
+    "echo",
+    "printenv",
+    "env",
+    "uname",
+    "hostname",
+    "whoami",
+    "id",
+    "groups",
+    "date",
+    "cal",
+    "uptime",
+    "man",
+    "info",
+    "help",
+    // Archive inspection
+    "tar",
+    "unzip",
+    "gunzip",
+    "zcat",
+    "bzcat",
+    "xzcat",
+    // Network (diagnostic)
+    "ping",
+    "dig",
+    "nslookup",
+    "host",
+    "whois",
+    // Process info
+    "ps",
+    "pgrep",
+    "top",
+    "htop",
+    "lsof",
+  ];
 
   const reconstruct = (ctx: ExtensionContext) => {
     for (const entry of ctx.sessionManager.getBranch()) {
@@ -166,10 +273,10 @@ const spfyExtension = (pi: ExtensionAPI) => {
 
       if (!result.allowed) {
         if (ctx.hasUI) {
-          ctx.ui.notify(`Blocked write to protected path: ${path}`, "warning");
+          ctx.ui.notify(`User denied write to ${path}`, "warning");
         }
         ctx.abort();
-        return { block: true, reason: `Path "${path}" is protected` };
+        return { block: true, reason: `User denied write to "${path}"` };
       }
 
       if (result.always) {
