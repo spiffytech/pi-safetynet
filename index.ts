@@ -59,22 +59,38 @@ function getAllCommands(command: string): string[] {
 }
 
 /**
- * Detects >, >>, etc in shell commands
+ * Detects >, >>, <, etc in shell commands.
+ * Ignores fd duplication like 2>&1 (stderr to stdout).
  */
-function hasRedirects(stmt: ShellStatement): boolean {
+function hasFileRedirects(stmt: ShellStatement): boolean {
   const cmd = stmt.command;
-  if ("redirects" in cmd && cmd.redirects?.length) return true;
+
+  // Check for actual file redirects (not 2>&1 style fd redirects)
+  if ("redirects" in cmd && cmd.redirects?.length) {
+    for (const redirect of cmd.redirects) {
+      // fd redirection like 2>&1 doesn't have a 'file' property
+      // file redirections like > file have a 'file' property
+      if (
+        redirect.type === "Redirect" &&
+        "file" in redirect &&
+        redirect.file != null
+      ) {
+        return true;
+      }
+    }
+  }
+
   if (cmd.type === "Subshell" || cmd.type === "Block")
-    return cmd.body.some(hasRedirects);
+    return cmd.body.some(hasFileRedirects);
   if (cmd.type === "IfClause")
-    return [...cmd.cond, ...cmd.then, ...(cmd.else ?? [])].some(hasRedirects);
+    return [...cmd.cond, ...cmd.then, ...(cmd.else ?? [])].some(hasFileRedirects);
   if (cmd.type === "WhileClause" || cmd.type === "ForClause")
-    return [...cmd.cond, ...cmd.body].some(hasRedirects);
+    return [...cmd.cond, ...cmd.body].some(hasFileRedirects);
   if (cmd.type === "CaseClause")
-    return cmd.items.flatMap((i) => i.body).some(hasRedirects);
-  if (cmd.type === "Pipeline") return cmd.commands.some(hasRedirects);
+    return cmd.items.flatMap((i: { body: ShellStatement[] }) => i.body).some(hasFileRedirects);
+  if (cmd.type === "Pipeline") return cmd.commands.some(hasFileRedirects);
   if (cmd.type === "Logical")
-    return hasRedirects(cmd.left) || hasRedirects(cmd.right);
+    return hasFileRedirects(cmd.left) || hasFileRedirects(cmd.right);
   return false;
 }
 
@@ -113,10 +129,10 @@ async function confirmBashCommand(
   alwaysAllow: string[],
   allowCommands: (commands: string[]) => void,
 ): Promise<{ block: true; reason: string } | undefined> {
-  // Check for redirects first
+  // Check for file redirects first (ignore 2>&1 style fd redirects)
   const { ast } = parse(command);
   for (const stmt of ast.body) {
-    if (hasRedirects(stmt)) {
+    if (hasFileRedirects(stmt)) {
       const result = await confirmWithOptions(
         ctx,
         `Command includes redirection: ${command}`,
@@ -181,7 +197,6 @@ const spfyExtension = (pi: ExtensionAPI) => {
     // Search
     "grep",
     "rg",
-    "find",
     "locate",
     // Text processing (read-only)
     "cut",
