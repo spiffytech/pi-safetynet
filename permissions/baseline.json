@@ -65,7 +65,7 @@
     { "permission": "bash", "pattern": "printenv *", "action": "allow" },
     { "permission": "bash", "pattern": "node -e *", "action": "allow" },
     { "permission": "bash", "pattern": "bun -e *", "action": "allow" },
-    { "permission": "read", "pattern": "**", "action": "allow" },
+    { "permission": "read", "pattern": "**", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "edit", "pattern": "**", "action": "ask" }
   ]
 }

@@ -16,30 +16,23 @@ export function matchesPattern(
   if (permission === "bash" || permission === "*") {
     return bashPatternToRegex(pattern).test(target);
   }
-  return picomatch(pattern)(target);
+  return picomatch(pattern, { dot: true })(target);
 }
 
-export function getActionForProfile(
+function actionForProfile(
   action: PermissionAction,
   modes: ProfileName[] | undefined,
   profile: ProfileName,
-): PermissionAction {
-  if (action === "deny" && (!modes || modes.length === 0)) {
-    return "deny";
-  }
-
-  if (action === "allow" && (!modes || modes.length === 0)) {
-    return profile === "plan" ? "deny" : "allow";
-  }
-
-  if (modes && modes.length > 0) {
-    if (modes.includes(profile)) return action;
-    if (action === "allow") return "deny";
+): PermissionAction | null {
+  if (!modes || modes.length === 0) {
     if (action === "deny") return "deny";
-    if (action === "ask") return profile === "plan" ? "deny" : "ask";
+    if (action === "allow") return profile === "plan" ? "deny" : "allow";
+    return action;
   }
 
-  return action;
+  if (modes.includes(profile)) return action;
+
+  return null;
 }
 
 export interface EvaluateResult {
@@ -59,12 +52,13 @@ export function evaluatePermission(
     return matchesPattern(r.permission, r.pattern, target);
   });
 
-  const last = matching[matching.length - 1];
-
-  if (!last) {
-    return { action: profile === "plan" ? "deny" : "ask" };
+  for (let i = matching.length - 1; i >= 0; i--) {
+    const rule = matching[i]!;
+    const effectiveAction = actionForProfile(rule.action, rule.modes, profile);
+    if (effectiveAction !== null) {
+      return { action: effectiveAction, matchedRule: rule };
+    }
   }
 
-  const effectiveAction = getActionForProfile(last.action, last.modes, profile);
-  return { action: effectiveAction, matchedRule: last };
+  return { action: profile === "plan" ? "deny" : "ask" };
 }
