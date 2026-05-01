@@ -3,10 +3,23 @@ import { evaluatePermission } from "./permissions/ruleset.ts";
 import { parseCommand, isHazardousFile } from "./bash-parser.ts";
 import { isExternalPath, normalizePathForMatching, findProjectRoot } from "./project.ts";
 
+/** Device files that are always safe to use as redirect targets. */
+const SAFE_DEVICE_FILES = new Set([
+  "/dev/null",
+  "/dev/zero",
+  "/dev/urandom",
+  "/dev/random",
+  "/dev/stdin",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/dev/full",
+]);
+
 export interface PermissionCheck {
   action: PermissionAction;
   reason?: string;
   unapproved?: string[];
+  redirectTargets?: Array<{ permission: "read" | "edit"; path: string }>;
 }
 
 export function checkFileTarget(
@@ -18,6 +31,10 @@ export function checkFileTarget(
 ): PermissionCheck {
   if (isHazardousFile(filePath)) {
     return { action: "deny", reason: "Hazardous file (e.g., .env, .ssh, credentials)" };
+  }
+
+  if (SAFE_DEVICE_FILES.has(filePath)) {
+    return { action: "allow" };
   }
 
   const root = projectRoot ?? findProjectRoot(process.cwd());
@@ -50,6 +67,7 @@ export function checkBashPermission(
   }
 
   const unapproved: string[] = [];
+  const redirectTargets: Array<{ permission: "read" | "edit"; path: string }> = [];
   let worstAction: PermissionAction = "allow";
 
   for (const sub of parsed.subcommands) {
@@ -68,10 +86,12 @@ export function checkBashPermission(
     const targetResult = checkFileTarget(target.path, perm, profile, rules, projectRoot);
     if (targetResult.action === "deny") {
       worstAction = "deny";
-    } else if (targetResult.action === "ask" && worstAction === "allow") {
-      worstAction = "ask";
+      redirectTargets.push({ permission: perm, path: target.path });
+    } else if (targetResult.action === "ask") {
+      if (worstAction !== "deny") worstAction = "ask";
+      redirectTargets.push({ permission: perm, path: target.path });
     }
   }
 
-  return { action: worstAction, unapproved };
+  return { action: worstAction, unapproved, redirectTargets };
 }
