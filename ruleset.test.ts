@@ -7,7 +7,7 @@ import {
 } from "./permissions/ruleset.ts";
 import type { Rule, Ruleset, ProfileName } from "./types.ts";
 import baselineData from "./permissions/baseline.json" with { type: "json" };
-import { checkBashPermission } from "./check.ts";
+import { checkBashPermission, checkFileTarget } from "./check.ts";
 
 const BASELINE: Ruleset = baselineData.rules as Ruleset;
 const ALL_MODES: ProfileName[] = ["build", "plan"];
@@ -152,6 +152,24 @@ describe("evaluatePermission", () => {
       assert.equal(evaluatePermission("bash", "sed -n", "build", BASELINE).action, "allow");
       assert.equal(evaluatePermission("bash", "npm install", "build", BASELINE).action, "ask");
       assert.equal(evaluatePermission("bash", "git config --get", "build", BASELINE).action, "allow");
+    });
+
+    it("printf is allowed by baseline", () => {
+      assert.equal(evaluatePermission("bash", "printf '\\nPackage:\\n'", "build", BASELINE).action, "allow");
+    });
+
+    it("[ test is allowed by baseline", () => {
+      assert.equal(evaluatePermission("bash", "[ -f package.json ]", "build", BASELINE).action, "allow");
+    });
+
+    it("[[ test is allowed by baseline", () => {
+      assert.equal(evaluatePermission("bash", "[[ -f package.json ]]", "build", BASELINE).action, "allow");
+    });
+
+    it("true/false/yes are allowed by baseline", () => {
+      assert.equal(evaluatePermission("bash", "true", "build", BASELINE).action, "allow");
+      assert.equal(evaluatePermission("bash", "false", "build", BASELINE).action, "allow");
+      assert.equal(evaluatePermission("bash", "yes", "build", BASELINE).action, "allow");
     });
 
     it("ask rules for file-writing commands", () => {
@@ -464,6 +482,118 @@ describe("composition: bash permission end-to-end", () => {
       const result = checkBashPermission("ls | python3", "build", BASELINE);
       assert.equal(result.action, "ask");
       assert.ok(result.unapproved?.some((u) => u.startsWith("python3")));
+    });
+
+    it("[ -f path ] triggers read permission check on the path", () => {
+      const result = checkBashPermission("[ -f /etc/passwd ]", "build", BASELINE, "/project");
+      assert.ok(result.redirectTargets?.some((rt) => rt.path === "/etc/passwd" && rt.permission === "read"));
+    });
+
+    it("[[ -f path ]] triggers read permission check on the path", () => {
+      const result = checkBashPermission("[[ -f /etc/passwd ]]", "build", BASELINE, "/project");
+      assert.ok(result.redirectTargets?.some((rt) => rt.path === "/etc/passwd" && rt.permission === "read"));
+    });
+  });
+
+  describe("recheck uses fresh rules (stale closure bug regression)", () => {
+    it("stale rules snapshot does not reflect newly added allow rule", () => {
+      const command = "npm install";
+      const staleRules = BASELINE;
+      const staleRecheck = () => checkBashPermission(command, "build", staleRules);
+
+      assert.equal(staleRecheck().action, "ask");
+
+      const updatedRules = [...BASELINE, { permission: "bash" as const, pattern: "npm install *", action: "allow" as const, modes: ALL_MODES }];
+      const freshRecheck = () => checkBashPermission(command, "build", updatedRules);
+
+      assert.equal(staleRecheck().action, "ask");
+      assert.equal(freshRecheck().action, "allow");
+    });
+
+    it("stale file rules snapshot does not reflect newly added allow rule", () => {
+      const filePath = "src/new-feature.ts";
+      const staleRules = BASELINE;
+      const freshRules = [...BASELINE, { permission: "edit" as const, pattern: "src/new-feature.ts", action: "allow" as const, modes: ALL_MODES }];
+
+      assert.equal(checkFileTarget(filePath, "edit", "build", staleRules).action, "ask");
+      assert.equal(checkFileTarget(filePath, "edit", "build", freshRules).action, "allow");
+    });
+  });
+
+  describe("file path normalization mismatch", () => {
+    it("absolute path pattern does not match relative target via picomatch", () => {
+      assert.equal(checkFileTarget("/home/user/project/src/foo.ts", "edit", "build", [
+        { permission: "edit", pattern: "/home/user/project/src/foo.ts", action: "allow", modes: ALL_MODES },
+        { permission: "edit", pattern: "**", action: "ask", modes: ALL_MODES },
+      ], "/home/user/project").action, "ask");
+    });
+
+    it("relative path pattern matches relative target via picomatch", () => {
+      const rules: Ruleset = [
+        { permission: "edit", pattern: "**", action: "ask", modes: ALL_MODES },
+        { permission: "edit", pattern: "src/foo.ts", action: "allow", modes: ALL_MODES },
+      ];
+      assert.equal(checkFileTarget("src/foo.ts", "edit", "build", rules).action, "allow");
+    });
+  });
+
+  describe("redirect targets tracking", () => {
+    it("populates redirectTargets for output redirect needing approval", () => {
+      const result = checkBashPermission("ls > out.txt", "build", BASELINE);
+      assert.equal(result.action, "ask");
+      assert.ok(result.redirectTargets?.some((rt) => rt.permission === "edit" && rt.path === "out.txt"));
+    });
+
+    it("populates redirectTargets for input redirect needing approval", () => {
+      const result = checkBashPermission("cat < /tmp/external.txt", "build", BASELINE, "/project");
+      assert.equal(result.action, "ask");
+      assert.ok(result.redirectTargets?.some((rt) => rt.permission === "read"));
+    });
+
+    it("no redirectTargets when all redirects are allowed", () => {
+      const result = checkBashPermission("cat file.txt", "build", BASELINE);
+      assert.equal(result.action, "allow");
+      assert.equal(result.redirectTargets?.length ?? 0, 0);
+    });
+
+    it("bash allow rule + edit allow rule for redirect allows the full command", () => {
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "bash", pattern: "ls *", action: "allow", modes: ALL_MODES },
+        { permission: "edit", pattern: "out.txt", action: "allow", modes: ALL_MODES },
+      ];
+      assert.equal(checkBashPermission("ls > out.txt", "build", rules).action, "allow");
+    });
+
+    it("redirect to /dev/null does not require approval", () => {
+      const result = checkBashPermission("ls > /dev/null", "build", BASELINE);
+      assert.equal(result.action, "allow");
+      assert.equal(result.redirectTargets?.length ?? 0, 0);
+    });
+
+    it("redirect from /dev/null does not require approval", () => {
+      const result = checkBashPermission("cat < /dev/null", "build", BASELINE);
+      assert.equal(result.action, "allow");
+      assert.equal(result.redirectTargets?.length ?? 0, 0);
+    });
+
+    it("redirect to /dev/zero does not require approval", () => {
+      const result = checkBashPermission("dd if=/dev/zero of=/dev/null bs=1 count=0", "build", BASELINE);
+      // dd is ask by default; /dev/null and /dev/zero redirects should not add extra ask
+      assert.ok(!result.redirectTargets?.some((rt) => rt.path === "/dev/null" || rt.path === "/dev/zero"));
+    });
+
+    it("checkFileTarget allows /dev/null directly", () => {
+      assert.equal(checkFileTarget("/dev/null", "edit", "build", BASELINE).action, "allow");
+      assert.equal(checkFileTarget("/dev/null", "read", "build", BASELINE).action, "allow");
+    });
+
+    it("checkFileTarget allows /dev/urandom directly", () => {
+      assert.equal(checkFileTarget("/dev/urandom", "read", "build", BASELINE).action, "allow");
+    });
+
+    it("checkFileTarget still asks for non-safe /dev paths", () => {
+      assert.equal(checkFileTarget("/dev/sda1", "edit", "build", BASELINE).action, "ask");
     });
   });
 });
