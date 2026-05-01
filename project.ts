@@ -21,11 +21,6 @@ export function isExternalPath(filePath: string, projectRoot: string): boolean {
   return !resolvedPath.startsWith(absRoot + "/") && resolvedPath !== absRoot;
 }
 
-export function getApprovalsFilePath(cwd: string): string {
-  const root = findProjectRoot(cwd);
-  return join(root, ".pi", "extensions", "spfy", "approvals.json");
-}
-
 export function normalizePathForMatching(filePath: string, projectRoot: string): string {
   let normalized = filePath;
 

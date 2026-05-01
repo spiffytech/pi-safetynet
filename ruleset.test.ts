@@ -7,6 +7,7 @@ import {
 } from "./permissions/ruleset.ts";
 import type { Rule, Ruleset, ProfileName } from "./types.ts";
 import baselineData from "./permissions/baseline.json" with { type: "json" };
+import { checkBashPermission } from "./check.ts";
 
 const BASELINE: Ruleset = baselineData.rules as Ruleset;
 const ALL_MODES: ProfileName[] = ["build", "plan"];
@@ -122,114 +123,48 @@ describe("matchesPattern", () => {
 
 describe("evaluatePermission", () => {
   describe("with baseline rules", () => {
-    it("allows ls in build mode", () => {
-      const result = evaluatePermission("bash", "ls", "build", BASELINE);
-      assert.equal(result.action, "allow");
+    it("every baseline allow rule actually allows matching targets", () => {
+      for (const rule of BASELINE) {
+        if (rule.action !== "allow") continue;
+        const bare = rule.pattern.replace(/ \*$/, "");
+        const targets = bare === rule.pattern
+          ? [rule.pattern]
+          : [bare, `${bare} --arg`];
+        for (const target of targets) {
+          for (const mode of rule.modes) {
+            assert.equal(
+              evaluatePermission(rule.permission as never, target, mode, BASELINE).action,
+              "allow",
+              `${rule.permission}:${rule.pattern} should allow "${target}" in ${mode}`,
+            );
+          }
+        }
+      }
     });
 
-    it("allows cat in build mode", () => {
-      const result = evaluatePermission("bash", "cat", "build", BASELINE);
-      assert.equal(result.action, "allow");
+    it("returns ask for unknown bash commands (catch-all * rule)", () => {
+      assert.equal(evaluatePermission("bash", "hostname", "build", BASELINE).action, "ask");
+      assert.equal(evaluatePermission("bash", "hostname", "plan", BASELINE).action, "ask");
+      assert.equal(evaluatePermission("bash", "python3", "build", BASELINE).action, "ask");
     });
 
-    it("allows git status in build mode", () => {
-      const result = evaluatePermission("bash", "git status", "build", BASELINE);
-      assert.equal(result.action, "allow");
+    it("multi-word patterns: sed -n allowed, npm install asked, git config --get allowed", () => {
+      assert.equal(evaluatePermission("bash", "sed -n", "build", BASELINE).action, "allow");
+      assert.equal(evaluatePermission("bash", "npm install", "build", BASELINE).action, "ask");
+      assert.equal(evaluatePermission("bash", "git config --get", "build", BASELINE).action, "allow");
     });
 
-    it("allows pwd in build mode", () => {
-      const result = evaluatePermission("bash", "pwd", "build", BASELINE);
-      assert.equal(result.action, "allow");
+    it("ask rules for file-writing commands", () => {
+      assert.equal(evaluatePermission("bash", "tee out.txt", "build", BASELINE).action, "ask");
+      assert.equal(evaluatePermission("bash", "cp src dst", "build", BASELINE).action, "ask");
+      assert.equal(evaluatePermission("bash", "mv old new", "build", BASELINE).action, "ask");
     });
 
-    it("allows echo in build mode", () => {
-      const result = evaluatePermission("bash", "echo", "build", BASELINE);
-      assert.equal(result.action, "allow");
-    });
-
-    it("allows whoami in build mode", () => {
-      const result = evaluatePermission("bash", "whoami", "build", BASELINE);
-      assert.equal(result.action, "allow");
-    });
-
-    it("allows date in build mode", () => {
-      const result = evaluatePermission("bash", "date", "build", BASELINE);
-      assert.equal(result.action, "allow");
-    });
-
-    it("returns ask for hostname in build mode", () => {
-      const result = evaluatePermission("bash", "hostname", "build", BASELINE);
-      assert.equal(result.action, "ask");
-    });
-
-    it("returns ask for unknown commands in build mode", () => {
-      const result = evaluatePermission("bash", "python3", "build", BASELINE);
-      assert.equal(result.action, "ask");
-    });
-
-    it("returns ask for npm install in build mode", () => {
-      const result = evaluatePermission("bash", "npm install", "build", BASELINE);
-      assert.equal(result.action, "ask");
-    });
-
-    it("allows ls in plan mode (baseline allows with modes: build+plan)", () => {
-      const result = evaluatePermission("bash", "ls", "plan", BASELINE);
-      assert.equal(result.action, "allow");
-    });
-
-    it("allows cat in plan mode", () => {
-      const result = evaluatePermission("bash", "cat", "plan", BASELINE);
-      assert.equal(result.action, "allow");
-    });
-
-    it("allows git status in plan mode", () => {
-      const result = evaluatePermission("bash", "git status", "plan", BASELINE);
-      assert.equal(result.action, "allow");
-    });
-
-    it("returns ask for unknown commands in plan mode (ask-by-default)", () => {
-      const result = evaluatePermission("bash", "hostname", "plan", BASELINE);
-      assert.equal(result.action, "ask");
-    });
-
-    it("returns ask for edit in plan mode (ask-by-default)", () => {
-      const result = evaluatePermission("edit", "src/main.ts", "plan", BASELINE);
-      assert.equal(result.action, "ask");
-    });
-
-    it("returns ask for edit in build mode", () => {
-      const result = evaluatePermission("edit", "src/main.ts", "build", BASELINE);
-      assert.equal(result.action, "ask");
-    });
-
-    it("allows read in build mode", () => {
-      const result = evaluatePermission("read", "src/main.ts", "build", BASELINE);
-      assert.equal(result.action, "allow");
-    });
-
-    it("allows read in plan mode", () => {
-      const result = evaluatePermission("read", "src/main.ts", "plan", BASELINE);
-      assert.equal(result.action, "allow");
-    });
-
-    it("returns ask for tee in build mode (file-writing command)", () => {
-      const result = evaluatePermission("bash", "tee out.txt", "build", BASELINE);
-      assert.equal(result.action, "ask");
-    });
-
-    it("returns ask for tee in plan mode", () => {
-      const result = evaluatePermission("bash", "tee out.txt", "plan", BASELINE);
-      assert.equal(result.action, "ask");
-    });
-
-    it("returns ask for cp in build mode (file-writing command)", () => {
-      const result = evaluatePermission("bash", "cp src dst", "build", BASELINE);
-      assert.equal(result.action, "ask");
-    });
-
-    it("returns ask for mv in build mode (file-writing command)", () => {
-      const result = evaluatePermission("bash", "mv old new", "build", BASELINE);
-      assert.equal(result.action, "ask");
+    it("file permissions: edit asks, read allows", () => {
+      assert.equal(evaluatePermission("edit", "src/main.ts", "build", BASELINE).action, "ask");
+      assert.equal(evaluatePermission("edit", "src/main.ts", "plan", BASELINE).action, "ask");
+      assert.equal(evaluatePermission("read", "src/main.ts", "build", BASELINE).action, "allow");
+      assert.equal(evaluatePermission("read", "src/main.ts", "plan", BASELINE).action, "allow");
     });
   });
 
@@ -404,6 +339,131 @@ describe("evaluatePermission", () => {
       const rules: Ruleset = [];
       const result = evaluatePermission("bash", "anything", "build", rules);
       assert.equal(result.matchedRule, undefined);
+    });
+  });
+});
+
+describe("composition: bash permission end-to-end", () => {
+  describe("catastrophic commands short-circuit to deny", () => {
+    it("denies catastrophic commands regardless of profile", () => {
+      assert.equal(checkBashPermission("rm -rf /", "build", BASELINE).action, "deny");
+      assert.equal(checkBashPermission("rm -rf /", "plan", BASELINE).action, "deny");
+    });
+
+    it("denies rm -rf /tmp in build mode", () => {
+      assert.equal(checkBashPermission("rm -rf /tmp", "build", BASELINE).action, "deny");
+    });
+
+    it("denies chown on protected dir", () => {
+      assert.equal(checkBashPermission("chown root /etc", "build", BASELINE).action, "deny");
+    });
+
+    it("denies rm with double-quoted protected dir", () => {
+      assert.equal(checkBashPermission('rm "/etc"', "build", BASELINE).action, "deny");
+      assert.equal(checkBashPermission('rm "/usr"', "plan", BASELINE).action, "deny");
+    });
+  });
+
+  describe("subcommand extraction: pipes and sudo", () => {
+    it("allows piped commands when both are allowlisted", () => {
+      assert.equal(checkBashPermission("ls | grep foo", "build", BASELINE).action, "allow");
+    });
+
+    it("returns ask for xargs in pipeline", () => {
+      assert.equal(checkBashPermission("find . -name '*.ts' | xargs rm", "build", BASELINE).action, "ask");
+    });
+
+    it("returns ask for sudo rm file.txt in build mode", () => {
+      assert.equal(checkBashPermission("sudo rm file.txt", "build", BASELINE).action, "ask");
+    });
+
+    it("returns ask for sudo ls in build mode (sudo is never allowlisted)", () => {
+      assert.equal(checkBashPermission("sudo ls", "build", BASELINE).action, "ask");
+    });
+
+    it("denies sudo rm -rf / regardless of profile", () => {
+      assert.equal(checkBashPermission("sudo rm -rf /", "build", BASELINE).action, "deny");
+      assert.equal(checkBashPermission("sudo rm -rf /", "plan", BASELINE).action, "deny");
+    });
+
+    it("denies sudo chown on protected dir", () => {
+      assert.equal(checkBashPermission("sudo chown root /etc", "build", BASELINE).action, "deny");
+    });
+
+    it("denies sudo chmod on protected dir", () => {
+      assert.equal(checkBashPermission("sudo chmod 777 /usr", "build", BASELINE).action, "deny");
+    });
+
+    it("denies sudo with flags before command (sudo -u root rm /etc)", () => {
+      assert.equal(checkBashPermission("sudo -u root rm /etc", "build", BASELINE).action, "deny");
+    });
+
+    it("denies sudo -E chown on protected dir", () => {
+      assert.equal(checkBashPermission("sudo -E chown root /usr", "build", BASELINE).action, "deny");
+    });
+  });
+
+  describe("find -exec/-delete composition", () => {
+    it("returns ask for find -delete in build mode", () => {
+      assert.equal(checkBashPermission("find . -delete", "build", BASELINE).action, "ask");
+    });
+
+    it("returns ask for find -exec rm in build mode", () => {
+      assert.equal(checkBashPermission('find . -name "*.ts" -exec rm {} \\;', "build", BASELINE).action, "ask");
+    });
+
+    it("returns ask for find -execdir even with read-only subcmd", () => {
+      assert.equal(checkBashPermission('find . -execdir ls {} \\;', "build", BASELINE).action, "ask");
+    });
+
+    it("returns ask for find -delete in plan mode", () => {
+      assert.equal(checkBashPermission("find . -delete", "plan", BASELINE).action, "ask");
+    });
+  });
+
+  describe("redirect targets go through file permissions", () => {
+    it("denies redirect to hazardous file", () => {
+      assert.equal(checkBashPermission("echo hi >> .env", "build", BASELINE).action, "deny");
+    });
+
+    it("returns ask for redirect to external path", () => {
+      assert.equal(checkBashPermission("ls > /etc/passwd", "build", BASELINE, "/project").action, "ask");
+    });
+
+    it("returns ask for redirect to internal file (edit catch-all)", () => {
+      assert.equal(checkBashPermission("ls > out.txt", "build", BASELINE).action, "ask");
+    });
+
+    it("denies redirect to .env with double-quoted path", () => {
+      assert.equal(checkBashPermission('echo hi >> ".env"', "build", BASELINE).action, "deny");
+    });
+
+    it("returns ask for redirect to external path with double quotes", () => {
+      assert.equal(checkBashPermission('echo hi > "/etc/passwd"', "build", BASELINE, "/project").action, "ask");
+    });
+
+    it("denies input redirect from hazardous file", () => {
+      assert.equal(checkBashPermission("sort < .env", "build", BASELINE).action, "deny");
+    });
+
+    it("returns ask for input redirect from external path", () => {
+      assert.equal(checkBashPermission("sort < /etc/passwd", "build", BASELINE, "/project").action, "ask");
+    });
+  });
+
+  describe("unapproved tracking", () => {
+    it("lists only unapproved subcommands", () => {
+      assert.deepEqual(checkBashPermission("hostname", "build", BASELINE).unapproved, ["hostname"]);
+    });
+
+    it("empty unapproved when all allowed", () => {
+      assert.deepEqual(checkBashPermission("ls -la", "build", BASELINE).unapproved, []);
+    });
+
+    it("mixed pipeline: allowed + unapproved", () => {
+      const result = checkBashPermission("ls | python3", "build", BASELINE);
+      assert.equal(result.action, "ask");
+      assert.ok(result.unapproved?.some((u) => u.startsWith("python3")));
     });
   });
 });

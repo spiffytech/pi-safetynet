@@ -11,21 +11,17 @@ export function setCurrentProfile(profile: ProfileName): void {
   currentProfile = profile;
 }
 
-interface ProfileConfig {
-  trustedProfileTransitions: ProfileName[];
-}
-
-const PROFILES: Record<ProfileName, ProfileConfig> = {
-  plan: { trustedProfileTransitions: [] },
-  build: { trustedProfileTransitions: ["plan"] },
-};
-
-export function getProfileConfig(profile: ProfileName): ProfileConfig {
-  return PROFILES[profile];
-}
-
 export function requiresApproval(from: ProfileName, to: ProfileName): boolean {
-  return !PROFILES[from].trustedProfileTransitions.includes(to);
+  return !(from === "build" && to === "plan");
+}
+
+export function getLatestCustomEntry<T>(ctx: ExtensionContext, customType: string): T | undefined {
+  const entries = ctx.sessionManager.getEntries();
+  return entries
+    .filter((e: { type: string; customType?: string }) =>
+      e.type === "custom" && e.customType === customType,
+    )
+    .pop() as T | undefined;
 }
 
 export function persistProfile(pi: ExtensionAPI): void {
@@ -35,17 +31,8 @@ export function persistProfile(pi: ExtensionAPI): void {
 }
 
 export function restoreProfile(ctx: ExtensionContext): void {
-  const entries = ctx.sessionManager.getEntries();
-  const profileEntry = entries
-    .filter(
-      (e: { type: string; customType?: string }) =>
-        e.type === "custom" && e.customType === "spfy:profile",
-    )
-    .pop() as { data?: { enabled?: ProfileName } } | undefined;
-
-  if (profileEntry?.data?.enabled) {
-    currentProfile = profileEntry.data.enabled;
-  }
+  const entry = getLatestCustomEntry<{ enabled?: ProfileName }>(ctx, "spfy:profile");
+  if (entry?.enabled) currentProfile = entry.enabled;
 }
 
 export function getProfileContextMessage(profile: ProfileName): string {
@@ -73,10 +60,8 @@ Commands are evaluated against the permission ruleset:
 To switch to plan mode, use the switchProfile tool with target "plan".`;
 }
 
-export function getToolsForProfile(profile: ProfileName): string[] {
-  return ["read", "edit", "write", "bash", "questionnaire", "switchProfile"];
-}
+const TOOLS = ["read", "edit", "write", "bash", "questionnaire", "switchProfile"];
 
-export function applyProfileTools(pi: ExtensionAPI, profile: ProfileName): void {
-  pi.setActiveTools(getToolsForProfile(profile));
+export function applyProfileTools(pi: ExtensionAPI, _profile: ProfileName): void {
+  pi.setActiveTools(TOOLS);
 }

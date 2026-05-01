@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getLatestCustomEntry } from "./index.ts";
 
 let planOnErrorEnabled = false;
 
@@ -20,17 +21,8 @@ export function togglePlanOnError(pi: ExtensionAPI): boolean {
 }
 
 export function restorePlanOnError(ctx: ExtensionContext): void {
-  const entries = ctx.sessionManager.getEntries();
-  const entry = entries
-    .filter(
-      (e: { type: string; customType?: string }) =>
-        e.type === "custom" && e.customType === "spfy:plan-on-error",
-    )
-    .pop() as { data?: { enabled?: boolean } } | undefined;
-
-  if (entry?.data?.enabled !== undefined) {
-    planOnErrorEnabled = entry.data.enabled;
-  }
+  const entry = getLatestCustomEntry<{ enabled?: boolean }>(ctx, "spfy:plan-on-error");
+  if (entry?.enabled !== undefined) planOnErrorEnabled = entry.enabled;
 }
 
 export function getPlanOnErrorInstruction(): string | null {
