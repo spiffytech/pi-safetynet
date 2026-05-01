@@ -99,6 +99,32 @@ describe("parseCommand", () => {
       assert.ok(r[0]!.startsWith("find ."));
     });
 
+    it("handles find with \\( \\) grouping", () => {
+      const r = parseCommand('find . \\( -name "*.ts" -o -name "*.js" \\)').subcommands;
+      assert.equal(r.length, 1);
+      assert.ok(r[0]!.startsWith("find ."));
+      assert.ok(r[0]!.includes("-name"));
+    });
+
+    it("handles find \\( \\) in pipeline", () => {
+      const r = parseCommand("find . \\( -name '*.md' \\) | sed 's#^#/##' | head -200").subcommands;
+      assert.equal(r.length, 3);
+      assert.ok(r[0]!.startsWith("find ."));
+      assert.ok(r[1]!.startsWith("sed"));
+      assert.ok(r[2]!.startsWith("head"));
+    });
+
+    it("handles nested \\( \\) in find", () => {
+      const r = parseCommand('find . \\( \\( -name "*.ts" \\) -o -name "*.js" \\)').subcommands;
+      assert.equal(r.length, 1);
+      assert.ok(r[0]!.startsWith("find ."));
+    });
+
+    it("handles find \\( \\) with -exec", () => {
+      const r = parseCommand('find . \\( -name "*.ts" \\) -exec rm {} \\;').subcommands;
+      assert.ok(r.includes("find:exec"));
+    });
+
     it("extracts sudo + underlying command", () => {
       assert.ok(parseCommand("sudo rm file").subcommands.some((c) => c === "sudo rm file"));
     });
@@ -111,6 +137,45 @@ describe("parseCommand", () => {
       const r = parseCommand("echo hi >> log.txt").subcommands;
       assert.ok(r.some((c) => c.startsWith("echo")));
       assert.ok(!r.some((c) => c.startsWith(">")));
+    });
+
+    it("extracts [ test as subcommand", () => {
+      const r = parseCommand("[ -f package.json ]");
+      assert.equal(r.subcommands.length, 1);
+      assert.ok(r.subcommands[0]!.startsWith("[ -f package.json ]"));
+    });
+
+    it("extracts [[ test as subcommand", () => {
+      const r = parseCommand("[[ -f package.json ]]");
+      assert.equal(r.subcommands.length, 1);
+      assert.ok(r.subcommands[0]!.startsWith("[[ -f package.json ]]"));
+    });
+
+    it("extracts printf as subcommand", () => {
+      const r = parseCommand("printf '\\nPackage:\\n'");
+      assert.equal(r.subcommands.length, 1);
+      assert.ok(r.subcommands[0]!.startsWith("printf"));
+    });
+
+    it("extracts [ -f path ] as input redirect", () => {
+      const r = parseCommand("[ -f /etc/passwd ]");
+      assert.ok(r.redirects.some((t) => t.path === "/etc/passwd" && t.direction === "input"));
+    });
+
+    it("extracts [[ -f path ]] as input redirect", () => {
+      const r = parseCommand("[[ -f package.json ]]");
+      assert.ok(r.redirects.some((t) => t.path === "package.json" && t.direction === "input"));
+    });
+
+    it("extracts multiple file paths from [[ with -ef", () => {
+      const r = parseCommand("[[ file1 -ef file2 ]]");
+      assert.ok(r.redirects.some((t) => t.path === "file1"));
+      assert.ok(r.redirects.some((t) => t.path === "file2"));
+    });
+
+    it("does not extract paths from non-file test operators", () => {
+      const r = parseCommand("[[ a == b ]]");
+      assert.equal(r.redirects.length, 0);
     });
   });
 

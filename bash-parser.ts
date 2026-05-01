@@ -5,6 +5,7 @@ import type {
   ProcSubst,
   WordPart,
   Command,
+  TestClause as TestClauseType,
   Word,
 } from "@aliou/sh";
 
@@ -64,8 +65,9 @@ function hasFindDangerousFlag(cmd: SimpleCommand): "exec" | "delete" | null {
 }
 
 type SimpleCallback = (cmd: SimpleCommand) => boolean;
+type TestCallback = (expr: string, words: Word[]) => void;
 
-function walkCommands(cmd: Command, onSimple: SimpleCallback): void {
+function walkCommands(cmd: Command, onSimple: SimpleCallback, onTest?: TestCallback): void {
   switch (cmd.type) {
     case "SimpleCommand": {
       const recurse = onSimple(cmd);
@@ -122,6 +124,22 @@ function walkCommands(cmd: Command, onSimple: SimpleCallback): void {
         }
       }
       break;
+    // @aliou/sh parses [[ ... ]] as TestClause instead of SimpleCommand.
+    // Reconstruct the expression string so it shows up as a subcommand
+    // (e.g. "[[ -f package.json ]]") and pass the raw words for
+    // file-path extraction.
+    case "TestClause": {
+      if (onTest) {
+        const tc = cmd as TestClauseType;
+        const parts: string[] = [];
+        for (const w of tc.expr ?? []) {
+          const s = wordToString(w);
+          if (s !== null) parts.push(s);
+        }
+        if (parts.length) onTest(`[[ ${parts.join(" ")} ]]`, tc.expr ?? []);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -152,6 +170,47 @@ function walkWord(w: Word, onSimple: SimpleCallback): void {
 const PROTECTED_DIRS = new Set(
   "/ /usr /usr/local /usr/bin /usr/lib /usr/sbin /usr/share /etc /var /bin /sbin /lib /lib64 /boot /sys /proc /dev /root /opt /home /srv /snap /tmp".split(" "),
 );
+
+// File-test operators that take a single path argument (unary).
+// Used by both [ (test) and [[ to detect file reads.
+const UNARY_FILE_TEST_OPS = new Set([
+  "-f", "-e", "-d", "-r", "-s", "-L", "-w", "-x", "-h",
+  "-O", "-G", "-N", "-k", "-g", "-u",
+]);
+
+// Binary operators where both operands are file paths.
+const BINARY_FILE_OPS = new Set(["-ef", "-nt", "-ot"]);
+
+// Extract file paths from the word list of a [ or [[ expression.
+// Returns paths that are arguments to file-test operators so they can
+// be tracked as read targets (i.e. "[ -f /etc/passwd ]" reads /etc/passwd).
+function extractTestFilePaths(words: string[]): string[] {
+  const paths: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (!w) continue;
+    // Skip the opening [[ and closing ]] or trailing ]
+    if (w === "[[" || w === "]]" || w === "]") continue;
+    if (w === "!") continue;
+    if (UNARY_FILE_TEST_OPS.has(w)) {
+      const next = words[i + 1];
+      if (next && next !== "]" && next !== "]]" && !next.startsWith("-")) {
+        paths.push(next);
+        i++;
+      }
+    } else if (BINARY_FILE_OPS.has(w)) {
+      // Both operands are file paths
+      const left = words[i - 1];
+      const right = words[i + 1];
+      if (left && left !== "[" && left !== "[[") paths.push(left);
+      if (right && right !== "]" && right !== "]]") {
+        paths.push(right);
+        i++;
+      }
+    }
+  }
+  return [...new Set(paths)];
+}
 
 const SUDO_FLAGS_WITH_ARGS = new Set(["-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D", "-T", "-R"]);
 
@@ -221,6 +280,15 @@ export interface ParsedCommand {
 
 export function parseCommand(command: string): ParsedCommand {
   try {
+    // @aliou/sh misparses \( and \) as subshell boundaries, but in bash these
+    // are escaped parens (literal characters). This is common in `find`
+    // expression grouping: find . \( -name "*.ts" -o -name "*.js" \).
+    // Replace standalone \( \) with equivalent double-quoted parens
+    // before parsing so the parser keeps them as regular word tokens.
+    command = command
+      .replace(/(?<=^|\s)\\\((?=\s|$)/g, '"("')
+      .replace(/(?<=^|\s)\\\)(?=\s|$)/g, '")"');
+
     const { ast } = parse(command);
     const subcommands: string[] = [];
     const redirects: RedirectTarget[] = [];
@@ -258,7 +326,25 @@ export function parseCommand(command: string): ParsedCommand {
         if (isNodeCatastrophic(cmd)) catastrophic = true;
 
         subcommands.push(commandToString(cmd));
+
+        // [ (test) and [[ check file existence/properties, which
+        // constitutes a file read. Extract file paths from test
+        // operators so they go through read-permission checks.
+        if (name === "[" || name === "[[") {
+          const wordStrs = (cmd.words ?? []).map((w) => wordToString(w)).filter((s): s is string => s !== null);
+          for (const p of extractTestFilePaths(wordStrs)) {
+            redirects.push({ path: p, direction: "input" });
+          }
+        }
+
         return true;
+      }, (expr, words) => {
+        subcommands.push(expr);
+        // Same file-read extraction for [[ TestClause nodes
+        const wordStrs = words.map((w) => wordToString(w)).filter((s): s is string => s !== null);
+        for (const p of extractTestFilePaths(wordStrs)) {
+          redirects.push({ path: p, direction: "input" });
+        }
       });
     }
 
