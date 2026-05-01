@@ -61,12 +61,37 @@ describe("isExternalPath", () => {
     assert.equal(isExternalPath("/project", "/project"), false);
   });
 
-  it("does NOT flag relative paths as external", () => {
-    assert.equal(isExternalPath("src/main.ts", "/project"), false);
+  it("does NOT flag relative paths inside project as external", () => {
+    const cwd = process.cwd();
+    assert.equal(isExternalPath("src/main.ts", cwd), false);
+  });
+
+  it("does NOT flag ./-prefixed paths inside project as external", () => {
+    const cwd = process.cwd();
+    assert.equal(isExternalPath("./src/main.ts", cwd), false);
+  });
+
+  it("flags ./../ traversal that escapes project", () => {
+    const cwd = process.cwd();
+    assert.equal(isExternalPath("./../../../etc/passwd", cwd), true);
+  });
+
+  it("flags relative paths with .. that resolve outside project", () => {
+    const cwd = process.cwd();
+    assert.equal(isExternalPath("../../../etc/passwd", cwd), true);
+  });
+
+  it("does NOT flag relative paths with .. that stay inside project", () => {
+    const cwd = process.cwd();
+    assert.equal(isExternalPath("src/../other/file.ts", cwd), false);
   });
 
   it("flags sibling directory as external", () => {
     assert.equal(isExternalPath("/other-project/file.ts", "/project"), true);
+  });
+
+  it("flags path traversal via .. as external", () => {
+    assert.equal(isExternalPath("/project/../../../etc/passwd", "/project"), true);
   });
 });
 

@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { ProfileName } from "../types.js";
+import type { ProfileName } from "../types.ts";
 
-let currentProfile: ProfileName = "build";
+let currentProfile: ProfileName = "plan";
 
 export function getCurrentProfile(): ProfileName {
   return currentProfile;
@@ -51,15 +51,15 @@ export function restoreProfile(ctx: ExtensionContext): void {
 export function getProfileContextMessage(profile: ProfileName): string {
   if (profile === "plan") {
     return `[SPFY PROFILE: plan]
-You are in plan mode - a read-only safe mode.
+You are in plan mode - a cautious mode with user approval required.
 
-Restrictions:
-- Bash is restricted to read-only commands only (cat, ls, grep, git status/log/diff, etc.)
-- You CANNOT use: edit, write (file modifications are blocked)
-- Any command not on the allowlist is hard-blocked
+Behavior:
+- Allowlisted commands (cat, ls, grep, git status/log/diff, etc.) run silently
+- All other actions require user approval (prompted)
+- Hazardous file access (.env, .ssh, credentials) is hard-blocked
+- Catastrophic commands (rm -rf /, etc.) are hard-blocked
 
-To switch to build mode, use the switchProfile tool with target "build".
-Do NOT request escalation until your plan is complete and the user has approved it.`;
+To switch to build mode, use the switchProfile tool with target "build".`;
   }
 
   return `[SPFY PROFILE: build]
@@ -74,10 +74,7 @@ To switch to plan mode, use the switchProfile tool with target "plan".`;
 }
 
 export function getToolsForProfile(profile: ProfileName): string[] {
-  if (profile === "plan") {
-    return ["read", "bash", "grep", "find", "ls", "questionnaire", "switchProfile"];
-  }
-  return ["read", "bash", "edit", "write", "grep", "find", "ls", "questionnaire", "switchProfile"];
+  return ["read", "edit", "write", "bash", "questionnaire", "switchProfile"];
 }
 
 export function applyProfileTools(pi: ExtensionAPI, profile: ProfileName): void {

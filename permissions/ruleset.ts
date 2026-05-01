@@ -1,5 +1,5 @@
 import picomatch from "picomatch";
-import type { Rule, Ruleset, PermissionName, PermissionAction, ProfileName } from "../types.js";
+import type { Rule, Ruleset, PermissionName, PermissionAction, ProfileName } from "../types.ts";
 
 export function bashPatternToRegex(pattern: string): RegExp {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
@@ -21,17 +21,10 @@ export function matchesPattern(
 
 function actionForProfile(
   action: PermissionAction,
-  modes: ProfileName[] | undefined,
+  modes: ProfileName[],
   profile: ProfileName,
 ): PermissionAction | null {
-  if (!modes || modes.length === 0) {
-    if (action === "deny") return "deny";
-    if (action === "allow") return profile === "plan" ? "deny" : "allow";
-    return action;
-  }
-
   if (modes.includes(profile)) return action;
-
   return null;
 }
 
@@ -41,14 +34,13 @@ export interface EvaluateResult {
 }
 
 export function evaluatePermission(
-  permission: PermissionName | ("bash" | "edit" | "read" | "*")[],
+  permission: PermissionName,
   target: string,
   profile: ProfileName,
   rules: Ruleset,
 ): EvaluateResult {
-  const permArray = Array.isArray(permission) ? permission : [permission];
   const matching = rules.filter((r) => {
-    if (!permArray.includes(r.permission) && r.permission !== "*") return false;
+    if (r.permission !== permission && r.permission !== "*") return false;
     return matchesPattern(r.permission, r.pattern, target);
   });
 
@@ -60,5 +52,6 @@ export function evaluatePermission(
     }
   }
 
-  return { action: profile === "plan" ? "deny" : "ask" };
+  if (rules.length === 0) return { action: "deny" };
+  return { action: "ask" };
 }

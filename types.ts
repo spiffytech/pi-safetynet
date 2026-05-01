@@ -8,7 +8,7 @@ export interface Rule {
   permission: PermissionName;
   pattern: string;
   action: PermissionAction;
-  modes?: ProfileName[];
+  modes: ProfileName[];
 }
 
 export type Ruleset = Rule[];
@@ -21,8 +21,3 @@ export const SwitchProfileParams = Type.Object({
     Type.String({ description: "Reason for switching profiles" }),
   ),
 });
-
-export interface PermissionCheckResult {
-  action: PermissionAction;
-  unapproved?: string[];
-}

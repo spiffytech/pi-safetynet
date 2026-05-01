@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 
 export function findProjectRoot(startPath: string): string {
   let current = startPath;
@@ -16,9 +16,9 @@ export function findProjectRoot(startPath: string): string {
 }
 
 export function isExternalPath(filePath: string, projectRoot: string): boolean {
-  if (!filePath.startsWith("/")) return false;
   const absRoot = projectRoot.startsWith("/") ? projectRoot : join(process.cwd(), projectRoot);
-  return !filePath.startsWith(absRoot + "/") && filePath !== absRoot;
+  const resolvedPath = resolve(filePath);
+  return !resolvedPath.startsWith(absRoot + "/") && resolvedPath !== absRoot;
 }
 
 export function getApprovalsFilePath(cwd: string): string {

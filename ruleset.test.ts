@@ -5,10 +5,11 @@ import {
   matchesPattern,
   evaluatePermission,
 } from "./permissions/ruleset.ts";
-import type { Rule, Ruleset } from "./types.ts";
+import type { Rule, Ruleset, ProfileName } from "./types.ts";
 import baselineData from "./permissions/baseline.json" with { type: "json" };
 
 const BASELINE: Ruleset = baselineData.rules as Ruleset;
+const ALL_MODES: ProfileName[] = ["build", "plan"];
 
 describe("bashPatternToRegex", () => {
   it("matches exact string for pattern with no wildcards", () => {
@@ -156,7 +157,7 @@ describe("evaluatePermission", () => {
       assert.equal(result.action, "allow");
     });
 
-    it("returns ask for hostname in build mode (the bug test)", () => {
+    it("returns ask for hostname in build mode", () => {
       const result = evaluatePermission("bash", "hostname", "build", BASELINE);
       assert.equal(result.action, "ask");
     });
@@ -171,33 +172,63 @@ describe("evaluatePermission", () => {
       assert.equal(result.action, "ask");
     });
 
-    it("denies any bash command in plan mode", () => {
+    it("allows ls in plan mode (baseline allows with modes: build+plan)", () => {
       const result = evaluatePermission("bash", "ls", "plan", BASELINE);
-      assert.equal(result.action, "deny");
+      assert.equal(result.action, "allow");
     });
 
-    it("denies unknown commands in plan mode", () => {
+    it("allows cat in plan mode", () => {
+      const result = evaluatePermission("bash", "cat", "plan", BASELINE);
+      assert.equal(result.action, "allow");
+    });
+
+    it("allows git status in plan mode", () => {
+      const result = evaluatePermission("bash", "git status", "plan", BASELINE);
+      assert.equal(result.action, "allow");
+    });
+
+    it("returns ask for unknown commands in plan mode (ask-by-default)", () => {
       const result = evaluatePermission("bash", "hostname", "plan", BASELINE);
-      assert.equal(result.action, "deny");
+      assert.equal(result.action, "ask");
     });
 
-    it("allows read ** in build mode", () => {
-      const result = evaluatePermission("read", "src/main.ts", "build", BASELINE);
-      assert.equal(result.action, "allow");
+    it("returns ask for edit in plan mode (ask-by-default)", () => {
+      const result = evaluatePermission("edit", "src/main.ts", "plan", BASELINE);
+      assert.equal(result.action, "ask");
     });
 
-    it("allows read ** in plan mode", () => {
-      const result = evaluatePermission("read", "src/main.ts", "plan", BASELINE);
-      assert.equal(result.action, "allow");
-    });
-
-    it("returns ask for edit ** in build mode", () => {
+    it("returns ask for edit in build mode", () => {
       const result = evaluatePermission("edit", "src/main.ts", "build", BASELINE);
       assert.equal(result.action, "ask");
     });
 
-    it("returns ask for edit ** in plan mode", () => {
-      const result = evaluatePermission("edit", "src/main.ts", "plan", BASELINE);
+    it("allows read in build mode", () => {
+      const result = evaluatePermission("read", "src/main.ts", "build", BASELINE);
+      assert.equal(result.action, "allow");
+    });
+
+    it("allows read in plan mode", () => {
+      const result = evaluatePermission("read", "src/main.ts", "plan", BASELINE);
+      assert.equal(result.action, "allow");
+    });
+
+    it("returns ask for tee in build mode (file-writing command)", () => {
+      const result = evaluatePermission("bash", "tee out.txt", "build", BASELINE);
+      assert.equal(result.action, "ask");
+    });
+
+    it("returns ask for tee in plan mode", () => {
+      const result = evaluatePermission("bash", "tee out.txt", "plan", BASELINE);
+      assert.equal(result.action, "ask");
+    });
+
+    it("returns ask for cp in build mode (file-writing command)", () => {
+      const result = evaluatePermission("bash", "cp src dst", "build", BASELINE);
+      assert.equal(result.action, "ask");
+    });
+
+    it("returns ask for mv in build mode (file-writing command)", () => {
+      const result = evaluatePermission("bash", "mv old new", "build", BASELINE);
       assert.equal(result.action, "ask");
     });
   });
@@ -205,8 +236,8 @@ describe("evaluatePermission", () => {
   describe("rule ordering (last match wins)", () => {
     it("a later allow rule overrides an earlier deny", () => {
       const rules: Ruleset = [
-        { permission: "bash", pattern: "*", action: "deny" },
-        { permission: "bash", pattern: "ls *", action: "allow" },
+        { permission: "bash", pattern: "*", action: "deny", modes: ALL_MODES },
+        { permission: "bash", pattern: "ls *", action: "allow", modes: ALL_MODES },
       ];
       const result = evaluatePermission("bash", "ls", "build", rules);
       assert.equal(result.action, "allow");
@@ -214,8 +245,8 @@ describe("evaluatePermission", () => {
 
     it("a later deny rule overrides an earlier allow", () => {
       const rules: Ruleset = [
-        { permission: "bash", pattern: "ls *", action: "allow" },
-        { permission: "bash", pattern: "ls *", action: "deny" },
+        { permission: "bash", pattern: "ls *", action: "allow", modes: ALL_MODES },
+        { permission: "bash", pattern: "ls *", action: "deny", modes: ALL_MODES },
       ];
       const result = evaluatePermission("bash", "ls", "build", rules);
       assert.equal(result.action, "deny");
@@ -223,9 +254,8 @@ describe("evaluatePermission", () => {
 
     it("session rules override persisted rules override baseline", () => {
       const rules: Ruleset = [
-        { permission: "bash", pattern: "*", action: "ask", modes: ["build"] },
-        { permission: "bash", pattern: "*", action: "deny", modes: ["plan"] },
-        { permission: "bash", pattern: "hostname", action: "allow" },
+        { permission: "bash", pattern: "*", action: "ask", modes: ["build", "plan"] },
+        { permission: "bash", pattern: "hostname", action: "allow", modes: ["build"] },
       ];
       const result = evaluatePermission("bash", "hostname", "build", rules);
       assert.equal(result.action, "allow");
@@ -236,7 +266,7 @@ describe("evaluatePermission", () => {
     it("skips rule when modes do not include current profile", () => {
       const rules: Ruleset = [
         { permission: "bash", pattern: "hostname", action: "allow", modes: ["plan"] },
-        { permission: "bash", pattern: "*", action: "ask", modes: ["build"] },
+        { permission: "bash", pattern: "*", action: "ask", modes: ["build", "plan"] },
       ];
       const result = evaluatePermission("bash", "hostname", "build", rules);
       assert.equal(result.action, "ask");
@@ -250,35 +280,37 @@ describe("evaluatePermission", () => {
       assert.equal(result.action, "allow");
     });
 
-    it("applies rule with no modes as all-modes (allow in build)", () => {
+    it("deny action applies when modes include current profile", () => {
       const rules: Ruleset = [
-        { permission: "bash", pattern: "hostname", action: "allow" },
-      ];
-      const result = evaluatePermission("bash", "hostname", "build", rules);
-      assert.equal(result.action, "allow");
-    });
-
-    it("applies rule with no modes as deny-in-plan for allow action", () => {
-      const rules: Ruleset = [
-        { permission: "bash", pattern: "hostname", action: "allow" },
-      ];
-      const result = evaluatePermission("bash", "hostname", "plan", rules);
-      assert.equal(result.action, "deny");
-    });
-
-    it("applies deny action regardless of profile when no modes", () => {
-      const rules: Ruleset = [
-        { permission: "bash", pattern: "*", action: "deny" },
+        { permission: "bash", pattern: "*", action: "deny", modes: ALL_MODES },
       ];
       assert.equal(evaluatePermission("bash", "anything", "build", rules).action, "deny");
       assert.equal(evaluatePermission("bash", "anything", "plan", rules).action, "deny");
+    });
+
+    it("build-only rule is invisible to plan mode", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "*", action: "ask", modes: ALL_MODES },
+        { permission: "bash", pattern: "hostname", action: "allow", modes: ["build"] },
+      ];
+      assert.equal(evaluatePermission("bash", "hostname", "build", rules).action, "allow");
+      assert.equal(evaluatePermission("bash", "hostname", "plan", rules).action, "ask");
+    });
+
+    it("plan+build rule applies in both profiles", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "*", action: "ask", modes: ALL_MODES },
+        { permission: "bash", pattern: "hostname", action: "allow", modes: ["build", "plan"] },
+      ];
+      assert.equal(evaluatePermission("bash", "hostname", "build", rules).action, "allow");
+      assert.equal(evaluatePermission("bash", "hostname", "plan", rules).action, "allow");
     });
   });
 
   describe("wildcard permission *", () => {
     it("rule with permission * matches bash check", () => {
       const rules: Ruleset = [
-        { permission: "*", pattern: "hostname", action: "allow" },
+        { permission: "*", pattern: "hostname", action: "allow", modes: ALL_MODES },
       ];
       const result = evaluatePermission("bash", "hostname", "build", rules);
       assert.equal(result.action, "allow");
@@ -286,7 +318,7 @@ describe("evaluatePermission", () => {
 
     it("rule with permission * matches edit check", () => {
       const rules: Ruleset = [
-        { permission: "*", pattern: "**", action: "deny" },
+        { permission: "*", pattern: "**", action: "deny", modes: ALL_MODES },
       ];
       const result = evaluatePermission("edit", "anything", "build", rules);
       assert.equal(result.action, "deny");
@@ -294,7 +326,7 @@ describe("evaluatePermission", () => {
 
     it("rule with permission * matches read check", () => {
       const rules: Ruleset = [
-        { permission: "*", pattern: "**", action: "allow" },
+        { permission: "*", pattern: "**", action: "allow", modes: ALL_MODES },
       ];
       const result = evaluatePermission("read", "anything", "build", rules);
       assert.equal(result.action, "allow");
@@ -302,22 +334,67 @@ describe("evaluatePermission", () => {
   });
 
   describe("default fallback", () => {
-    it("returns deny in plan mode when no rules match", () => {
+    it("returns deny when ruleset is empty (misconfiguration guard)", () => {
       const rules: Ruleset = [];
-      const result = evaluatePermission("bash", "anything", "plan", rules);
+      assert.equal(evaluatePermission("bash", "anything", "plan", rules).action, "deny");
+      assert.equal(evaluatePermission("bash", "anything", "build", rules).action, "deny");
+      assert.equal(evaluatePermission("edit", "anything", "build", rules).action, "deny");
+    });
+
+    it("returns ask when rules exist but none match the target", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "ls *", action: "allow", modes: ALL_MODES },
+      ];
+      assert.equal(evaluatePermission("bash", "hostname", "build", rules).action, "ask");
+      assert.equal(evaluatePermission("bash", "hostname", "plan", rules).action, "ask");
+    });
+  });
+
+  describe("forward compatibility: new profile mode with no rules", () => {
+    it("returns ask for bash when no rules include the current mode", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "ls *", action: "allow", modes: ["build", "plan"] },
+        { permission: "bash", pattern: "*", action: "ask", modes: ["build", "plan"] },
+      ];
+      const result = evaluatePermission("bash", "ls", "review" as ProfileName, rules);
+      assert.equal(result.action, "ask");
+    });
+
+    it("returns ask for edit when no rules include the current mode", () => {
+      const rules: Ruleset = [
+        { permission: "edit", pattern: "**", action: "ask", modes: ["build", "plan"] },
+      ];
+      const result = evaluatePermission("edit", "src/main.ts", "review" as ProfileName, rules);
+      assert.equal(result.action, "ask");
+    });
+
+    it("returns deny when ruleset is completely empty regardless of mode", () => {
+      const result = evaluatePermission("bash", "anything", "review" as ProfileName, []);
       assert.equal(result.action, "deny");
     });
 
-    it("returns ask in build mode when no rules match", () => {
-      const rules: Ruleset = [];
-      const result = evaluatePermission("bash", "anything", "build", rules);
+    it("still respects rules that explicitly include the new mode", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "ls *", action: "allow", modes: ["build", "plan", "review"] as ProfileName[] },
+        { permission: "bash", pattern: "*", action: "ask", modes: ["build", "plan"] },
+      ];
+      const result = evaluatePermission("bash", "ls", "review" as ProfileName, rules);
+      assert.equal(result.action, "allow");
+    });
+
+    it("falls through to ask when explicit mode rule does not match target", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "ls *", action: "allow", modes: ["build", "plan", "review"] as ProfileName[] },
+        { permission: "bash", pattern: "*", action: "ask", modes: ["build", "plan"] },
+      ];
+      const result = evaluatePermission("bash", "hostname", "review" as ProfileName, rules);
       assert.equal(result.action, "ask");
     });
   });
 
   describe("matchedRule tracking", () => {
     it("returns the matched rule in result", () => {
-      const rule: Rule = { permission: "bash", pattern: "ls *", action: "allow" };
+      const rule: Rule = { permission: "bash", pattern: "ls *", action: "allow", modes: ALL_MODES };
       const rules: Ruleset = [rule];
       const result = evaluatePermission("bash", "ls", "build", rules);
       assert.equal(result.matchedRule, rule);
@@ -327,24 +404,6 @@ describe("evaluatePermission", () => {
       const rules: Ruleset = [];
       const result = evaluatePermission("bash", "anything", "build", rules);
       assert.equal(result.matchedRule, undefined);
-    });
-  });
-
-  describe("permission array", () => {
-    it("accepts array of permission names", () => {
-      const rules: Ruleset = [
-        { permission: "bash", pattern: "hostname", action: "allow" },
-      ];
-      const result = evaluatePermission(["bash", "edit"], "hostname", "build", rules);
-      assert.equal(result.action, "allow");
-    });
-
-    it("matches when any permission in array matches", () => {
-      const rules: Ruleset = [
-        { permission: "edit", pattern: "**", action: "ask" },
-      ];
-      const result = evaluatePermission(["bash", "edit"], "anything", "build", rules);
-      assert.equal(result.action, "ask");
     });
   });
 });

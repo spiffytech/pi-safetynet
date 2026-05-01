@@ -1,2 +1,2 @@
-export { getBaselineRules, PermissionStorage, reconstructSessionRules } from "./storage.js";
-export { evaluatePermission, bashPatternToRegex, matchesPattern } from "./ruleset.js";
+export { getBaselineRules, PermissionStorage, reconstructSessionRules, sanitizeRules } from "./storage.ts";
+export { evaluatePermission, bashPatternToRegex, matchesPattern } from "./ruleset.ts";

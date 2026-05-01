@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { Rule, Ruleset } from "../types.js";
-import { findProjectRoot } from "../project.js";
+import type { Rule, Ruleset, ProfileName } from "../types.ts";
+import { findProjectRoot } from "../project.ts";
 import baselineData from "./baseline.json" with { type: "json" };
 
 const BASELINE: Ruleset = baselineData.rules as Ruleset;
@@ -27,10 +27,26 @@ class SessionRuleStore {
   }
 }
 
+const VALID_ACTIONS = new Set(["allow", "deny", "ask"]);
+const VALID_PERMISSIONS = new Set(["bash", "edit", "read", "*"]);
+const VALID_MODES = new Set(["plan", "build"]);
+
+export function sanitizeRules(raw: unknown[]): Ruleset {
+  return raw.filter((r): r is Rule => {
+    if (typeof r !== "object" || r === null) return false;
+    const rule = r as Record<string, unknown>;
+    if (!VALID_PERMISSIONS.has(rule.permission as string)) return false;
+    if (typeof rule.pattern !== "string") return false;
+    if (!VALID_ACTIONS.has(rule.action as string)) return false;
+    if (!Array.isArray(rule.modes) || rule.modes.length === 0) return false;
+    if (!(rule.modes as string[]).every((m) => VALID_MODES.has(m))) return false;
+    return true;
+  });
+}
+
 class PersistedRuleStore {
   private rules: Ruleset = [];
   private filePath: string;
-  private dirty = false;
 
   constructor(cwd: string) {
     const root = findProjectRoot(cwd);
@@ -52,7 +68,7 @@ class PersistedRuleStore {
     }
     try {
       const data = JSON.parse(readFileSync(this.filePath, "utf-8"));
-      this.rules = data.rules ?? [];
+      this.rules = sanitizeRules(data.rules ?? []);
     } catch {
       this.rules = [];
     }

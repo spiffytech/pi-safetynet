@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach } from "node:test";
+import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   getCurrentProfile,
@@ -10,7 +10,7 @@ import {
 
 describe("profiles", () => {
   afterEach(() => {
-    setCurrentProfile("build");
+    setCurrentProfile("plan");
   });
 
   describe("requiresApproval", () => {
@@ -24,27 +24,27 @@ describe("profiles", () => {
   });
 
   describe("getCurrentProfile / setCurrentProfile", () => {
-    it("defaults to build", () => {
-      assert.equal(getCurrentProfile(), "build");
-    });
-
-    it("can switch to plan", () => {
-      setCurrentProfile("plan");
+    it("defaults to plan", () => {
       assert.equal(getCurrentProfile(), "plan");
     });
 
-    it("can switch back to build", () => {
-      setCurrentProfile("plan");
+    it("can switch to build", () => {
       setCurrentProfile("build");
       assert.equal(getCurrentProfile(), "build");
+    });
+
+    it("can switch back to plan", () => {
+      setCurrentProfile("build");
+      setCurrentProfile("plan");
+      assert.equal(getCurrentProfile(), "plan");
     });
   });
 
   describe("getProfileContextMessage", () => {
-    it("plan message mentions read-only", () => {
+    it("plan message mentions cautious mode", () => {
       const msg = getProfileContextMessage("plan");
       assert.ok(msg.includes("plan"));
-      assert.ok(msg.includes("read-only") || msg.includes("restricted"));
+      assert.ok(msg.includes("approval") || msg.includes("cautious"));
     });
 
     it("build message mentions progressive trust or full access", () => {
@@ -54,11 +54,11 @@ describe("profiles", () => {
   });
 
   describe("getToolsForProfile", () => {
-    it("plan mode includes read but NOT edit or write", () => {
+    it("plan mode includes read, edit, and write", () => {
       const tools = getToolsForProfile("plan");
       assert.ok(tools.includes("read"));
-      assert.ok(!tools.includes("edit"));
-      assert.ok(!tools.includes("write"));
+      assert.ok(tools.includes("edit"));
+      assert.ok(tools.includes("write"));
     });
 
     it("build mode includes read, edit, and write", () => {

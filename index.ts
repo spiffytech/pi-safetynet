@@ -8,14 +8,14 @@ import type {
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { isBashToolResult } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import type { Rule, Ruleset, ProfileName, PermissionAction } from "./types.js";
-import { SwitchProfileParams } from "./types.js";
+import type { Rule, Ruleset, ProfileName, PermissionAction } from "./types.ts";
+import { SwitchProfileParams } from "./types.ts";
 import {
   evaluatePermission,
   getBaselineRules,
   PermissionStorage,
   reconstructSessionRules,
-} from "./permissions/index.js";
+} from "./permissions/index.ts";
 import {
   getCurrentProfile,
   setCurrentProfile,
@@ -24,7 +24,7 @@ import {
   persistProfile,
   restoreProfile,
   applyProfileTools,
-} from "./profiles/index.js";
+} from "./profiles/index.ts";
 import {
   isPlanOnErrorEnabled,
   setPlanOnError,
@@ -32,24 +32,52 @@ import {
   restorePlanOnError,
   getPlanOnErrorInstruction,
   hasPlanOnErrorMarker,
-} from "./profiles/plan-on-error.js";
+} from "./profiles/plan-on-error.ts";
 import {
-  getPlanModeBlockMessage,
   showPermissionPrompt,
   showRulesEditor,
   promptProfileEscalation,
   notifyProfileSwitch,
   getStatusText,
-} from "./prompts.js";
+} from "./prompts.ts";
 import {
   getAllCommands,
   hasFileRedirects,
   isCatastrophicCommand,
   isHazardousFile,
-} from "./bash-parser.js";
-import { findProjectRoot, isExternalPath, normalizePathForMatching } from "./project.js";
+  getRedirectTargets,
+  type RedirectTarget,
+} from "./bash-parser.ts";
+import { findProjectRoot, isExternalPath, normalizePathForMatching } from "./project.ts";
 
 let storage: PermissionStorage;
+
+function checkFileTarget(
+  filePath: string,
+  permission: "read" | "edit",
+  profile: ProfileName,
+  rules: Ruleset,
+): { action: PermissionAction; reason?: string } {
+  if (isHazardousFile(filePath)) {
+    return { action: "deny", reason: "Hazardous file (e.g., .env, .ssh, credentials)" };
+  }
+
+  const projectRoot = findProjectRoot(process.cwd());
+  if (isExternalPath(filePath, projectRoot)) {
+    return { action: "ask", reason: "Path is outside project root" };
+  }
+
+  const normalized = normalizePathForMatching(filePath, projectRoot);
+  const result = evaluatePermission(permission, normalized, profile, rules);
+  if (result.action === "deny") {
+    const match = result.matchedRule;
+    return {
+      action: "deny",
+      reason: match ? `Denied by rule "${match.pattern}"` : "Denied by ruleset",
+    };
+  }
+  return { action: result.action };
+}
 
 function checkBashPermission(
   command: string,
@@ -78,11 +106,15 @@ function checkBashPermission(
   }
 
   if (hasFileRedirects(command)) {
-    const redirectResult = evaluatePermission("edit", command, profile, rules);
-    if (redirectResult.action === "deny" && worstAction !== "deny") {
-      worstAction = "deny";
-    } else if (redirectResult.action === "ask" && worstAction === "allow") {
-      worstAction = "ask";
+    const targets = getRedirectTargets(command);
+    for (const target of targets) {
+      const permission = target.direction === "input" ? "read" : "edit";
+      const targetResult = checkFileTarget(target.path, permission, profile, rules);
+      if (targetResult.action === "deny") {
+        worstAction = "deny";
+      } else if (targetResult.action === "ask" && worstAction === "allow") {
+        worstAction = "ask";
+      }
     }
   }
 
@@ -95,19 +127,7 @@ function checkFilePermission(
   profile: ProfileName,
 ): { action: PermissionAction; reason?: string } {
   const rules = storage.getAllRules();
-
-  if (isHazardousFile(filePath)) {
-    return { action: "deny", reason: "Hazardous file (e.g., .env)" };
-  }
-
-  const projectRoot = findProjectRoot(process.cwd());
-  if (isExternalPath(filePath, projectRoot)) {
-    return { action: "ask", reason: "Path is outside project root" };
-  }
-
-  const normalized = normalizePathForMatching(filePath, projectRoot);
-  const result = evaluatePermission(permission, normalized, profile, rules);
-  return { action: result.action };
+  return checkFileTarget(filePath, permission, profile, rules);
 }
 
 async function handleToolCall(
@@ -116,24 +136,21 @@ async function handleToolCall(
 ): Promise<{ block: boolean; reason: string } | undefined> {
   const profile = getCurrentProfile();
 
+  try {
   if (event.toolName === "bash") {
     const command = event.input.command as string;
     const check = checkBashPermission(command, profile);
 
     if (check.action === "deny") {
       ctx.abort();
-      if (profile === "plan") {
-        return { block: true, reason: getPlanModeBlockMessage(command, "bash") };
-      }
-      ctx.ui.notify(`Command denied: ${command}`, "error");
-      return { block: true, reason: "Command denied by ruleset" };
+      const detail = isCatastrophicCommand(command)
+        ? "Catastrophic command"
+        : `Denied by ruleset: ${check.unapproved.join(", ")}`;
+      ctx.ui.notify(`Command denied: ${command} (${detail})`, "error");
+      return { block: true, reason: `Command denied: ${detail}` };
     }
 
     if (check.action === "ask") {
-      if (profile === "plan") {
-        return { block: true, reason: getPlanModeBlockMessage(command, "bash") };
-      }
-
       while (true) {
         const choice = await showPermissionPrompt(ctx, {
           permission: "bash",
@@ -153,11 +170,13 @@ async function handleToolCall(
         const edited = await showRulesEditor(ctx, check.unapproved);
         if (edited === null) continue;
 
+        const newModes: ProfileName[] =
+          profile === "plan" ? ["plan", "build"] : ["build"];
         const newRules: Ruleset = edited.patterns.map((p) => ({
           permission: "bash" as const,
           pattern: p,
           action: "allow" as const,
-          modes: ["build"] as ProfileName[],
+          modes: newModes,
         }));
 
         if (edited.persist === "persisted") {
@@ -192,15 +211,11 @@ async function handleToolCall(
       ctx.abort();
       return {
         block: true,
-        reason: `Read denied: ${check.reason ?? "Not allowed"}`,
+        reason: `Read denied: ${check.reason ?? "no matching allow rule"}`,
       };
     }
 
     if (check.action === "ask") {
-      if (profile === "plan") {
-        return { block: true, reason: getPlanModeBlockMessage(filePath, "read") };
-      }
-
       while (true) {
         const choice = await showPermissionPrompt(ctx, {
           permission: "read",
@@ -217,17 +232,20 @@ async function handleToolCall(
         const edited = await showRulesEditor(ctx, [filePath]);
         if (edited === null) continue;
 
+        const newModes: ProfileName[] =
+          profile === "plan" ? ["plan", "build"] : ["build"];
         const newRules: Ruleset = edited.patterns.map((p) => ({
           permission: "read" as const,
           pattern: p,
           action: "allow" as const,
-          modes: ["build"] as ProfileName[],
+          modes: newModes,
         }));
 
         if (edited.persist === "persisted") {
           await storage.addPersistedRules(newRules);
         } else {
           storage.addSessionRules(newRules);
+          pi.appendEntry("spfy:session-rules", { rules: newRules });
         }
 
         const recheck = checkFilePermission("read", filePath, profile);
@@ -246,18 +264,13 @@ async function handleToolCall(
   if (event.toolName === "edit" || event.toolName === "write") {
     const filePath = event.input.path as string;
 
-    if (profile === "plan") {
-      ctx.abort();
-      return { block: true, reason: getPlanModeBlockMessage(filePath, event.toolName) };
-    }
-
     const check = checkFilePermission("edit", filePath, profile);
 
     if (check.action === "deny") {
       ctx.abort();
       return {
         block: true,
-        reason: `Edit denied: ${check.reason ?? "Not allowed"}`,
+        reason: `Edit denied: ${check.reason ?? "no matching allow rule"}`,
       };
     }
 
@@ -278,17 +291,20 @@ async function handleToolCall(
         const edited = await showRulesEditor(ctx, [filePath]);
         if (edited === null) continue;
 
+        const newModes: ProfileName[] =
+          profile === "plan" ? ["plan", "build"] : ["build"];
         const newRules: Ruleset = edited.patterns.map((p) => ({
           permission: "edit" as const,
           pattern: p,
           action: "allow" as const,
-          modes: ["build"] as ProfileName[],
+          modes: newModes,
         }));
 
         if (edited.persist === "persisted") {
           await storage.addPersistedRules(newRules);
         } else {
           storage.addSessionRules(newRules);
+          pi.appendEntry("spfy:session-rules", { rules: newRules });
         }
 
         const recheck = checkFilePermission("edit", filePath, profile);
@@ -301,6 +317,10 @@ async function handleToolCall(
       }
     }
 
+    return undefined;
+  }
+  } catch (err) {
+    ctx.ui.notify(`Permission check error: ${err}`, "warning");
     return undefined;
   }
 }
@@ -342,7 +362,7 @@ function registerSwitchProfileTool(pi: ExtensionAPI) {
     name: "switchProfile",
     label: "Switch Profile",
     description:
-      "Switch between plan (read-only) and build (full access) profiles",
+      "Switch between plan (approval required) and build (full access) profiles",
     parameters: SwitchProfileParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const current = getCurrentProfile();
@@ -396,7 +416,7 @@ function registerCommands(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("spfy:plan", {
-    description: "Switch to plan mode (read-only)",
+    description: "Switch to plan mode (approval required)",
     handler: async (_args, ctx) => {
       const current = getCurrentProfile();
       if (current === "plan") {
@@ -445,14 +465,14 @@ function registerCommands(pi: ExtensionAPI) {
       ];
 
       for (const rule of baseline) {
-        const modes = rule.modes?.join(",") ?? "all";
+        const modes = rule.modes.join(",");
         lines.push(`  ${rule.permission}: ${rule.pattern} -> ${rule.action} (${modes})`);
       }
 
       if (persisted.length > 0) {
         lines.push("", "--- PERSISTED ---");
         for (const rule of persisted) {
-          const modes = rule.modes?.join(",") ?? "all";
+          const modes = rule.modes.join(",");
           lines.push(`  ${rule.permission}: ${rule.pattern} -> ${rule.action} (${modes})`);
         }
       }
@@ -460,7 +480,7 @@ function registerCommands(pi: ExtensionAPI) {
       if (session.length > 0) {
         lines.push("", "--- SESSION ---");
         for (const rule of session) {
-          const modes = rule.modes?.join(",") ?? "all";
+          const modes = rule.modes.join(",");
           lines.push(`  ${rule.permission}: ${rule.pattern} -> ${rule.action} (${modes})`);
         }
       }
@@ -546,6 +566,12 @@ export default function spfyExtension(api: ExtensionAPI) {
     await storage.init(ctx);
     restoreProfile(ctx);
     restorePlanOnError(ctx);
+
+    const sessionRules = reconstructSessionRules(ctx);
+    const s = storage.session;
+    s.clear();
+    if (sessionRules.length > 0) s.addRules(sessionRules);
+
     applyProfileTools(pi, getCurrentProfile());
     updateStatus(ctx);
   });

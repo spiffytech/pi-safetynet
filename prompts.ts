@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { ProfileName } from "./types.js";
+import type { ProfileName } from "./types.ts";
 
 export interface PermissionPromptOptions {
   permission: "bash" | "edit" | "read";
@@ -75,19 +75,6 @@ export async function showRulesEditor(
     patterns,
     persist: persist.startsWith("Project") ? "persisted" : "session",
   };
-}
-
-export function getPlanModeBlockMessage(target: string, permission: string): string {
-  return `${permission} "${target}" is not available in plan mode.
-
-To switch to build mode, use switchProfile('build').
-
-Do not be hasty. Only request escalation after:
-- Your plan is complete and well-documented
-- The user has reviewed and approved the plan
-- You are ready to implement
-
-Stay in plan mode to continue exploring.`;
 }
 
 export async function promptProfileEscalation(

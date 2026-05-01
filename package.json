@@ -5,7 +5,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --experimental-strip-types --test bash-parser.test.ts project.test.ts profiles.test.ts ruleset.test.ts"
+    "test": "node --experimental-strip-types --test bash-parser.test.ts project.test.ts profiles.test.ts ruleset.test.ts composition.test.ts"
   },
   "keywords": [],
   "author": "",
