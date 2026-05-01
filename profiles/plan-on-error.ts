@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getLatestCustomEntry } from "./index.ts";
 
-let planOnErrorEnabled = false;
+let planOnErrorEnabled = true;
 
 const MARKER = "[SPFY_PLAN_ON_ERROR]";
 

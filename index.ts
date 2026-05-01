@@ -36,9 +36,9 @@ import {
   showRulesEditor,
   promptProfileEscalation,
   notifyProfileSwitch,
-  getStatusText,
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./check.ts";
+import { normalizePathForMatching, findProjectRoot } from "./project.ts";
 
 let storage: PermissionStorage;
 
@@ -64,11 +64,12 @@ async function resolvePermission(
   const profile = getCurrentProfile();
 
   while (true) {
-    const promptOpts: { permission: "bash" | "edit" | "read"; target: string; unapproved?: string[]; reason?: string } = {
+    const promptOpts: { permission: "bash" | "edit" | "read"; target: string; unapproved?: string[]; redirectTargets?: Array<{ permission: "read" | "edit"; path: string }>; reason?: string } = {
       permission: opts.permission,
       target: opts.target,
     };
-    if (opts.check.unapproved) promptOpts.unapproved = opts.check.unapproved;
+    if (opts.check.unapproved && opts.check.unapproved.length > 0) promptOpts.unapproved = opts.check.unapproved;
+    if (opts.check.redirectTargets?.length) promptOpts.redirectTargets = opts.check.redirectTargets;
     if (opts.check.reason) promptOpts.reason = opts.check.reason;
     const choice = await showPermissionPrompt(ctx, promptOpts);
 
@@ -79,7 +80,12 @@ async function resolvePermission(
 
     if (choice === "once") return undefined;
 
-    const edited = await showRulesEditor(ctx, opts.check.unapproved ?? [opts.target]);
+    const isFile = opts.permission === "read" || opts.permission === "edit";
+    const root = findProjectRoot(process.cwd());
+    const editorItems = isFile
+      ? [normalizePathForMatching(opts.target, root)]
+      : (opts.check.unapproved?.length ? opts.check.unapproved : [opts.target]);
+    const edited = await showRulesEditor(ctx, editorItems);
     if (edited === null) continue;
 
     const newModes: ProfileName[] = profile === "plan" ? ["plan", "build"] : ["build"];
@@ -90,6 +96,17 @@ async function resolvePermission(
       modes: newModes,
     }));
 
+    if (opts.check.redirectTargets?.length) {
+      for (const rt of opts.check.redirectTargets) {
+        newRules.push({
+          permission: rt.permission,
+          pattern: normalizePathForMatching(rt.path, root),
+          action: "allow" as const,
+          modes: newModes,
+        });
+      }
+    }
+
     if (edited.persist === "persisted") {
       await storage.addPersistedRules(newRules);
     } else {
@@ -98,6 +115,7 @@ async function resolvePermission(
     }
 
     const recheckResult = opts.recheck();
+    opts.check = recheckResult;
     if (recheckResult.action === "allow") return undefined;
     if (recheckResult.action === "deny") {
       ctx.ui.notify("Rule(s) added but still denied.", "warning");
@@ -131,7 +149,7 @@ async function handleToolCall(
         permission: "bash",
         target: command,
         check,
-        recheck: () => checkBashPermission(command, profile, rules),
+        recheck: () => checkBashPermission(command, profile, storage.getAllRules()),
       });
     }
 
@@ -143,7 +161,7 @@ async function handleToolCall(
         permission: perm,
         target: filePath,
         check: checkFileTarget(filePath, perm, profile, rules),
-        recheck: () => checkFileTarget(filePath, perm, profile, rules),
+        recheck: () => checkFileTarget(filePath, perm, profile, storage.getAllRules()),
       });
     }
   } catch (err) {
@@ -301,10 +319,22 @@ function registerCommands(pi: ExtensionAPI) {
   });
 }
 
+function registerShortcuts(pi: ExtensionAPI) {
+  pi.registerShortcut("ctrl+\\", {
+    description: "Toggle between plan and build profile",
+    handler: async (ctx) => {
+      const next: ProfileName = getCurrentProfile() === "plan" ? "build" : "plan";
+      switchToProfile(ctx, next);
+    },
+  });
+}
+
 function updateStatus(ctx: ExtensionContext) {
   const profile = getCurrentProfile();
   const poe = isPlanOnErrorEnabled();
-  ctx.ui.setStatus("spfy", getStatusText(profile, poe));
+  let text = profile;
+  if (poe) text += " +poe";
+  ctx.ui.setStatus("spfy", text);
 }
 
 let pi: ExtensionAPI;
@@ -343,6 +373,7 @@ export default function spfyExtension(api: ExtensionAPI) {
 
   registerSwitchProfileTool(pi);
   registerCommands(pi);
+  registerShortcuts(pi);
 
   pi.registerFlag("build", {
     description: "Start in build mode (full access)",
@@ -353,7 +384,7 @@ export default function spfyExtension(api: ExtensionAPI) {
   pi.registerFlag("plan-on-error", {
     description: "Enable plan-on-error mode",
     type: "boolean",
-    default: false,
+    default: true,
   });
 
   pi.on("session_start", async (_event, ctx) => {
@@ -361,9 +392,11 @@ export default function spfyExtension(api: ExtensionAPI) {
 
     if (pi.getFlag("build") === true) {
       setCurrentProfile("build");
+      updateStatus(ctx);
     }
     if (pi.getFlag("plan-on-error") === true) {
       setPlanOnError(true, pi);
+      updateStatus(ctx);
     }
   });
 

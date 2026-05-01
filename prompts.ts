@@ -5,6 +5,7 @@ export interface PermissionPromptOptions {
   permission: "bash" | "edit" | "read";
   target: string;
   unapproved?: string[];
+  redirectTargets?: Array<{ permission: "read" | "edit"; path: string }>;
   reason?: string | undefined;
 }
 
@@ -20,6 +21,13 @@ export async function showPermissionPrompt(
     header += "\n\n   Contains unapproved commands:";
     for (const cmd of opts.unapproved) {
       header += `\n   • ${cmd}`;
+    }
+  }
+
+  if (opts.redirectTargets && opts.redirectTargets.length > 0) {
+    header += "\n\n   Contains redirect targets needing approval:";
+    for (const rt of opts.redirectTargets) {
+      header += `\n   • ${rt.permission}: ${rt.path}`;
     }
   }
 
@@ -66,7 +74,7 @@ export async function showRulesEditor(
 
   const persist = await ctx.ui.select(
     "Save rules to:",
-    ["This session only", "Project (persisted to .pi/extensions/spfy/approvals.json)"],
+    ["This session only", "Project"],
   );
 
   if (persist === undefined) return null;
@@ -97,8 +105,3 @@ export function notifyProfileSwitch(
   ctx.ui.notify(`Switched from ${from} to ${to} mode`, "info");
 }
 
-export function getStatusText(profile: ProfileName, planOnError: boolean): string {
-  let text = profile === "plan" ? "⏸ plan" : "🔨 build";
-  if (planOnError) text += " +poe";
-  return text;
-}
