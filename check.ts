@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type { ProfileName, PermissionAction, Ruleset } from "./types.ts";
 import { evaluatePermission } from "./permissions/ruleset.ts";
 import { parseCommand, isHazardousFile } from "./bash-parser.ts";
@@ -54,6 +55,41 @@ export function checkFileTarget(
   return { action: result.action };
 }
 
+/**
+ * Check whether a subcommand is `cd <path>` where <path> resolves to
+ * the project root or a directory below it.  Such commands are always
+ * safe and auto-approved.
+ */
+function isCdWithinProject(subcommand: string, projectRoot: string): boolean {
+  const trimmed = subcommand.trim();
+  if (trimmed === "cd") return true; // bare cd → $HOME, harmless
+
+  const cdMatch = trimmed.match(/^cd\s+(.+)$/);
+  if (!cdMatch) return false;
+
+  let target = cdMatch[1]!.trim();
+
+  // Strip quotes
+  if (
+    (target.startsWith('"') && target.endsWith('"')) ||
+    (target.startsWith("'") && target.endsWith("'"))
+  ) {
+    target = target.slice(1, -1);
+  }
+
+  // Handle ~ expansion
+  if (target.startsWith("~")) {
+    target = (process.env.HOME ?? "/home") + target.slice(1);
+  }
+
+  // Resolve relative paths against the project root (not cwd),
+  // since the agent's cwd should be within the project.
+  const resolved = target.startsWith("/") ? target : resolve(projectRoot, target);
+
+  // Target must be within or equal to the project root
+  return resolved.startsWith(projectRoot + "/") || resolved === projectRoot;
+}
+
 export function checkBashPermission(
   command: string,
   profile: ProfileName,
@@ -70,7 +106,14 @@ export function checkBashPermission(
   const redirectTargets: Array<{ permission: "read" | "edit"; path: string }> = [];
   let worstAction: PermissionAction = "allow";
 
+  const root = projectRoot ?? findProjectRoot(process.cwd());
+
   for (const sub of parsed.subcommands) {
+    // Auto-approve cd when the target is within (or equal to) the project root.
+    // cd to the project or a subdirectory is always safe and the LLM
+    // frequently emits it as a preamble (e.g. "cd <cwd> && git diff").
+    if (isCdWithinProject(sub, root)) continue;
+
     const result = evaluatePermission("bash", sub, profile, rules);
     if (result.action === "deny") {
       worstAction = "deny";
