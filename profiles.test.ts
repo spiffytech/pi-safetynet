@@ -40,15 +40,21 @@ describe("profiles", () => {
   });
 
   describe("getProfileContextMessage", () => {
-    it("plan message mentions cautious mode", () => {
+    it("plan message mentions read-only planning", () => {
       const msg = getProfileContextMessage("plan");
       assert.ok(msg.includes("plan"));
-      assert.ok(msg.includes("approval") || msg.includes("cautious"));
+      assert.ok(msg.includes("READ-ONLY") || msg.includes("planning-only"));
     });
 
-    it("build message mentions progressive trust or full access", () => {
+    it("build message mentions full access", () => {
       const msg = getProfileContextMessage("build");
       assert.ok(msg.includes("build"));
+      assert.ok(msg.includes("full tool access") || msg.includes("full access"));
+    });
+
+    it("build message includes plan-to-build transition when previous profile was plan", () => {
+      const msg = getProfileContextMessage("build", "plan");
+      assert.ok(msg.includes("changed from plan to build"));
     });
   });
 });

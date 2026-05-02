@@ -164,6 +164,16 @@ async function handleToolCall(
         recheck: () => checkFileTarget(filePath, perm, profile, storage.getAllRules()),
       });
     }
+
+    const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "questionnaire", "switchProfile"]);
+    if (!knownTools.has(event.toolName) && profile === "plan") {
+      return resolvePermission(ctx, {
+        permission: "bash",
+        target: `tool:${event.toolName}`,
+        check: { action: "ask", reason: "Unknown tool in plan mode requires approval" },
+        recheck: () => ({ action: "ask", reason: "Unknown tool in plan mode requires approval" }),
+      });
+    }
   } catch (err) {
     ctx.ui.notify(`Permission check error: ${err}`, "warning");
     return undefined;
@@ -195,7 +205,7 @@ function filterProfileContext(messages: AgentMessage[]): AgentMessage[] {
     if (msg.role === "user") {
       const content = msg.content;
       if (typeof content === "string") {
-        return !hasPlanOnErrorMarker(content) && !content.includes("[SPFY_PROFILE_CONTEXT]");
+        return !hasPlanOnErrorMarker(content) && !content.includes("[SPFY_PROFILE_CONTEXT]") && !content.includes("[SPFY PLAN MODE]") && !content.includes("[SPFY BUILD MODE]");
       }
     }
     return true;
@@ -207,7 +217,7 @@ function registerSwitchProfileTool(pi: ExtensionAPI) {
     name: "switchProfile",
     label: "Switch Profile",
     description:
-      "Switch between plan (approval required) and build (full access) profiles",
+      "Switch between plan (read-only, planning) and build (full access) profiles. Escalation from plan to build requires user approval. Deescalation from build to plan is automatic.",
     parameters: SwitchProfileParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const current = getCurrentProfile();
@@ -232,6 +242,7 @@ function registerSwitchProfileTool(pi: ExtensionAPI) {
         }
       }
 
+      previousProfile = current;
       setCurrentProfile(target);
       persistProfile(pi);
       applyProfileTools(pi, target);
@@ -250,12 +261,15 @@ function registerSwitchProfileTool(pi: ExtensionAPI) {
   });
 }
 
+let previousProfile: ProfileName | undefined;
+
 function switchToProfile(ctx: ExtensionContext, profile: ProfileName): void {
   const current = getCurrentProfile();
   if (current === profile) {
     ctx.ui.notify(`Already in ${profile} mode`, "info");
     return;
   }
+  previousProfile = current;
   setCurrentProfile(profile);
   persistProfile(pi);
   applyProfileTools(pi, profile);
@@ -409,10 +423,12 @@ export default function spfyExtension(api: ExtensionAPI) {
 
   pi.on("before_agent_start", async () => {
     const profile = getCurrentProfile();
+    const prev = previousProfile;
+    previousProfile = undefined;
     return {
       message: {
         customType: "spfy:profile:context",
-        content: getProfileContextMessage(profile),
+        content: getProfileContextMessage(profile, prev),
         display: false,
       },
     };

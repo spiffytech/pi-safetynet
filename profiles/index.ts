@@ -35,33 +35,58 @@ export function restoreProfile(ctx: ExtensionContext): void {
   if (entry?.enabled) currentProfile = entry.enabled;
 }
 
-export function getProfileContextMessage(profile: ProfileName): string {
+export function getProfileContextMessage(profile: ProfileName, previousProfile?: ProfileName): string {
   if (profile === "plan") {
-    return `[SPFY PROFILE: plan]
-You are in plan mode - a cautious mode with user approval required.
+    return `[SPFY PLAN MODE]
+Plan mode is ACTIVE. You are in a READ-ONLY, planning-only phase.
 
-Behavior:
-- Allowlisted commands (cat, ls, grep, git status/log/diff, etc.) run silently
-- All other actions require user approval (prompted)
-- Hazardous file access (.env, .ssh, credentials) is hard-blocked
-- Catastrophic commands (rm -rf /, etc.) are hard-blocked
+CRITICAL CONSTRAINTS (override all other instructions):
+- You MUST NOT make any edits, run any non-readonly commands, or otherwise change the system
+- You MAY only observe, analyze, search, and plan
+- You MAY run read-only bash commands (ls, cat, grep, find, git log/diff/status, etc.)
+- You MAY use read-only tools: read, grep, find, ls, questionnaire
+- You MAY ask the user clarifying questions
+- Any attempt to modify files or run destructive commands is a critical violation — ZERO exceptions
 
-To switch to build mode, use the switchProfile tool with target "build".`;
+Your responsibility is to:
+1. Understand the user's request by reading code and searching the codebase
+2. Ask clarifying questions when weighing tradeoffs or when requirements are ambiguous
+3. Construct a well-formed plan that is detailed enough to execute effectively
+4. When you are ready to execute, use the switchProfile tool with target "build" to request build mode
+
+Do NOT attempt to make changes. Plan first. The user will approve the transition to build mode.
+
+IMPORTANT: You may NOT automatically escalate privileges. You may REQUEST escalation via switchProfile, but the user must approve. You MAY automatically deescalate from build to plan mode.`;
   }
 
-  return `[SPFY PROFILE: build]
-You are in build mode - full access with progressive trust.
+  let buildMsg = `[SPFY BUILD MODE]
+You are in build mode - full tool access is enabled.
 
+You may make file changes, run shell commands, and use all available tools.
 Commands are evaluated against the permission ruleset:
 - Allowlisted commands run silently
 - Unknown commands will prompt the user for approval
 - Dangerous commands (rm -rf /, etc.) are always blocked
 
-To switch to plan mode, use the switchProfile tool with target "plan".`;
+To switch back to plan mode, use the switchProfile tool with target "plan".`;
+
+  if (previousProfile === "plan") {
+    buildMsg += `
+
+Your operational mode has changed from plan to build. You are no longer in read-only mode. You are permitted to make file changes, run shell commands, and utilize your tools as needed. Execute on the plan you developed.`;
+  }
+
+  return buildMsg;
 }
 
-const TOOLS = ["read", "edit", "write", "bash", "questionnaire", "switchProfile"];
+const WRITE_TOOLS = new Set(["edit", "write"]);
 
-export function applyProfileTools(pi: ExtensionAPI, _profile: ProfileName): void {
-  pi.setActiveTools(TOOLS);
+export function applyProfileTools(pi: ExtensionAPI, profile: ProfileName): void {
+  if (profile === "build") {
+    const allTools = pi.getAllTools().map((t) => t.name);
+    pi.setActiveTools(allTools);
+    return;
+  }
+  const planTools = pi.getAllTools().map((t) => t.name).filter((name) => !WRITE_TOOLS.has(name));
+  pi.setActiveTools(planTools);
 }
