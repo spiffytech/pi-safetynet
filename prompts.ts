@@ -16,6 +16,22 @@ export interface PermissionPromptOptions {
   reprompt?: boolean;
 }
 
+/**
+ * Run an async operation with tool output forced to expanded state.
+ * Useful when a dialog is shown that swallows keyboard shortcuts,
+ * preventing the user from manually expanding tool output to assess
+ * what the agent is doing while awaiting approval.
+ */
+async function withToolsExpanded<T>(ctx: ExtensionContext, fn: () => Promise<T>): Promise<T> {
+  const wasExpanded = ctx.ui.getToolsExpanded();
+  ctx.ui.setToolsExpanded(true);
+  try {
+    return await fn();
+  } finally {
+    ctx.ui.setToolsExpanded(wasExpanded);
+  }
+}
+
 export async function showPermissionPrompt(
   ctx: ExtensionContext,
   opts: PermissionPromptOptions,
@@ -58,7 +74,7 @@ export async function showPermissionPrompt(
     "Deny",
   ];
 
-  const choice = await ctx.ui.select(header, choices);
+  const choice = await withToolsExpanded(ctx, () => ctx.ui.select(header, choices));
 
   switch (choice) {
     case "Allow once":
@@ -85,9 +101,11 @@ export async function showRulesEditor(
     ? unapproved.map((p) => toDisplayPath(p))
     : unapproved;
   const defaultText = displayItems.join("\n");
-  const result = await ctx.ui.editor(
-    "Edit rules (one per line, use * as wildcard):",
-    defaultText,
+  const result = await withToolsExpanded(ctx, () =>
+    ctx.ui.editor(
+      "Edit rules (one per line, use * as wildcard):",
+      defaultText,
+    )
   );
 
   if (result === undefined || result === null || result.trim().length === 0) return null;
@@ -99,9 +117,11 @@ export async function showRulesEditor(
 
   if (patterns.length === 0) return null;
 
-  const persist = await ctx.ui.select(
-    "Save rules to:",
-    ["This session only", "Project"],
+  const persist = await withToolsExpanded(ctx, () =>
+    ctx.ui.select(
+      "Save rules to:",
+      ["This session only", "Project"],
+    )
   );
 
   if (persist === undefined) return null;
@@ -121,7 +141,7 @@ export async function promptProfileEscalation(
   const msg = reason
     ? `Switch to build mode?\n\nReason: ${reason}`
     : "Switch to build mode?";
-  return ctx.ui.confirm("Profile Escalation", msg);
+  return withToolsExpanded(ctx, () => ctx.ui.confirm("Profile Escalation", msg));
 }
 
 export function notifyProfileSwitch(
