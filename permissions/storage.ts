@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { Rule, Ruleset, ProfileName } from "../types.ts";
+import type { Rule, Ruleset, TempRule, ProfileName } from "../types.ts";
 import { findProjectRoot } from "../project.ts";
 import baselineData from "./baseline.json" with { type: "json" };
 
@@ -93,15 +93,53 @@ class PersistedRuleStore {
   }
 }
 
+/**
+ * Temporary rule store for time-limited and turn-limited approvals.
+ * Rules are checked on each getAllRules() call and expired ones are pruned.
+ */
+export class TempRuleStore {
+  private rules: TempRule[] = [];
+
+  addRules(rules: TempRule[]): void {
+    this.rules.push(...rules);
+  }
+
+  /** Remove all turn-limited rules. Called on agent_end. */
+  clearTurnRules(): void {
+    this.rules = this.rules.filter((r) => r.expiry.type !== "turn");
+  }
+
+  /** Prune expired time-limited rules and return the surviving regular rules. */
+  getRules(): Ruleset {
+    const now = Date.now();
+    this.rules = this.rules.filter((r) => {
+      if (r.expiry.type === "time") return r.expiry.expiresAt > now;
+      return true; // "turn" rules survive until explicitly cleared
+    });
+    return this.rules.map((r) => r.rule);
+  }
+
+  clear(): void {
+    this.rules = [];
+  }
+
+  /** Number of active temp rules (for display). */
+  get count(): number {
+    return this.rules.length;
+  }
+}
+
 export class PermissionStorage {
   session: SessionRuleStore;
   persisted: PersistedRuleStore;
+  temp: TempRuleStore;
   private cwd: string;
 
   constructor(_pi: ExtensionAPI, cwd: string) {
     this.cwd = cwd;
     this.session = new SessionRuleStore();
     this.persisted = new PersistedRuleStore(cwd);
+    this.temp = new TempRuleStore();
   }
 
   async init(_ctx: ExtensionContext): Promise<void> {
@@ -109,11 +147,15 @@ export class PermissionStorage {
   }
 
   getAllRules(): Ruleset {
-    return [...BASELINE, ...this.persisted.getRules(), ...this.session.getRules()];
+    return [...BASELINE, ...this.persisted.getRules(), ...this.session.getRules(), ...this.temp.getRules()];
   }
 
   addSessionRules(rules: Ruleset): void {
     this.session.addRules(rules);
+  }
+
+  addTempRules(rules: TempRule[]): void {
+    this.temp.addRules(rules);
   }
 
   async addPersistedRules(rules: Ruleset): Promise<void> {

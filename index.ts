@@ -7,7 +7,7 @@ import type {
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { isBashToolResult } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import type { Rule, Ruleset, ProfileName } from "./types.ts";
+import type { Rule, Ruleset, TempRule, ProfileName } from "./types.ts";
 import { SwitchProfileParams } from "./types.ts";
 import {
   getBaselineRules,
@@ -36,11 +36,51 @@ import {
   showRulesEditor,
   promptProfileEscalation,
   notifyProfileSwitch,
+  type PermissionChoice,
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./check.ts";
-import { normalizePathForMatching, findProjectRoot } from "./project.ts";
+import { normalizePathForMatching, findProjectRoot, toDisplayPath, reanchorPattern } from "./project.ts";
 
 let storage: PermissionStorage;
+
+/** Default number of minutes for timed approval. */
+const DEFAULT_TIMED_APPROVAL_MINUTES = 15;
+
+function getTimedApprovalMinutes(): number {
+  const val = pi.getFlag("timed-approval-minutes");
+  if (typeof val === "string") {
+    const n = Number(val);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  if (typeof val === "number" && val > 0) return val;
+  return DEFAULT_TIMED_APPROVAL_MINUTES;
+}
+
+/**
+ * Build a TempRule entry from the current permission check context.
+ */
+function makeTempRules(
+  opts: {
+    permission: "bash" | "read" | "edit";
+    patterns: string[];
+    profile: ProfileName;
+    expiryType: "time" | "turn";
+    minutes?: number;
+  },
+): TempRule[] {
+  const newModes: ProfileName[] = opts.profile === "plan" ? ["plan", "build"] : ["build"];
+  return opts.patterns.map((p) => ({
+    rule: {
+      permission: opts.permission as Rule["permission"],
+      pattern: p,
+      action: "allow" as const,
+      modes: newModes,
+    },
+    expiry: opts.expiryType === "time"
+      ? { type: "time" as const, expiresAt: Date.now() + (opts.minutes ?? DEFAULT_TIMED_APPROVAL_MINUTES) * 60_000 }
+      : { type: "turn" as const },
+  }));
+}
 
 async function resolvePermission(
   ctx: ExtensionContext,
@@ -62,11 +102,15 @@ async function resolvePermission(
   }
 
   const profile = getCurrentProfile();
+  const timedMinutes = getTimedApprovalMinutes();
 
+  let reprompt = false;
   while (true) {
-    const promptOpts: { permission: "bash" | "edit" | "read"; target: string; unapproved?: string[]; redirectTargets?: Array<{ permission: "read" | "edit"; path: string }>; reason?: string } = {
+    const promptOpts: { permission: "bash" | "edit" | "read"; target: string; unapproved?: string[]; redirectTargets?: Array<{ permission: "read" | "edit"; path: string }>; reason?: string; timedApprovalMinutes?: number; reprompt?: boolean } = {
       permission: opts.permission,
       target: opts.target,
+      timedApprovalMinutes: timedMinutes,
+      reprompt,
     };
     if (opts.check.unapproved && opts.check.unapproved.length > 0) promptOpts.unapproved = opts.check.unapproved;
     if (opts.check.redirectTargets?.length) promptOpts.redirectTargets = opts.check.redirectTargets;
@@ -80,16 +124,67 @@ async function resolvePermission(
 
     if (choice === "once") return undefined;
 
+    if (choice === "timed" || choice === "turn") {
+      const isFile = opts.permission === "read" || opts.permission === "edit";
+      const root = findProjectRoot(process.cwd());
+      const cwd = process.cwd();
+
+      const patterns = isFile
+        ? [normalizePathForMatching(opts.target, root)]
+        : (opts.check.unapproved?.length ? opts.check.unapproved : [opts.target]);
+
+      const tempRules = makeTempRules({
+        permission: opts.permission,
+        patterns,
+        profile,
+        expiryType: choice === "timed" ? "time" : "turn",
+        minutes: timedMinutes,
+      });
+
+      // Also add redirect target patterns as temp rules
+      if (opts.check.redirectTargets?.length) {
+        for (const rt of opts.check.redirectTargets) {
+          tempRules.push(...makeTempRules({
+            permission: rt.permission,
+            patterns: [normalizePathForMatching(rt.path, root)],
+            profile,
+            expiryType: choice === "timed" ? "time" : "turn",
+            minutes: timedMinutes,
+          }));
+        }
+      }
+
+      storage.addTempRules(tempRules);
+
+      const recheckResult = opts.recheck();
+      opts.check = recheckResult;
+      if (recheckResult.action === "allow") return undefined;
+      if (recheckResult.action === "deny") {
+        ctx.ui.notify("Temp rule(s) added but still denied.", "warning");
+        return { block: true, reason: "Still denied after temp rule update" };
+      }
+
+      reprompt = true;
+      continue;
+    }
+
+    // choice === "edit"
     const isFile = opts.permission === "read" || opts.permission === "edit";
     const root = findProjectRoot(process.cwd());
     const editorItems = isFile
-      ? [normalizePathForMatching(opts.target, root)]
+      ? [opts.target]
       : (opts.check.unapproved?.length ? opts.check.unapproved : [opts.target]);
-    const edited = await showRulesEditor(ctx, editorItems);
-    if (edited === null) continue;
+    const edited = await showRulesEditor(ctx, editorItems, isFile);
+    if (edited === null) { reprompt = true; continue; }
+
+    // Convert cwd-relative patterns back to project-root-relative for storage
+    const cwd = process.cwd();
+    const patternsForStorage = isFile
+      ? edited.patterns.map((p) => reanchorPattern(p, cwd, root))
+      : edited.patterns;
 
     const newModes: ProfileName[] = profile === "plan" ? ["plan", "build"] : ["build"];
-    const newRules: Ruleset = edited.patterns.map((p) => ({
+    const newRules: Ruleset = patternsForStorage.map((p) => ({
       permission: opts.permission as Rule["permission"],
       pattern: p,
       action: "allow" as const,
@@ -122,7 +217,7 @@ async function resolvePermission(
       return { block: true, reason: "Still denied after rule update" };
     }
 
-    ctx.ui.notify("Rule(s) added but still need approval. Re-prompting...", "warning");
+    reprompt = true;
   }
 }
 
@@ -233,6 +328,7 @@ function registerSwitchProfileTool(pi: ExtensionAPI) {
       if (requiresApproval(current, target)) {
         const approved = await promptProfileEscalation(ctx, params.reason);
         if (!approved) {
+          ctx.abort();
           return {
             content: [
               { type: "text", text: `Profile switch denied. Staying in ${current} mode.` },
@@ -308,6 +404,7 @@ function registerCommands(pi: ExtensionAPI) {
       const baseline = getBaselineRules();
       const persisted = storage.persisted.getRules();
       const session = storage.session.getRules();
+      const temp = storage.temp.getRules();
 
       const lines = [
         `Current profile: ${profile}`,
@@ -325,6 +422,10 @@ function registerCommands(pi: ExtensionAPI) {
 
       if (session.length > 0) {
         lines.push("", "--- SESSION ---", ...formatRules(session));
+      }
+
+      if (temp.length > 0) {
+        lines.push("", "--- TEMPORARY ---", ...formatRules(temp));
       }
 
       lines.push("", `Approvals file: ${storage.persisted.getFilePath()}`);
@@ -401,6 +502,12 @@ export default function spfyExtension(api: ExtensionAPI) {
     default: true,
   });
 
+  pi.registerFlag("timed-approval-minutes", {
+    description: `Minutes for timed approval (default: ${DEFAULT_TIMED_APPROVAL_MINUTES})`,
+    type: "string",
+    default: String(DEFAULT_TIMED_APPROVAL_MINUTES),
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     await restoreSessionState(ctx, { init: true, notify: true });
 
@@ -416,6 +523,11 @@ export default function spfyExtension(api: ExtensionAPI) {
 
   pi.on("tool_call", handleToolCall);
   pi.on("tool_result", handleToolResult);
+
+  // Clear turn-limited temp rules when the agent finishes (user gets a turn)
+  pi.on("agent_end", async () => {
+    storage.temp.clearTurnRules();
+  });
 
   pi.on("context", async (event) => {
     return { messages: filterProfileContext(event.messages) };
