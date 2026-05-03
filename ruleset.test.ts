@@ -596,4 +596,56 @@ describe("composition: bash permission end-to-end", () => {
       assert.equal(checkFileTarget("/dev/sda1", "edit", "build", BASELINE).action, "ask");
     });
   });
+
+  describe("external path approvals", () => {
+    it("baseline read: ** rule does not auto-approve external paths", () => {
+      // Without the fix, baseline read: ** -> allow would auto-approve /etc/passwd
+      assert.equal(checkFileTarget("/etc/passwd", "read", "build", BASELINE).action, "ask");
+    });
+
+    it("user allow rule overrides external path default", () => {
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "edit", pattern: "/tmp/config.yaml", action: "allow", modes: ["build"] },
+      ];
+      assert.equal(checkFileTarget("/tmp/config.yaml", "edit", "build", rules).action, "allow");
+    });
+
+    it("user read allow rule overrides external path default", () => {
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "read", pattern: "/etc/hosts", action: "allow", modes: ["build"] },
+      ];
+      assert.equal(checkFileTarget("/etc/hosts", "read", "build", rules).action, "allow");
+    });
+
+    it("specific user deny rule still denies external paths", () => {
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "edit", pattern: "/tmp/secret", action: "deny", modes: ALL_MODES },
+      ];
+      assert.equal(checkFileTarget("/tmp/secret", "edit", "build", rules).action, "deny");
+    });
+  });
+
+  describe("rootless glob approval patterns", () => {
+    it("**/*.ts pattern matches files at any depth", () => {
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "edit", pattern: "**/*.ts", action: "allow", modes: ["build"] },
+      ];
+      assert.equal(checkFileTarget("test.ts", "edit", "build", rules).action, "allow");
+      assert.equal(checkFileTarget("src/test.ts", "edit", "build", rules).action, "allow");
+      assert.equal(checkFileTarget("src/deep/test.ts", "edit", "build", rules).action, "allow");
+    });
+
+    it("bare ** pattern matches everything", () => {
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "edit", pattern: "**", action: "allow", modes: ALL_MODES },
+      ];
+      assert.equal(checkFileTarget("anything.ts", "edit", "build", rules).action, "allow");
+      assert.equal(checkFileTarget("src/anything.ts", "edit", "build", rules).action, "allow");
+    });
+  });
 });

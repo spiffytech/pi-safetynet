@@ -99,3 +99,67 @@ describe("checkBashPermission cd auto-approve", () => {
     assert.equal(result.action, "allow");
   });
 });
+
+describe("checkBashPermission plan-mode edit denial", () => {
+  // In plan mode, bash commands that are functionally equivalent to
+  // the edit/write tools (which are disabled) should be denied outright,
+  // not merely prompted with 'ask'.
+
+  const DENY_IN_PLAN: [string, string][] = [
+    // Heredoc + redirect (was escaping before parser gap fix)
+    ["cat <<EOF > file.txt\nhello\nEOF", "heredoc with > redirect"],
+    ["cat <<EOF >> file.txt\nhello\nEOF", "heredoc with >> redirect"],
+    ["cat <<EOF | tee file.txt\nhello\nEOF", "heredoc piped to tee"],
+
+    // Output redirects
+    ["echo hello > file.txt", "echo redirect"],
+    ["cat file.txt > new.txt", "cat redirect"],
+    ["grep pat file.txt > out.txt", "grep redirect"],
+
+    // In-place edit flags
+    ["sed -i s/foo/bar/ file.txt", "sed -i"],
+    ["perl -pi -e s/foo/bar/ file.txt", "perl -pi"],
+
+    // Write-purpose commands
+    ["tee file.txt", "tee"],
+    ["truncate -s 0 file.txt", "truncate"],
+    ["install -m 644 src dst", "install"],
+
+    // Interpreter one-liners
+    ["python3 -c \"open('f','w')\"", "python3 -c"],
+    ["node -e \"require('fs').writeFileSync('f','hi')\"", "node -e"],
+    ["sh -c 'echo hi > f.txt'", "sh -c"],
+  ];
+
+  for (const [cmd, label] of DENY_IN_PLAN) {
+    it(`denies in plan mode: ${label}`, () => {
+      const result = checkBashPermission(cmd, "plan", RULES, PROJECT_ROOT);
+      assert.equal(result.action, "deny");
+      assert.ok(result.reason?.includes("Plan mode"));
+    });
+
+    it(`does not deny in build mode: ${label}`, () => {
+      const result = checkBashPermission(cmd, "build", RULES, PROJECT_ROOT);
+      assert.notEqual(result.action, "deny");
+    });
+  }
+
+  // Read-only commands must still be allowed in plan mode
+  const ALLOW_IN_PLAN: [string, string][] = [
+    ["cat file.txt", "cat"],
+    ["ls -la", "ls"],
+    ["grep pattern file.txt", "grep"],
+    ["find . -name '*.ts'", "find"],
+    ["git status", "git status"],
+    ["echo hello", "echo (no redirect)"],
+    ["sed -n 5p file.txt", "sed -n (read-only)"],
+    ["jq . file.json", "jq"],
+  ];
+
+  for (const [cmd, label] of ALLOW_IN_PLAN) {
+    it(`allows in plan mode: ${label}`, () => {
+      const result = checkBashPermission(cmd, "plan", RULES, PROJECT_ROOT);
+      assert.equal(result.action, "allow");
+    });
+  }
+});

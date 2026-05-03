@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import type { ProfileName, PermissionAction, Ruleset } from "./types.ts";
 import { evaluatePermission } from "./permissions/ruleset.ts";
-import { parseCommand, isHazardousFile } from "./bash-parser.ts";
+import { parseCommand, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
 import { isExternalPath, normalizePathForMatching, findProjectRoot } from "./project.ts";
 
 /** Device files that are always safe to use as redirect targets. */
@@ -39,11 +39,8 @@ export function checkFileTarget(
   }
 
   const root = projectRoot ?? findProjectRoot(process.cwd());
-  if (isExternalPath(filePath, root)) {
-    return { action: "ask", reason: "Path is outside project root" };
-  }
-
   const normalized = normalizePathForMatching(filePath, root);
+
   const result = evaluatePermission(permission, normalized, profile, rules);
   if (result.action === "deny") {
     const match = result.matchedRule;
@@ -52,6 +49,17 @@ export function checkFileTarget(
       reason: match ? `Denied by rule "${match.pattern}"` : "Denied by ruleset",
     };
   }
+
+  // For external paths, the baseline catch-all rules (e.g. read: ** -> allow)
+  // match but should not automatically approve — the user should be asked.
+  // However, if an explicit non-catch-all rule matched (e.g. a user-added
+  // allow rule for a specific external path), honour it.
+  if (isExternalPath(filePath, root)) {
+    if (result.action === "allow" && result.matchedRule?.pattern === "**") {
+      return { action: "ask", reason: "Path is outside project root" };
+    }
+  }
+
   return { action: result.action };
 }
 
@@ -100,6 +108,14 @@ export function checkBashPermission(
 
   if (parsed.catastrophic) {
     return { action: "deny", reason: "Catastrophic command", unapproved: [] };
+  }
+
+  // In plan mode, deny bash commands that are functionally equivalent
+  // to the edit/write tools (which are disabled in plan mode).
+  // This prevents circumvention via heredoc+redirect, sed -i, tee,
+  // interpreter -c/-e, etc.
+  if (profile === "plan" && isEditLikeBashCommand(command, parsed)) {
+    return { action: "deny", reason: "Plan mode: bash command writes to a file (equivalent to edit/write tool)" };
   }
 
   const unapproved: string[] = [];
