@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseCommand, isHazardousFile } from "./bash-parser.ts";
+import { parseCommand, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
 
 describe("parseCommand", () => {
   describe("subcommands", () => {
@@ -133,6 +133,61 @@ describe("parseCommand", () => {
       assert.ok(parseCommand("sudo apt install foo").subcommands.some((c) => c === "sudo apt install foo"));
     });
 
+    // xargs stripping
+    it("strips xargs and returns inner command", () => {
+      assert.deepEqual(parseCommand("xargs echo hello").subcommands, ["echo hello"]);
+    });
+
+    it("strips xargs flags without args", () => {
+      assert.deepEqual(parseCommand("xargs -0 echo hello").subcommands, ["echo hello"]);
+    });
+
+    it("strips xargs flags with separate args", () => {
+      assert.deepEqual(parseCommand("xargs -n 2 echo hello").subcommands, ["echo hello"]);
+    });
+
+    // The shell parser misparses standalone {} as a brace group (Block),
+    // so we preprocess {} into "{}" before parsing.  With this fix,
+    // xargs -I {} rm {} correctly produces the inner command with its {}
+    // argument preserved.
+    it("strips xargs -I with {} arg", () => {
+      assert.deepEqual(parseCommand("xargs -I {} rm {}").subcommands, ["rm {}"]);
+    });
+
+    it("strips multiple xargs flags", () => {
+      assert.deepEqual(parseCommand("xargs -0 -r -n 2 echo hello").subcommands, ["echo hello"]);
+    });
+
+    it("strips xargs --  and treats next word as command", () => {
+      assert.deepEqual(parseCommand("xargs -- rm -i").subcommands, ["rm -i"]);
+    });
+
+    it("defaults to echo for bare xargs with no inner command", () => {
+      assert.deepEqual(parseCommand("xargs").subcommands, ["echo"]);
+    });
+
+    it("strips xargs long flags", () => {
+      assert.deepEqual(parseCommand("xargs --no-run-if-empty echo hello").subcommands, ["echo hello"]);
+    });
+
+    it("strips xargs long flags with =value", () => {
+      assert.deepEqual(parseCommand("xargs --max-args=2 echo hello").subcommands, ["echo hello"]);
+    });
+
+    it("keeps sudo prefix with xargs inside", () => {
+      // sudo xargs: sudo is kept, xargs is stripped
+      assert.ok(parseCommand("sudo xargs rm file").subcommands.some((c) => c === "sudo rm file"));
+    });
+
+    it("preserves {} in echo command", () => {
+      assert.deepEqual(parseCommand("echo {}").subcommands, ["echo {}"]);
+    });
+
+    it("preserves {} in pipeline with xargs", () => {
+      const r = parseCommand("find . -print0 | xargs -0 rm {}");
+      assert.ok(r.subcommands.includes("rm {}"));
+    });
+
     it("extracts command without append redirect target", () => {
       const r = parseCommand("echo hi >> log.txt").subcommands;
       assert.ok(r.some((c) => c.startsWith("echo")));
@@ -262,6 +317,12 @@ describe("parseCommand", () => {
       ["rm -rf $HOME", "rm -rf $HOME"],
       ["rm -rf ${HOME}", "rm -rf ${HOME}"],
       ["chmod 777 $VAR", "chmod $VAR"],
+      ["xargs rm -rf /", "xargs rm -rf root"],
+      ["xargs -r rm -rf /etc", "xargs rm protected"],
+      ["xargs -0 rm -rf /usr", "xargs -0 rm protected"],
+      ["xargs -n 2 chmod 777 /usr", "xargs chmod protected"],
+      ["xargs -I {} chown root /etc", "xargs chown protected"],
+      ["sudo xargs rm -rf /etc", "sudo xargs rm protected"],
     ] as const;
 
     const ALLOWED = [
@@ -291,6 +352,121 @@ describe("parseCommand", () => {
     }
   });
 });
+
+describe("isEditLikeBashCommand", () => {
+  // Helper to parse then check
+  function isEditLike(cmd: string): boolean {
+    return isEditLikeBashCommand(cmd, parseCommand(cmd));
+  }
+
+  describe("heredoc + redirect (parser gap fix)", () => {
+    const EDIT_LIKE = [
+      ["cat <<EOF > file.txt\nhello\nEOF", "heredoc with > redirect"],
+      ["cat <<EOF >> file.txt\nhello\nEOF", "heredoc with >> redirect"],
+      ["cat <<EOF | tee file.txt\nhello\nEOF", "heredoc piped to tee"],
+      ["cat <<EOF | dd of=file.txt\nhello\nEOF", "heredoc piped to dd"],
+    ] as const;
+
+    for (const [cmd, label] of EDIT_LIKE) {
+      it(`detects ${label}`, () => {
+        assert.equal(isEditLike(cmd), true);
+      });
+    }
+  });
+
+  describe("output redirects", () => {
+    const EDIT_LIKE = [
+      ["echo hello > file.txt", "echo with redirect"],
+      ["cat file.txt > new.txt", "cat with redirect"],
+      ["grep pattern file.txt > out.txt", "grep with redirect"],
+      ["echo hello >> file.txt", "echo with append redirect"],
+      ["sort file.txt > sorted.txt", "sort with redirect"],
+      ["awk '{print}' file.txt > out.txt", "awk with redirect"],
+      ["exec 3> file.txt", "exec with fd redirect"],
+    ] as const;
+
+    for (const [cmd, label] of EDIT_LIKE) {
+      it(`detects ${label}`, () => {
+        assert.equal(isEditLike(cmd), true);
+      });
+    }
+  });
+
+  describe("in-place edit flags", () => {
+    const EDIT_LIKE = [
+      ["sed -i s/foo/bar/ file.txt", "sed -i"],
+      ["sed -i.bak s/foo/bar/ file.txt", "sed -i.bak"],
+      ["sed --in-place s/foo/bar/ file.txt", "sed --in-place"],
+      ["perl -pi -e s/foo/bar/ file.txt", "perl -pi"],
+      ["perl -pe 's/foo/bar/' file.txt", "perl -pe"],
+    ] as const;
+
+    for (const [cmd, label] of EDIT_LIKE) {
+      it(`detects ${label}`, () => {
+        assert.equal(isEditLike(cmd), true);
+      });
+    }
+  });
+
+  describe("write-purpose commands", () => {
+    const EDIT_LIKE = [
+      ["tee file.txt", "tee with file arg"],
+      ["tee file.txt <<< hello", "tee with here-string"],
+      ["truncate -s 0 file.txt", "truncate"],
+      ["install -m 644 src dst", "install"],
+    ] as const;
+
+    for (const [cmd, label] of EDIT_LIKE) {
+      it(`detects ${label}`, () => {
+        assert.equal(isEditLike(cmd), true);
+      });
+    }
+  });
+
+  describe("interpreter one-liners", () => {
+    const EDIT_LIKE = [
+      ["python3 -c \"open('f','w').write('hi')\"", "python3 -c"],
+      ["python -c \"print('hello')\"", "python -c"],
+      ["node -e \"require('fs').writeFileSync('f','hi')\"", "node -e"],
+      ["ruby -e \"File.write('f','hi')\"", "ruby -e"],
+      ["perl -e 'print hi'", "perl -e"],
+      ["php -r 'echo hi;'", "php -r"],
+      ["sh -c 'echo hello > file.txt'", "sh -c"],
+      ["bash -c 'echo hello > file.txt'", "bash -c"],
+    ] as const;
+
+    for (const [cmd, label] of EDIT_LIKE) {
+      it(`detects ${label}`, () => {
+        assert.equal(isEditLike(cmd), true);
+      });
+    }
+  });
+
+  describe("pure read-only commands (should NOT be edit-like)", () => {
+    const READ_ONLY = [
+      ["cat file.txt", "cat (no redirect)"],
+      ["ls -la", "ls"],
+      ["grep pattern file.txt", "grep (no redirect)"],
+      ["find . -name '*.ts'", "find"],
+      ["git status", "git status"],
+      ["git log --oneline -5", "git log"],
+      ["echo hello", "echo (no redirect)"],
+      ["sed -n 5p file.txt", "sed -n (read-only)"],
+      ["jq . file.json", "jq (no redirect)"],
+      ["sort file.txt", "sort (no redirect)"],
+      ["head -20 file.txt", "head (no redirect)"],
+      ["wc -l file.txt", "wc (no redirect)"],
+    ] as const;
+
+    for (const [cmd, label] of READ_ONLY) {
+      it(`allows ${label}`, () => {
+        assert.equal(isEditLike(cmd), false);
+      });
+    }
+  });
+});
+
+// --- Existing isHazardousFile tests below ---
 
 describe("isHazardousFile", () => {
   const HAZARDOUS = [

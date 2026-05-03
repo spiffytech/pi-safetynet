@@ -167,6 +167,53 @@ function walkWord(w: Word, onSimple: SimpleCallback): void {
   }
 }
 
+/** Replace standalone {} tokens (not inside quotes) with "{}" so that
+ *  @aliou/sh doesn't misparse them as empty brace groups.
+ *  A character-by-character walk tracks quote state to avoid modifying
+ *  {} that appears inside single- or double-quoted strings.
+ */
+function quoteBraces(cmd: string): string {
+  let result = "";
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let i = 0;
+
+  while (i < cmd.length) {
+    const ch = cmd[i]!;
+
+    if (ch === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      result += ch;
+      i++;
+    } else if (ch === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      result += ch;
+      i++;
+    } else if (
+      ch === "{" && !inSingleQuote && !inDoubleQuote
+      && i + 1 < cmd.length && cmd[i + 1] === "}"
+    ) {
+      // Check that {} is a standalone token (bounded by whitespace or string
+      // boundaries).  This avoids replacing {} inside -I{} or similar.
+      const prevOk = i === 0 || /\s/.test(cmd[i - 1]!);
+      const nextIdx = i + 2;
+      const nextOk = nextIdx >= cmd.length || /\s/.test(cmd[nextIdx]!);
+      if (prevOk && nextOk) {
+        result += '"{}"';
+        i += 2;
+      } else {
+        result += ch;
+        i++;
+      }
+    } else {
+      result += ch;
+      i++;
+    }
+  }
+
+  return result;
+}
+
 const PROTECTED_DIRS = new Set(
   "/ /usr /usr/local /usr/bin /usr/lib /usr/sbin /usr/share /etc /var /bin /sbin /lib /lib64 /boot /sys /proc /dev /root /opt /home /srv /snap /tmp".split(" "),
 );
@@ -214,35 +261,102 @@ function extractTestFilePaths(words: string[]): string[] {
 
 const SUDO_FLAGS_WITH_ARGS = new Set(["-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D", "-T", "-R"]);
 
+// xargs short flags that consume the next word as their argument.
+// (Flags like -e, -i, -l have optional concatenated args and don't consume
+// a separate word; --long-flags embed the value after =.)
+const XARGS_FLAGS_WITH_ARGS = new Set(["-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"]);
+
+/** Starting at `start` in `words`, skip past xargs options and return the
+ *  index of the first non-option word (the inner command). */
+function skipXargsFlags(words: Word[], start: number): number {
+  let i = start;
+  while (i < words.length) {
+    const w = wordToString(words[i]!);
+    if (!w) { i++; continue; }
+    // -- ends option processing; the next word is the command.
+    if (w === "--") { i++; break; }
+    // Long options: value is either after = or not present.
+    if (w.startsWith("--")) { i++; continue; }
+    // Short options
+    if (w.startsWith("-")) {
+      if (XARGS_FLAGS_WITH_ARGS.has(w)) { i += 2; continue; }
+      i++;
+      continue;
+    }
+    // Non-option word: this is the inner command.
+    break;
+  }
+  return i;
+}
+
+/** Convert an array of Words to a space-joined string. */
+function wordsToString(words: Word[]): string {
+  const parts: string[] = [];
+  for (const w of words) {
+    const s = wordToString(w);
+    if (s !== null) parts.push(s);
+  }
+  return parts.join(" ");
+}
+
 const SYSTEM_HALT_COMMANDS = new Set(["shutdown", "reboot", "halt", "poweroff", "init"]);
 
 function getBaseWord(cmd: SimpleCommand): string | null {
-  const firstWord = wordToString(cmd.words?.[0] as Word);
-  if (!firstWord) return null;
-  if (firstWord !== "sudo") return firstWord;
-  let skipNext = false;
-  for (let i = 1; i < cmd.words!.length; i++) {
-    const w = wordToString(cmd.words![i]!);
-    if (!w) continue;
-    if (skipNext) {
-      skipNext = false;
-      continue;
+  const words = cmd.words ?? [];
+  let i = 0;
+
+  // Peel off sudo (and its flags)
+  if (wordToString(words[0] as Word) === "sudo") {
+    let skipNext = false;
+    for (i = 1; i < words.length; i++) {
+      const w = wordToString(words[i]!);
+      if (!w) continue;
+      if (skipNext) { skipNext = false; continue; }
+      if (w.startsWith("-")) {
+        if (SUDO_FLAGS_WITH_ARGS.has(w)) skipNext = true;
+        continue;
+      }
+      break;
     }
-    if (w.startsWith("-")) {
-      if (SUDO_FLAGS_WITH_ARGS.has(w)) skipNext = true;
-      continue;
-    }
-    return w;
   }
-  return null;
+
+  // Peel off xargs (and its flags)
+  if (i < words.length && wordToString(words[i] as Word) === "xargs") {
+    i = skipXargsFlags(words, i + 1);
+  }
+
+  if (i >= words.length) return null;
+  return wordToString(words[i] as Word) ?? null;
 }
 
 function getNonFlagArgsFromNode(cmd: SimpleCommand): string[] {
-  const firstWord = wordToString(cmd.words?.[0] as Word);
-  const start = firstWord === "sudo" ? 2 : 1;
+  const words = cmd.words ?? [];
+  let i = 0;
+
+  // Peel off sudo
+  if (wordToString(words[0] as Word) === "sudo") {
+    let skipNext = false;
+    for (i = 1; i < words.length; i++) {
+      const w = wordToString(words[i]!);
+      if (!w) continue;
+      if (skipNext) { skipNext = false; continue; }
+      if (w.startsWith("-")) {
+        if (SUDO_FLAGS_WITH_ARGS.has(w)) skipNext = true;
+        continue;
+      }
+      break;
+    }
+  }
+
+  // Peel off xargs
+  if (i < words.length && wordToString(words[i] as Word) === "xargs") {
+    i = skipXargsFlags(words, i + 1);
+  }
+
+  // Skip the command name itself; collect non-flag args of the inner command
   const args: string[] = [];
-  for (let i = start; i < (cmd.words?.length ?? 0); i++) {
-    const s = wordToString(cmd.words![i]!);
+  for (i = i + 1; i < words.length; i++) {
+    const s = wordToString(words[i]!);
     if (s !== null && !s.startsWith("-")) args.push(s);
   }
   return args;
@@ -276,6 +390,10 @@ export interface ParsedCommand {
   subcommands: string[];
   redirects: RedirectTarget[];
   catastrophic: boolean;
+  /** True when the command uses heredoc (<<) or here-string (<<<) — the
+   *  @aliou/sh parser frequently loses redirects and pipelines that follow
+   *  these constructs, so callers should apply a regex-based fallback scan. */
+  hasHeredoc: boolean;
 }
 
 export function parseCommand(command: string): ParsedCommand {
@@ -288,6 +406,14 @@ export function parseCommand(command: string): ParsedCommand {
     command = command
       .replace(/(?<=^|\s)\\\((?=\s|$)/g, '"("')
       .replace(/(?<=^|\s)\\\)(?=\s|$)/g, '")"');
+
+    // @aliou/sh also misparses standalone {} as an empty brace group (Block),
+    // but in the context of xargs and find -exec, {} is a placeholder token.
+    // An empty brace group { } is actually a syntax error in bash, so a
+    // standalone {} can never be a real brace group.  Replace it with a
+    // double-quoted version before parsing so the parser keeps it as a
+    // regular word token.
+    command = quoteBraces(command);
 
     const { ast } = parse(command);
     const subcommands: string[] = [];
@@ -325,7 +451,45 @@ export function parseCommand(command: string): ParsedCommand {
 
         if (isNodeCatastrophic(cmd)) catastrophic = true;
 
-        subcommands.push(commandToString(cmd));
+        // Strip xargs (and its flags) from the subcommand so that
+        // permissions are checked against the inner command.
+        // Keep sudo prefix since sudo commands should always require approval.
+        const words = cmd.words ?? [];
+        const firstEffective = wordToString(words[0] as Word);
+
+        // Determine where xargs starts (position 0, or after sudo flags)
+        let xargsIdx = -1;
+        if (firstEffective === "xargs") {
+          xargsIdx = 0;
+        } else if (firstEffective === "sudo") {
+          let skipNext = false;
+          for (let si = 1; si < words.length; si++) {
+            const sw = wordToString(words[si] as Word);
+            if (!sw) continue;
+            if (skipNext) { skipNext = false; continue; }
+            if (sw.startsWith("-")) {
+              if (SUDO_FLAGS_WITH_ARGS.has(sw)) skipNext = true;
+              continue;
+            }
+            if (sw === "xargs") xargsIdx = si;
+            break;
+          }
+        }
+
+        if (xargsIdx >= 0) {
+          const innerStart = skipXargsFlags(words, xargsIdx + 1);
+          const prefixWords = words.slice(0, xargsIdx); // e.g. [sudo ...]
+          const innerWords = words.slice(innerStart);
+          const allWords = [...prefixWords, ...innerWords];
+          if (allWords.length) {
+            subcommands.push(wordsToString(allWords));
+          } else {
+            // xargs with no command defaults to echo
+            subcommands.push("echo");
+          }
+        } else {
+          subcommands.push(commandToString(cmd));
+        }
 
         // [ (test) and [[ check file existence/properties, which
         // constitutes a file read. Extract file paths from test
@@ -348,10 +512,48 @@ export function parseCommand(command: string): ParsedCommand {
       });
     }
 
+    // Fallback: @aliou/sh loses output redirects and pipelines when a
+    // heredoc or here-string precedes them.  For example,
+    //   cat <<EOF > file.txt      — redirect is missed
+    //   cat <<EOF | tee file.txt — pipeline is lost
+    // Scan the raw command string for > / >> redirects that the parser
+    // didn't extract, and for pipes that would route data to a write
+    // command.
+    const hasHeredocOrHereString = /<<[-]?\S|^\s*.*<<<|\s<<-</m.test(command);
+
+    if (hasHeredocOrHereString) {
+      // Regex scan for output redirects the parser missed.
+      // Handles: > file, >> file, &> file, >| file, <> file
+      // The heredoc delimiter (<< / <<- / <<<) may appear before or after
+      // the redirect in the command string.
+      const redirectRe = /(?:&>>|&>|>>|>\||<>|>)\s*([^\s;|&}#${)(`'"\n]+)/g;
+      const existingOutputPaths = new Set(redirects.filter((r) => r.direction === "output").map((r) => r.path));
+      for (const m of command.matchAll(redirectRe)) {
+        const path = m[1]!.replace(/^['"]+|['"]+$/g, ""); // strip quotes
+        // Filter out fd descriptors (2>&1, etc.) and already-detected paths
+        if (path && !/^\d+$/.test(path) && !existingOutputPaths.has(path)) {
+          redirects.push({ path, direction: "output" });
+          existingOutputPaths.add(path);
+        }
+      }
+
+      // Regex scan for pipes feeding write commands after a heredoc.
+      // The parser may lose pipeline stages after <<; detect common write
+      // commands that appear after | in the raw string.
+      const pipeWriteRe = /\|\s*(tee\b|dd\b|cat\s+>|cat\s+>>)/g;
+      for (const m of command.matchAll(pipeWriteRe)) {
+        const writeCmd = m[1]!.trim();
+        if (!subcommands.some((s) => s.startsWith(writeCmd.split(/\s/)[0]!))) {
+          subcommands.push(writeCmd);
+        }
+      }
+    }
+
     return {
       subcommands: [...new Set(subcommands)],
       redirects,
       catastrophic,
+      hasHeredoc: hasHeredocOrHereString,
     };
   } catch {
     const first = command.trim().split(/\s+/)[0] ?? "";
@@ -359,6 +561,7 @@ export function parseCommand(command: string): ParsedCommand {
       subcommands: first ? [first] : [],
       redirects: [],
       catastrophic: first ? SYSTEM_HALT_COMMANDS.has(first) : false,
+      hasHeredoc: /<<[-]?\S|<<</.test(command),
     };
   }
 }
@@ -386,6 +589,75 @@ export function isHazardousFile(filePath: string): boolean {
   if (/\.gnupg[\\/]/.test(filePath)) return true;
   if (/\.aws[\\/]credentials/.test(filePath)) return true;
   if (/\.docker[\\/]config\.json/.test(filePath)) return true;
+
+  return false;
+}
+
+/**
+ * Detect bash commands that effectively perform file edits — the moral
+ * equivalent of the `edit` or `write` tools.  Used in plan mode to deny
+ * these commands outright, just as the edit/write tools are disabled.
+ *
+ * Categories:
+ * 1. Any command with an output redirect (>, >>, &>, etc.) — writing to a
+ *    file via redirect is equivalent to the write tool.
+ * 2. Heredoc / here-string constructs that feed data onward (<<EOF,
+ *    <<<).  The parser often loses the subsequent redirect or pipeline,
+ *    so any heredoc/here-string command is treated as potentially
+ *    edit-like unless it's a pure read (e.g. `cat <<EOF` with no redirect
+ *    and no pipe to a write command after the delimiter).
+ * 3. Commands with in-place edit flags: `sed -i`, `perl -pi`/`perl -pe`.
+ * 4. Commands whose primary purpose is writing files: `tee`, `truncate`,
+ *    `install`.
+ * 5. Interpreter one-liner invocations (`python -c`, `node -e`, etc.)
+ *    that can embed arbitrary file I/O in code strings.
+ * 6. Shell invocation of subcommands (`sh -c`, `bash -c`) that can embed
+ *    redirects or write commands in the code string.
+ */
+export function isEditLikeBashCommand(
+  command: string,
+  parsed: ParsedCommand,
+): boolean {
+  // 1. Any output redirect detected by the parser or the heredoc fallback
+  if (parsed.redirects.some((r) => r.direction === "output")) return true;
+
+  // 2. Heredoc / here-string with redirect or pipe in raw command
+  if (parsed.hasHeredoc) {
+    // If the raw command contains any output redirect operator, it's edit-like
+    if (/(?:&>>|&>|>>|>\||<>|>)\s*[^\s]/.test(command)) return true;
+    // If the raw command pipes to a known write command after the heredoc
+    if (/\|\s*(?:tee|dd|cat\s+>|cat\s+>>)/.test(command)) return true;
+  }
+
+  // 3. In-place edit flags
+  for (const sub of parsed.subcommands) {
+    // sed -i, sed -i.bak, sed --in-place
+    if (/^sed\s/.test(sub) && /\s-i\b|\s-i\.|\s--in-place/.test(sub)) return true;
+    // perl -pi, perl -pe  (in-place edit flags)
+    if (/^perl\s/.test(sub) && /\s-p[ie]\b|\s-p[ie]\s/.test(sub)) return true;
+  }
+
+  // 4. Write-purpose commands
+  for (const sub of parsed.subcommands) {
+    const baseCmd = sub.trim().split(/\s+/)[0]!;
+    if (baseCmd === "tee") return true;
+    if (baseCmd === "truncate") return true;
+    if (baseCmd === "install") return true;
+  }
+
+  // 5. Interpreter one-liner invocations that can embed arbitrary file I/O
+  for (const sub of parsed.subcommands) {
+    const parts = sub.trim().split(/\s+/);
+    const base = parts[0]!;
+    // python[3] -c, node -e, ruby -e, perl -e, php -r
+    if (/^(python3?|node|ruby|perl|php)$/.test(base)) {
+      if (parts.some((p) => p === "-c" || p === "-e" || p === "-r")) return true;
+    }
+    // sh/bash/dash/zsh -c  (subshell execution with code string)
+    if (/^(sh|bash|dash|zsh)$/.test(base)) {
+      if (parts.some((p) => p === "-c")) return true;
+    }
+  }
 
   return false;
 }
