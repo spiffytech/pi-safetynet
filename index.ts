@@ -248,15 +248,29 @@ async function handleToolCall(
       });
     }
 
-    if (event.toolName === "read" || event.toolName === "edit" || event.toolName === "write") {
-      const perm: "read" | "edit" = event.toolName === "read" ? "read" : "edit";
+    if (event.toolName === "edit" || event.toolName === "write") {
+      if (profile === "plan") {
+        ctx.abort();
+        return { block: true, reason: `Plan mode: ${event.toolName} is disabled. Use switchProfile with target "build" to request build mode.` };
+      }
       const filePath = event.input.path as string;
       const rules = storage.getAllRules();
       return resolvePermission(ctx, {
-        permission: perm,
+        permission: "edit",
         target: filePath,
-        check: checkFileTarget(filePath, perm, profile, rules),
-        recheck: () => checkFileTarget(filePath, perm, profile, storage.getAllRules()),
+        check: checkFileTarget(filePath, "edit", profile, rules),
+        recheck: () => checkFileTarget(filePath, "edit", profile, storage.getAllRules()),
+      });
+    }
+
+    if (event.toolName === "read") {
+      const filePath = event.input.path as string;
+      const rules = storage.getAllRules();
+      return resolvePermission(ctx, {
+        permission: "read",
+        target: filePath,
+        check: checkFileTarget(filePath, "read", profile, rules),
+        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules()),
       });
     }
 
@@ -343,6 +357,22 @@ function registerSwitchProfileTool(pi: ExtensionAPI) {
       persistProfile(pi);
       applyProfileTools(pi, target);
       notifyProfileSwitch(ctx, current, target);
+      updateStatus(ctx);
+
+      // setActiveTools only takes effect on the next turn (Pi snapshots
+      // the tool list at turn start). So we terminate the current turn
+      // and trigger a fresh one — the new turn picks up the updated
+      // tool list and gets the build-mode context from before_agent_start.
+      const contextMessage = getProfileContextMessage(target, current);
+
+      pi.sendMessage(
+        {
+          customType: "spfy:profile:context",
+          content: contextMessage,
+          display: true,
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
 
       return {
         content: [
@@ -352,6 +382,7 @@ function registerSwitchProfileTool(pi: ExtensionAPI) {
           },
         ],
         details: {},
+        terminate: true,
       };
     },
   });
