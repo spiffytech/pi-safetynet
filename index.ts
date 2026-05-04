@@ -33,13 +33,12 @@ import {
 } from "./profiles/plan-on-error.ts";
 import {
   showPermissionPrompt,
-  showRulesEditor,
   promptProfileEscalation,
   notifyProfileSwitch,
-  type PermissionChoice,
+  type PermissionPromptResult,
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./check.ts";
-import { normalizePathForMatching, findProjectRoot, toDisplayPath, reanchorPattern } from "./project.ts";
+import { normalizePathForMatching, findProjectRoot } from "./project.ts";
 
 let storage: PermissionStorage;
 
@@ -103,10 +102,12 @@ async function resolvePermission(
 
   const profile = getCurrentProfile();
   const timedMinutes = getTimedApprovalMinutes();
+  const root = findProjectRoot(process.cwd());
+  const isFile = opts.permission === "read" || opts.permission === "edit";
 
   let reprompt = false;
   while (true) {
-    const promptOpts: { permission: "bash" | "edit" | "read"; target: string; unapproved?: string[]; redirectTargets?: Array<{ permission: "read" | "edit"; path: string }>; reason?: string; timedApprovalMinutes?: number; reprompt?: boolean } = {
+    const promptOpts: Parameters<typeof showPermissionPrompt>[1] = {
       permission: opts.permission,
       target: opts.target,
       timedApprovalMinutes: timedMinutes,
@@ -115,100 +116,112 @@ async function resolvePermission(
     if (opts.check.unapproved && opts.check.unapproved.length > 0) promptOpts.unapproved = opts.check.unapproved;
     if (opts.check.redirectTargets?.length) promptOpts.redirectTargets = opts.check.redirectTargets;
     if (opts.check.reason) promptOpts.reason = opts.check.reason;
-    const choice = await showPermissionPrompt(ctx, promptOpts);
 
-    if (choice === "deny") {
+    const result = await showPermissionPrompt(ctx, promptOpts);
+
+    // User pressed escape / denied
+    if (result === null) {
       ctx.abort();
       return { block: true, reason: `User denied ${opts.permission}` };
     }
 
-    if (choice === "once") return undefined;
+    const { approved, skipped, duration } = result;
 
-    if (choice === "timed" || choice === "turn") {
-      const isFile = opts.permission === "read" || opts.permission === "edit";
-      const root = findProjectRoot(process.cwd());
-      const cwd = process.cwd();
+    // "once" — approve checked items for this invocation only; no rules created
+    if (duration === "once") {
+      // If some items were skipped, they remain unapproved — re-prompt for those
+      if (skipped.length > 0) {
+        const remainingRedirects = opts.check.redirectTargets?.filter(
+          (rt) => skipped.includes(rt.path),
+        );
+        const newCheck: PermissionCheck = {
+          ...opts.check,
+          unapproved: skipped,
+          action: "ask",
+        };
+        if (remainingRedirects && remainingRedirects.length > 0) {
+          newCheck.redirectTargets = remainingRedirects;
+        }
+        opts.check = newCheck;
+        reprompt = true;
+        continue;
+      }
+      return undefined;
+    }
 
-      const patterns = isFile
-        ? [normalizePathForMatching(opts.target, root)]
-        : (opts.check.unapproved?.length ? opts.check.unapproved : [opts.target]);
+    // For non-once durations, create rules for approved items
+    const patterns: string[] = [];
+    for (const [original, edited] of approved) {
+      if (isFile) {
+        patterns.push(normalizePathForMatching(edited, root));
+      } else {
+        patterns.push(edited);
+      }
+    }
+
+    // Handle redirect target patterns
+    const redirectPatterns: Array<{ permission: "read" | "edit"; pattern: string }> = [];
+    if (opts.check.redirectTargets?.length) {
+      for (const rt of opts.check.redirectTargets) {
+        if (approved.has(rt.path)) {
+          redirectPatterns.push({
+            permission: rt.permission,
+            pattern: normalizePathForMatching(rt.path, root),
+          });
+        }
+      }
+    }
+
+    if (duration === "session" || duration === "project") {
+      const newModes: ProfileName[] = profile === "plan" ? ["plan", "build"] : ["build"];
+      const newRules: Ruleset = patterns.map((p) => ({
+        permission: opts.permission as Rule["permission"],
+        pattern: p,
+        action: "allow" as const,
+        modes: newModes,
+      }));
+
+      for (const rp of redirectPatterns) {
+        newRules.push({
+          permission: rp.permission,
+          pattern: rp.pattern,
+          action: "allow" as const,
+          modes: newModes,
+        });
+      }
+
+      if (duration === "project") {
+        await storage.addPersistedRules(newRules);
+      } else {
+        storage.addSessionRules(newRules);
+        pi.appendEntry("spfy:session-rules", { rules: newRules });
+      }
+    } else {
+      // "turn" or "timed"
+      const expiryType = duration === "timed" ? "time" : "turn";
 
       const tempRules = makeTempRules({
         permission: opts.permission,
         patterns,
         profile,
-        expiryType: choice === "timed" ? "time" : "turn",
+        expiryType,
         minutes: timedMinutes,
       });
 
-      // Also add redirect target patterns as temp rules
-      if (opts.check.redirectTargets?.length) {
-        for (const rt of opts.check.redirectTargets) {
-          tempRules.push(...makeTempRules({
-            permission: rt.permission,
-            patterns: [normalizePathForMatching(rt.path, root)],
-            profile,
-            expiryType: choice === "timed" ? "time" : "turn",
-            minutes: timedMinutes,
-          }));
-        }
+      for (const rp of redirectPatterns) {
+        tempRules.push(...makeTempRules({
+          permission: rp.permission,
+          patterns: [rp.pattern],
+          profile,
+          expiryType,
+          minutes: timedMinutes,
+        }));
       }
 
       storage.addTempRules(tempRules);
-
-      const recheckResult = opts.recheck();
-      opts.check = recheckResult;
-      if (recheckResult.action === "allow") return undefined;
-      if (recheckResult.action === "deny") {
-        ctx.ui.notify("Temp rule(s) added but still denied.", "warning");
-        return { block: true, reason: "Still denied after temp rule update" };
-      }
-
-      reprompt = true;
-      continue;
     }
 
-    // choice === "edit"
-    const isFile = opts.permission === "read" || opts.permission === "edit";
-    const root = findProjectRoot(process.cwd());
-    const editorItems = isFile
-      ? [opts.target]
-      : (opts.check.unapproved?.length ? opts.check.unapproved : [opts.target]);
-    const edited = await showRulesEditor(ctx, editorItems, isFile);
-    if (edited === null) { reprompt = true; continue; }
-
-    // Convert cwd-relative patterns back to project-root-relative for storage
-    const cwd = process.cwd();
-    const patternsForStorage = isFile
-      ? edited.patterns.map((p) => reanchorPattern(p, cwd, root))
-      : edited.patterns;
-
-    const newModes: ProfileName[] = profile === "plan" ? ["plan", "build"] : ["build"];
-    const newRules: Ruleset = patternsForStorage.map((p) => ({
-      permission: opts.permission as Rule["permission"],
-      pattern: p,
-      action: "allow" as const,
-      modes: newModes,
-    }));
-
-    if (opts.check.redirectTargets?.length) {
-      for (const rt of opts.check.redirectTargets) {
-        newRules.push({
-          permission: rt.permission,
-          pattern: normalizePathForMatching(rt.path, root),
-          action: "allow" as const,
-          modes: newModes,
-        });
-      }
-    }
-
-    if (edited.persist === "persisted") {
-      await storage.addPersistedRules(newRules);
-    } else {
-      storage.addSessionRules(newRules);
-      pi.appendEntry("spfy:session-rules", { rules: newRules });
-    }
-
+    // Recheck
     const recheckResult = opts.recheck();
     opts.check = recheckResult;
     if (recheckResult.action === "allow") return undefined;
@@ -217,6 +230,7 @@ async function resolvePermission(
       return { block: true, reason: "Still denied after rule update" };
     }
 
+    // Still needs approval — re-prompt
     reprompt = true;
   }
 }
