@@ -235,6 +235,21 @@ async function resolvePermission(
   }
 }
 
+/**
+ * Send a steering message when a tool is denied because of plan mode,
+ * informing the agent that the tool will become available in build mode.
+ */
+function steerPlanModeDenial(toolName: string): void {
+  pi.sendMessage(
+    {
+      customType: "spfy:plan-mode-denial",
+      content: `The ${toolName} tool is not available in plan mode. It will become available once you switch to build mode using the switchProfile tool with target "build".`,
+      display: false,
+    },
+    { deliverAs: "steer" },
+  );
+}
+
 async function handleToolCall(
   event: ToolCallEvent,
   ctx: ExtensionContext,
@@ -251,6 +266,7 @@ async function handleToolCall(
         ctx.abort();
         const detail = check.reason ?? `Denied by ruleset: ${(check.unapproved ?? []).join(", ")}`;
         ctx.ui.notify(`Command denied: ${command} (${detail})`, "error");
+        if (check.reason?.startsWith("Plan mode:")) steerPlanModeDenial("bash");
         return { block: true, reason: `Command denied: ${detail}` };
       }
 
@@ -265,6 +281,7 @@ async function handleToolCall(
     if (event.toolName === "edit" || event.toolName === "write") {
       if (profile === "plan") {
         ctx.abort();
+        steerPlanModeDenial(event.toolName);
         return { block: true, reason: `Plan mode: ${event.toolName} is disabled. Use switchProfile with target "build" to request build mode.` };
       }
       const filePath = event.input.path as string;
@@ -323,7 +340,7 @@ async function handleToolResult(event: ToolResultEvent, _ctx: ExtensionContext) 
 function filterProfileContext(messages: AgentMessage[]): AgentMessage[] {
   return messages.filter((m) => {
     const msg = m as AgentMessage & { customType?: string };
-    if (msg.customType === "spfy:profile:context") return false;
+    if (msg.customType === "spfy:profile:context" || msg.customType === "spfy:plan-mode-denial") return false;
 
     if (msg.role === "user") {
       const content = msg.content;
