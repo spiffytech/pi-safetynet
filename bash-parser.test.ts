@@ -458,8 +458,24 @@ describe("isEditLikeBashCommand", () => {
       ["wc -l file.txt", "wc (no redirect)"],
     ] as const;
 
+    const SAFE_REDIRECT = [
+      ["grep pattern file 2>/dev/null", "grep with stderr to /dev/null"],
+      ["ls /some/path 2>/dev/null || ls", "ls with stderr to /dev/null and fallback"],
+      ["cat file.txt > /dev/null", "cat redirecting stdout to /dev/null"],
+      ["cmd &> /dev/null", "cmd redirecting all output to /dev/null"],
+      ["cmd >/dev/null 2>&1", "cmd with stdout and stderr to /dev/null"],
+      ["cmd > /dev/zero", "cmd redirecting to /dev/zero"],
+      ["cmd 2>/dev/urandom", "cmd redirecting stderr to /dev/urandom"],
+    ] as const;
+
     for (const [cmd, label] of READ_ONLY) {
       it(`allows ${label}`, () => {
+        assert.equal(isEditLike(cmd), false);
+      });
+    }
+
+    for (const [cmd, label] of SAFE_REDIRECT) {
+      it(`allows ${label} (safe device redirect)`, () => {
         assert.equal(isEditLike(cmd), false);
       });
     }

@@ -218,6 +218,20 @@ const PROTECTED_DIRS = new Set(
   "/ /usr /usr/local /usr/bin /usr/lib /usr/sbin /usr/share /etc /var /bin /sbin /lib /lib64 /boot /sys /proc /dev /root /opt /home /srv /snap /tmp".split(" "),
 );
 
+/** Device files that are always safe to use as redirect targets.
+ *  Writing to these is a no-op (e.g., /dev/null) or read-only (e.g.,
+ *  /dev/urandom), so they should not be treated as edit-like redirects. */
+const SAFE_DEVICE_FILES = new Set([
+  "/dev/null",
+  "/dev/zero",
+  "/dev/urandom",
+  "/dev/random",
+  "/dev/stdin",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/dev/full",
+]);
+
 // File-test operators that take a single path argument (unary).
 // Used by both [ (test) and [[ to detect file reads.
 const UNARY_FILE_TEST_OPS = new Set([
@@ -390,10 +404,83 @@ export interface ParsedCommand {
   subcommands: string[];
   redirects: RedirectTarget[];
   catastrophic: boolean;
-  /** True when the command uses heredoc (<<) or here-string (<<<) — the
-   *  @aliou/sh parser frequently loses redirects and pipelines that follow
-   *  these constructs, so callers should apply a regex-based fallback scan. */
+  /** True when the command uses heredoc (<<) or here-string (<<<). */
   hasHeredoc: boolean;
+}
+
+/**
+ * Strip multi-line heredoc bodies from a command string.
+ *
+ * @aliou/sh throws when it encounters a heredoc body (the lines between
+ * `<<DELIM` and the closing `DELIM`). By removing the body and keeping
+ * only the opener line (which may also contain redirects and pipes), we
+ * let the parser produce a valid AST that captures those constructs.
+ *
+ * The opener line is preserved minus the `<<[-]?DELIM` token itself —
+ * any trailing redirects (`> file`) or pipes (`| tee file`) remain.
+ *
+ * Here-strings (`<<<`) are left untouched; the parser handles them natively.
+ * Uses plain string scanning — no regex.
+ */
+function stripHeredocBodies(command: string): string {
+  const lines = command.split("\n");
+  const result: string[] = [];
+  let skipping = false;
+  let delim: string | null = null;
+
+  for (const line of lines) {
+    if (skipping) {
+      // The closing delimiter appears alone on a line (possibly with
+      // leading whitespace for <<- heredocs).
+      if (line.trim() === delim) {
+        skipping = false;
+        delim = null;
+      }
+      continue;
+    }
+
+    // Look for heredoc opener: << or <<- followed by a delimiter word.
+    // Skip here-strings (<<<).
+    const heredocIdx = line.indexOf("<<");
+    if (
+      heredocIdx >= 0
+      && !(heredocIdx + 2 < line.length && line[heredocIdx + 2] === "<") // not <<<
+    ) {
+      // Extract the delimiter word after << or <<-
+      let rest = line.slice(heredocIdx + 2); // after "<<"
+      if (rest.startsWith("-")) rest = rest.slice(1); // skip <<- dash
+      rest = rest.trimStart();
+      // Strip optional quotes around the delimiter
+      if (rest.startsWith('"') || rest.startsWith("'")) {
+        const quote = rest[0]!;
+        const closeIdx = rest.indexOf(quote, 1);
+        if (closeIdx > 0) {
+          delim = rest.slice(1, closeIdx);
+        } else {
+          delim = rest.slice(1).trim(); // unclosed quote — best effort
+        }
+      } else {
+        // Delimiter is the next whitespace-delimited word
+        const spaceIdx = rest.search(/\s/);
+        delim = spaceIdx >= 0 ? rest.slice(0, spaceIdx) : rest;
+      }
+
+      if (delim) {
+        // Remove the <<[-]?DELIM token, keep the rest of the line
+        // (redirects, pipes, etc.)
+        const tokenEnd = line.indexOf(delim, heredocIdx) + delim.length;
+        const afterToken = line.slice(tokenEnd);
+        const opener = line.slice(0, heredocIdx) + afterToken;
+        result.push(opener);
+        skipping = true;
+        continue;
+      }
+    }
+
+    result.push(line);
+  }
+
+  return result.join("\n");
 }
 
 export function parseCommand(command: string): ParsedCommand {
@@ -495,7 +582,7 @@ export function parseCommand(command: string): ParsedCommand {
         // constitutes a file read. Extract file paths from test
         // operators so they go through read-permission checks.
         if (name === "[" || name === "[[") {
-          const wordStrs = (cmd.words ?? []).map((w) => wordToString(w)).filter((s): s is string => s !== null);
+          const wordStrs = (cmd.words ?? []).map((w: Word) => wordToString(w)).filter((s: string | null): s is string => s !== null);
           for (const p of extractTestFilePaths(wordStrs)) {
             redirects.push({ path: p, direction: "input" });
           }
@@ -505,64 +592,127 @@ export function parseCommand(command: string): ParsedCommand {
       }, (expr, words) => {
         subcommands.push(expr);
         // Same file-read extraction for [[ TestClause nodes
-        const wordStrs = words.map((w) => wordToString(w)).filter((s): s is string => s !== null);
+        const wordStrs = words.map((w) => wordToString(w)).filter((s: string | null): s is string => s !== null);
         for (const p of extractTestFilePaths(wordStrs)) {
           redirects.push({ path: p, direction: "input" });
         }
       });
     }
 
-    // Fallback: @aliou/sh loses output redirects and pipelines when a
-    // heredoc or here-string precedes them.  For example,
-    //   cat <<EOF > file.txt      — redirect is missed
-    //   cat <<EOF | tee file.txt — pipeline is lost
-    // Scan the raw command string for > / >> redirects that the parser
-    // didn't extract, and for pipes that would route data to a write
-    // command.
-    const hasHeredocOrHereString = /<<[-]?\S|^\s*.*<<<|\s<<-</m.test(command);
-
-    if (hasHeredocOrHereString) {
-      // Regex scan for output redirects the parser missed.
-      // Handles: > file, >> file, &> file, >| file, <> file
-      // The heredoc delimiter (<< / <<- / <<<) may appear before or after
-      // the redirect in the command string.
-      const redirectRe = /(?:&>>|&>|>>|>\||<>|>)\s*([^\s;|&}#${)(`'"\n]+)/g;
-      const existingOutputPaths = new Set(redirects.filter((r) => r.direction === "output").map((r) => r.path));
-      for (const m of command.matchAll(redirectRe)) {
-        const path = m[1]!.replace(/^['"]+|['"]+$/g, ""); // strip quotes
-        // Filter out fd descriptors (2>&1, etc.) and already-detected paths
-        if (path && !/^\d+$/.test(path) && !existingOutputPaths.has(path)) {
-          redirects.push({ path, direction: "output" });
-          existingOutputPaths.add(path);
-        }
-      }
-
-      // Regex scan for pipes feeding write commands after a heredoc.
-      // The parser may lose pipeline stages after <<; detect common write
-      // commands that appear after | in the raw string.
-      const pipeWriteRe = /\|\s*(tee\b|dd\b|cat\s+>|cat\s+>>)/g;
-      for (const m of command.matchAll(pipeWriteRe)) {
-        const writeCmd = m[1]!.trim();
-        if (!subcommands.some((s) => s.startsWith(writeCmd.split(/\s/)[0]!))) {
-          subcommands.push(writeCmd);
-        }
-      }
-    }
-
     return {
       subcommands: [...new Set(subcommands)],
       redirects,
       catastrophic,
-      hasHeredoc: hasHeredocOrHereString,
+      hasHeredoc: false,
     };
   } catch {
-    const first = command.trim().split(/\s+/)[0] ?? "";
-    return {
-      subcommands: first ? [first] : [],
-      redirects: [],
-      catastrophic: first ? SYSTEM_HALT_COMMANDS.has(first) : false,
-      hasHeredoc: /<<[-]?\S|<<</.test(command),
-    };
+    // Parser threw, likely due to a heredoc body.  Strip heredoc bodies
+    // and retry so the AST captures redirects and pipelines.
+    const stripped = stripHeredocBodies(command);
+    try {
+      const { ast } = parse(stripped);
+      const subcommands: string[] = [];
+      const redirects: RedirectTarget[] = [];
+      let catastrophic = false;
+
+      for (const stmt of ast.body) {
+        walkCommands(stmt.command, (cmd) => {
+          if (cmd.redirects?.length) {
+            for (const r of cmd.redirects) {
+              const target = wordToString(r.target);
+              if (!target) continue;
+              if (r.op === "<") {
+                redirects.push({ path: target, direction: "input" });
+              } else if (r.op === ">" || r.op === ">>" || r.op === "&>" || r.op === "&>>" || r.op === ">|" || r.op === "<>") {
+                redirects.push({ path: target, direction: "output" });
+              }
+            }
+          }
+
+          const name = wordToString(cmd.words?.[0] as Word);
+          if (!name) return false;
+
+          if (name === "find") {
+            const dangerous = hasFindDangerousFlag(cmd);
+            if (dangerous === "exec") {
+              subcommands.push("find:exec");
+              return true;
+            }
+            if (dangerous === "delete") {
+              subcommands.push("find:delete");
+              return false;
+            }
+          }
+
+          if (isNodeCatastrophic(cmd)) catastrophic = true;
+
+          const words = cmd.words ?? [];
+          const firstEffective = wordToString(words[0] as Word);
+
+          let xargsIdx = -1;
+          if (firstEffective === "xargs") {
+            xargsIdx = 0;
+          } else if (firstEffective === "sudo") {
+            let skipNext = false;
+            for (let si = 1; si < words.length; si++) {
+              const sw = wordToString(words[si] as Word);
+              if (!sw) continue;
+              if (skipNext) { skipNext = false; continue; }
+              if (sw.startsWith("-")) {
+                if (SUDO_FLAGS_WITH_ARGS.has(sw)) skipNext = true;
+                continue;
+              }
+              if (sw === "xargs") xargsIdx = si;
+              break;
+            }
+          }
+
+          if (xargsIdx >= 0) {
+            const innerStart = skipXargsFlags(words, xargsIdx + 1);
+            const prefixWords = words.slice(0, xargsIdx);
+            const innerWords = words.slice(innerStart);
+            const allWords = [...prefixWords, ...innerWords];
+            if (allWords.length) {
+              subcommands.push(wordsToString(allWords));
+            } else {
+              subcommands.push("echo");
+            }
+          } else {
+            subcommands.push(commandToString(cmd));
+          }
+
+          if (name === "[" || name === "[[") {
+            const wordStrs = (cmd.words ?? []).map((w: Word) => wordToString(w)).filter((s: string | null): s is string => s !== null);
+            for (const p of extractTestFilePaths(wordStrs)) {
+              redirects.push({ path: p, direction: "input" });
+            }
+          }
+
+          return true;
+        }, (expr, words) => {
+          subcommands.push(expr);
+          const wordStrs = words.map((w) => wordToString(w)).filter((s: string | null): s is string => s !== null);
+          for (const p of extractTestFilePaths(wordStrs)) {
+            redirects.push({ path: p, direction: "input" });
+          }
+        });
+      }
+
+      return {
+        subcommands: [...new Set(subcommands)],
+        redirects,
+        catastrophic,
+        hasHeredoc: true,
+      };
+    } catch {
+      const first = command.trim().split(/\s+/)[0] ?? "";
+      return {
+        subcommands: first ? [first] : [],
+        redirects: [],
+        catastrophic: first ? SYSTEM_HALT_COMMANDS.has(first) : false,
+        hasHeredoc: true,
+      };
+    }
   }
 }
 
@@ -599,19 +749,15 @@ export function isHazardousFile(filePath: string): boolean {
  * these commands outright, just as the edit/write tools are disabled.
  *
  * Categories:
- * 1. Any command with an output redirect (>, >>, &>, etc.) — writing to a
- *    file via redirect is equivalent to the write tool.
- * 2. Heredoc / here-string constructs that feed data onward (<<EOF,
- *    <<<).  The parser often loses the subsequent redirect or pipeline,
- *    so any heredoc/here-string command is treated as potentially
- *    edit-like unless it's a pure read (e.g. `cat <<EOF` with no redirect
- *    and no pipe to a write command after the delimiter).
- * 3. Commands with in-place edit flags: `sed -i`, `perl -pi`/`perl -pe`.
- * 4. Commands whose primary purpose is writing files: `tee`, `truncate`,
- *    `install`.
- * 5. Interpreter one-liner invocations (`python -c`, `node -e`, etc.)
+ * 1. Any command with an output redirect (>, >>, &>, etc.) to a non-device
+ *    file — writing to a real file via redirect is equivalent to the write
+ *    tool. Redirects to safe device files (e.g., /dev/null) are excluded.
+ * 2. Commands with in-place edit flags: `sed -i`, `perl -pi`/`perl -pe`.
+ * 3. Commands whose primary purpose is writing files: `tee`, `truncate`,
+ *    `install`, `dd`.
+ * 4. Interpreter one-liner invocations (`python -c`, `node -e`, etc.)
  *    that can embed arbitrary file I/O in code strings.
- * 6. Shell invocation of subcommands (`sh -c`, `bash -c`) that can embed
+ * 5. Shell invocation of subcommands (`sh -c`, `bash -c`) that can embed
  *    redirects or write commands in the code string.
  */
 export function isEditLikeBashCommand(
@@ -619,15 +765,13 @@ export function isEditLikeBashCommand(
   parsed: ParsedCommand,
 ): boolean {
   // 1. Any output redirect detected by the parser or the heredoc fallback
-  if (parsed.redirects.some((r) => r.direction === "output")) return true;
+  //    (excluding redirects to safe device files like /dev/null)
+  if (parsed.redirects.some((r) => r.direction === "output" && !SAFE_DEVICE_FILES.has(r.path))) return true;
 
   // 2. Heredoc / here-string with redirect or pipe in raw command
-  if (parsed.hasHeredoc) {
-    // If the raw command contains any output redirect operator, it's edit-like
-    if (/(?:&>>|&>|>>|>\||<>|>)\s*[^\s]/.test(command)) return true;
-    // If the raw command pipes to a known write command after the heredoc
-    if (/\|\s*(?:tee|dd|cat\s+>|cat\s+>>)/.test(command)) return true;
-  }
+  //    (handled by parseCommand()'s heredoc fallback, which populates
+  //    parsed.redirects and parsed.subcommands — checked by #1 and #4 above)
+  //    No separate regex scan needed here.
 
   // 3. In-place edit flags
   for (const sub of parsed.subcommands) {
@@ -643,6 +787,7 @@ export function isEditLikeBashCommand(
     if (baseCmd === "tee") return true;
     if (baseCmd === "truncate") return true;
     if (baseCmd === "install") return true;
+    if (baseCmd === "dd") return true;
   }
 
   // 5. Interpreter one-liner invocations that can embed arbitrary file I/O
