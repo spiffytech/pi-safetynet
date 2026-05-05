@@ -1,5 +1,7 @@
 # pi-safetynet
 
+![MutuaL-1.2](https://img.shields.io/badge/License-MutuaL--1.2-af2e1a?style=flat&labelColor=110402&link=https%3A%2F%2Fcodeberg.org%2FMutualism%2FMutualist-License)
+
 A permissions and safety extension for [Pi](https://pi.dev) that understands what your AI agent is trying to do.
 
 ## The problem
@@ -189,4 +191,33 @@ Rules support both profile modes, so a rule can be scoped to build mode only and
 
 ## License
 
-ISC
+This project is licensed under the Mutualist License v1.2.  
+See the [LICENSE.md](LICENSE.md) file for the full text.
+
+### Mutualist License summary
+
+**Permissions**
+
+- ✅ Commercial use
+- ✅ Private / internal use
+- ✅ Modification
+- ✅ Distribution (source and binaries)
+- ✅ Network / SaaS use
+- ✅ Patent use (from contributors, as described in the license)
+
+**Conditions**
+
+- ❗ Keep copyright and license notices
+- ❗ Give appropriate credit (see "Credit" in the license)
+- ❗ Share source for modified versions you distribute
+- ❗ Share source for modified versions you let others use over a network
+- ❗ License your changes under the Mutualist License too (same license)
+- ❗ Don't add technical measures (like DRM) that stop users from exercising their rights
+- ❗ Patent peace: you lose patent rights under this license if you start a patent attack over this software
+
+**Limitations**
+
+- ❌ No liability
+- ❌ No warranty
+- ❌ No trademark rights
+- ❌ No implied endorsement
