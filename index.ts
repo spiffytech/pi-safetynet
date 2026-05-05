@@ -19,6 +19,7 @@ import {
   setCurrentProfile,
   requiresApproval,
   getProfileContextMessage,
+  getProfileSwitchMessage,
   persistProfile,
   restoreProfile,
   applyProfileTools,
@@ -383,27 +384,21 @@ function registerSwitchProfileTool(pi: ExtensionAPI) {
         }
       }
 
-      previousProfile = current;
       setCurrentProfile(target);
       persistProfile(pi);
       applyProfileTools(pi, target);
       notifyProfileSwitch(ctx, current, target);
       updateStatus(ctx);
 
-      // setActiveTools only takes effect on the next turn (Pi snapshots
-      // the tool list at turn start). So we terminate the current turn
-      // and trigger a fresh one — the new turn picks up the updated
-      // tool list and gets the build-mode context from before_agent_start.
-      const contextMessage = getProfileContextMessage(target, current);
-
-      pi.sendMessage(
-        {
-          customType: "spfy:profile:context",
-          content: contextMessage,
-          display: true,
-        },
-        { deliverAs: "followUp", triggerTurn: true },
-      );
+      // Flag for agent_end to send the switch context via triggerTurn.
+      // We can't use deliverAs:"followUp" here because the agent loop
+      // snapshots the tool list at turn start — follow-up turns within
+      // the same agent.prompt() call would see stale tools (missing
+      // write/edit). Instead, agent_end fires after the run completes
+      // (isStreaming=false), so sendMessage with triggerTurn calls
+      // agent.prompt() directly, which takes a fresh snapshot with the
+      // updated tool list.
+      pendingProfileSwitch = { from: current, to: target };
 
       return {
         content: [
@@ -419,7 +414,8 @@ function registerSwitchProfileTool(pi: ExtensionAPI) {
   });
 }
 
-let previousProfile: ProfileName | undefined;
+/** Profile switch pending delivery via agent_end → triggerTurn. */
+let pendingProfileSwitch: { from: ProfileName; to: ProfileName } | undefined;
 
 function switchToProfile(ctx: ExtensionContext, profile: ProfileName): void {
   const current = getCurrentProfile();
@@ -427,7 +423,6 @@ function switchToProfile(ctx: ExtensionContext, profile: ProfileName): void {
     ctx.ui.notify(`Already in ${profile} mode`, "info");
     return;
   }
-  previousProfile = current;
   setCurrentProfile(profile);
   persistProfile(pi);
   applyProfileTools(pi, profile);
@@ -587,8 +582,23 @@ export default function spfyExtension(api: ExtensionAPI) {
   pi.on("tool_result", handleToolResult);
 
   // Clear turn-limited temp rules when the agent finishes (user gets a turn)
+  // If a profile switch is pending, send the context message via triggerTurn.
+  // This starts a fresh agent.prompt() call with an updated tool snapshot,
+  // so the model sees the correct active tools (e.g. write/edit in build mode).
   pi.on("agent_end", async () => {
     storage.temp.clearTurnRules();
+    if (pendingProfileSwitch) {
+      const { from, to } = pendingProfileSwitch;
+      pendingProfileSwitch = undefined;
+      pi.sendMessage(
+        {
+          customType: "spfy:profile:context",
+          content: getProfileSwitchMessage(from, to),
+          display: true,
+        },
+        { triggerTurn: true },
+      );
+    }
   });
 
   pi.on("context", async (event) => {
@@ -597,12 +607,10 @@ export default function spfyExtension(api: ExtensionAPI) {
 
   pi.on("before_agent_start", async () => {
     const profile = getCurrentProfile();
-    const prev = previousProfile;
-    previousProfile = undefined;
     return {
       message: {
         customType: "spfy:profile:context",
-        content: getProfileContextMessage(profile, prev),
+        content: getProfileContextMessage(profile),
         display: false,
       },
     };

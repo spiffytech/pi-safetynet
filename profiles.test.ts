@@ -5,6 +5,7 @@ import {
   setCurrentProfile,
   requiresApproval,
   getProfileContextMessage,
+  getProfileSwitchMessage,
 } from "./profiles/index.ts";
 
 describe("profiles", () => {
@@ -52,8 +53,8 @@ describe("profiles", () => {
       assert.ok(msg.includes("full tool access") || msg.includes("full access"));
     });
 
-    it("build message includes plan-to-build transition when previous profile was plan", () => {
-      const msg = getProfileContextMessage("build", "plan");
+    it("build message includes plan-to-build transition via getProfileSwitchMessage", () => {
+      const msg = getProfileSwitchMessage("plan", "build");
       assert.ok(msg.includes("changed from plan to build"));
     });
   });

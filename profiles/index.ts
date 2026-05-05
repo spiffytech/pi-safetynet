@@ -35,7 +35,11 @@ export function restoreProfile(ctx: ExtensionContext): void {
   if (entry?.enabled) currentProfile = entry.enabled;
 }
 
-export function getProfileContextMessage(profile: ProfileName, previousProfile?: ProfileName): string {
+/**
+ * Stateless profile context — injected via before_agent_start on every
+ * user-initiated turn. Never includes switch-specific wording.
+ */
+export function getProfileContextMessage(profile: ProfileName): string {
   if (profile === "plan") {
     return `[SPFY PLAN MODE]
 Plan mode is ACTIVE. You are in a READ-ONLY, planning-only phase.
@@ -69,7 +73,7 @@ Do NOT attempt to make changes. Plan first. The user will approve the transition
 IMPORTANT: You may NOT automatically escalate privileges. You may REQUEST escalation via switchProfile, but the user must approve. You MAY automatically deescalate from build to plan mode.`;
   }
 
-  let buildMsg = `[SPFY BUILD MODE]
+  return `[SPFY BUILD MODE]
 You are in build mode - full tool access is enabled.
 
 You may make file changes, run shell commands, and use all available tools.
@@ -79,14 +83,21 @@ Commands are evaluated against the permission ruleset:
 - Dangerous commands (rm -rf /, etc.) are always blocked
 
 To switch back to plan mode, use the switchProfile tool with target "plan".`;
+}
 
-  if (previousProfile === "plan") {
-    buildMsg += `
+/**
+ * Switch-specific context — sent from agent_end via triggerTurn after a
+ * profile switch. Includes the mode-change directive (e.g. "execute
+ * on the plan you developed").
+ */
+export function getProfileSwitchMessage(from: ProfileName, to: ProfileName): string {
+  const context = getProfileContextMessage(to);
+  if (from === "plan" && to === "build") {
+    return `${context}
 
 Your operational mode has changed from plan to build. You are no longer in read-only mode. You are permitted to make file changes, run shell commands, and utilize your tools as needed. Execute on the plan you developed.`;
   }
-
-  return buildMsg;
+  return context;
 }
 
 const WRITE_TOOLS = new Set(["edit", "write"]);
