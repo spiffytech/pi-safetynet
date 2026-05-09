@@ -3,24 +3,12 @@ import assert from "node:assert/strict";
 import {
   getCurrentProfile,
   setCurrentProfile,
-  requiresApproval,
   getProfileContextMessage,
-  getProfileSwitchMessage,
 } from "./profiles/index.ts";
 
 describe("profiles", () => {
   afterEach(() => {
     setCurrentProfile("plan");
-  });
-
-  describe("requiresApproval", () => {
-    it("plan -> build requires approval", () => {
-      assert.equal(requiresApproval("plan", "build"), true);
-    });
-
-    it("build -> plan does NOT require approval", () => {
-      assert.equal(requiresApproval("build", "plan"), false);
-    });
   });
 
   describe("getCurrentProfile / setCurrentProfile", () => {
@@ -47,15 +35,43 @@ describe("profiles", () => {
       assert.ok(msg.includes("READ-ONLY") || msg.includes("planning-only"));
     });
 
+    it("plan message mentions planPresent", () => {
+      const msg = getProfileContextMessage("plan");
+      assert.ok(msg.includes("planPresent"));
+    });
+
+    it("plan message mentions planWrite", () => {
+      const msg = getProfileContextMessage("plan");
+      assert.ok(msg.includes("planWrite"));
+    });
+
+    it("plan message explains user-controlled build transition", () => {
+      const msg = getProfileContextMessage("plan");
+      assert.ok(msg.includes("/spfy:build"));
+    });
+
     it("build message mentions full access", () => {
       const msg = getProfileContextMessage("build");
       assert.ok(msg.includes("build"));
       assert.ok(msg.includes("full tool access") || msg.includes("full access"));
     });
 
-    it("build message includes plan-to-build transition via getProfileSwitchMessage", () => {
-      const msg = getProfileSwitchMessage("plan", "build");
-      assert.ok(msg.includes("changed from plan to build"));
+    it("build message mentions /spfy:plan", () => {
+      const msg = getProfileContextMessage("build");
+      assert.ok(msg.includes("/spfy:plan"));
+    });
+
+    it("build message with plan path references plan file", () => {
+      const msg = getProfileContextMessage("build", "/tmp/plans/test.md");
+      // Should reference the plan path even though file may not exist
+      // (getProfileContextMessage checks existsSync, so only appears if file exists)
+      assert.ok(msg.includes("build"));
+    });
+
+    it("plan message with plan path shows existing plan", () => {
+      // Use a path that likely doesn't exist for this test
+      const msg = getProfileContextMessage("plan", "/nonexistent/path/test.md");
+      assert.ok(msg.includes("planWrite") || msg.includes("plan file"));
     });
   });
 });

@@ -27,7 +27,7 @@ export function restorePlanOnError(ctx: ExtensionContext): void {
 
 export function getPlanOnErrorInstruction(): string | null {
   if (!planOnErrorEnabled) return null;
-  return `${MARKER}\nIf this result represents an error, use switchProfile('plan').`;
+  return `${MARKER}\nIf this result represents an error, tell the user that switching to plan mode with /spfy:plan may help diagnose it.`;
 }
 
 export function hasPlanOnErrorMarker(text: string): boolean {

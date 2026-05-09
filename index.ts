@@ -4,11 +4,20 @@ import type {
   ToolCallEvent,
   ToolResultEvent,
 } from "@mariozechner/pi-coding-agent";
+import { Markdown, Text } from "@mariozechner/pi-tui";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import { isBashToolResult } from "@mariozechner/pi-coding-agent";
+import {
+  createEditTool,
+  createWriteTool,
+  getMarkdownTheme,
+  isBashToolResult,
+} from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { mkdirSync, existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Rule, Ruleset, TempRule, ProfileName } from "./types.ts";
-import { SwitchProfileParams } from "./types.ts";
+import questionnaire from "./questionnaire.ts";
 import {
   getBaselineRules,
   PermissionStorage,
@@ -17,9 +26,7 @@ import {
 import {
   getCurrentProfile,
   setCurrentProfile,
-  requiresApproval,
   getProfileContextMessage,
-  getProfileSwitchMessage,
   persistProfile,
   restoreProfile,
   applyProfileTools,
@@ -34,14 +41,22 @@ import {
 } from "./profiles/plan-on-error.ts";
 import {
   showPermissionPrompt,
-  promptProfileEscalation,
-  notifyProfileSwitch,
-  type PermissionPromptResult,
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./check.ts";
 import { normalizePathForMatching, findProjectRoot } from "./project.ts";
 
 let storage: PermissionStorage;
+
+/** Extension directory — resolved at module load via import.meta.url */
+const extDir = dirname(fileURLToPath(import.meta.url));
+
+/** Directory for plan files */
+const plansDir = join(extDir, "plans");
+
+/** Get the plan file path for a given session ID */
+function getPlanFilePath(sessionId: string): string {
+  return join(plansDir, `${sessionId}.md`);
+}
 
 /** Default number of minutes for timed approval. */
 const DEFAULT_TIMED_APPROVAL_MINUTES = 15;
@@ -236,21 +251,6 @@ async function resolvePermission(
   }
 }
 
-/**
- * Send a steering message when a tool is denied because of plan mode,
- * informing the agent that the tool will become available in build mode.
- */
-function steerPlanModeDenial(toolName: string): void {
-  pi.sendMessage(
-    {
-      customType: "spfy:plan-mode-denial",
-      content: `The ${toolName} tool is not available in plan mode. It will become available once you switch to build mode using the switchProfile tool with target "build".`,
-      display: false,
-    },
-    { deliverAs: "steer" },
-  );
-}
-
 async function handleToolCall(
   event: ToolCallEvent,
   ctx: ExtensionContext,
@@ -267,7 +267,6 @@ async function handleToolCall(
         ctx.abort();
         const detail = check.reason ?? `Denied by ruleset: ${(check.unapproved ?? []).join(", ")}`;
         ctx.ui.notify(`Command denied: ${command} (${detail})`, "error");
-        if (check.reason?.startsWith("Plan mode:")) steerPlanModeDenial("bash");
         return { block: true, reason: `Command denied: ${detail}` };
       }
 
@@ -282,8 +281,7 @@ async function handleToolCall(
     if (event.toolName === "edit" || event.toolName === "write") {
       if (profile === "plan") {
         ctx.abort();
-        steerPlanModeDenial(event.toolName);
-        return { block: true, reason: `Plan mode: ${event.toolName} is disabled. Use switchProfile with target "build" to request build mode.` };
+        return { block: true, reason: `Plan mode: ${event.toolName} is disabled. The user must switch to build mode with /spfy:build before implementation.` };
       }
       const filePath = event.input.path as string;
       const rules = storage.getAllRules();
@@ -306,7 +304,7 @@ async function handleToolCall(
       });
     }
 
-    const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "questionnaire", "switchProfile"]);
+    const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "questionnaire", "planWrite", "planEdit", "planPresent"]);
     if (!knownTools.has(event.toolName) && profile === "plan") {
       return resolvePermission(ctx, {
         permission: "bash",
@@ -341,7 +339,7 @@ async function handleToolResult(event: ToolResultEvent, _ctx: ExtensionContext) 
 function filterProfileContext(messages: AgentMessage[]): AgentMessage[] {
   return messages.filter((m) => {
     const msg = m as AgentMessage & { customType?: string };
-    if (msg.customType === "spfy:profile:context" || msg.customType === "spfy:plan-mode-denial") return false;
+    if (msg.customType === "spfy:profile:context") return false;
 
     if (msg.role === "user") {
       const content = msg.content;
@@ -353,69 +351,92 @@ function filterProfileContext(messages: AgentMessage[]): AgentMessage[] {
   });
 }
 
-function registerSwitchProfileTool(pi: ExtensionAPI) {
-  pi.registerTool({
-    name: "switchProfile",
-    label: "Switch Profile",
-    description:
-      "Switch between plan (read-only, planning) and build (full access) profiles. Escalation from plan to build requires user approval. Deescalation from build to plan is automatic.",
-    parameters: SwitchProfileParams,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const current = getCurrentProfile();
-      const target = params.target as ProfileName;
+function formatPlanForDisplay(content: string): string {
+  return `Plan ready for review.\n\n${content}\n\nIf you want revisions, reply with feedback. If you approve, switch to build mode with /spfy:build and tell me to begin.`;
+}
 
-      if (current === target) {
+function registerPlanTools(pi: ExtensionAPI) {
+  const baseWriteAgentTool = createWriteTool(extDir);
+  const baseEditAgentTool = createEditTool(extDir);
+
+  pi.registerTool({
+    name: "planWrite",
+    label: "Plan Write",
+    description: "Create or overwrite the plan file. Use planPresent when the plan is ready to show the full plan to the user.",
+    parameters: Type.Object({
+      content: Type.String({ description: "Content to write to the plan file" }),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
+      const result = await baseWriteAgentTool.execute(toolCallId, { path: planPath, content: params.content }, signal, onUpdate);
+      return {
+        ...result,
+        content: [{ type: "text", text: `Plan file updated at ${planPath}. Call planPresent when the plan is ready to show it to the user.` }],
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "planEdit",
+    label: "Plan Edit",
+    description: "Edit the plan file. Use planPresent when the plan is ready to show the full plan to the user.",
+    parameters: Type.Object({
+      edits: Type.Array(Type.Object({
+        oldText: Type.String({ description: "Exact text to replace" }),
+        newText: Type.String({ description: "Replacement text" }),
+      }), { description: "Edits to apply to the plan file" }),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
+      const result = await baseEditAgentTool.execute(toolCallId, { path: planPath, edits: params.edits } as any, signal, onUpdate);
+      return {
+        ...result,
+        content: [{ type: "text", text: `Plan file updated at ${planPath}. Call planPresent when the plan is ready to show it to the user.` }],
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "planPresent",
+    label: "Plan Present",
+    description: "Present the current plan to the user for review and end the turn. Call this when the plan is complete. This does not switch modes; the user must run /spfy:build to approve implementation.",
+    parameters: Type.Object({}),
+    renderResult(result) {
+      const markdown = (result.details as { markdown?: unknown } | undefined)?.markdown;
+      if (typeof markdown !== "string") {
+        const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text");
+        return new Text(text?.text ?? "No plan content", 0, 0);
+      }
+      return new Markdown(markdown, 0, 0, getMarkdownTheme());
+    },
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
+      if (!existsSync(planPath)) {
         return {
-          content: [{ type: "text", text: `Already in ${target} mode.` }],
+          content: [{ type: "text", text: "No plan file found. Write your plan using planWrite before calling planPresent." }],
           details: {},
+          terminate: true,
         };
       }
 
-      if (requiresApproval(current, target)) {
-        const approved = await promptProfileEscalation(ctx, params.reason);
-        if (!approved) {
-          ctx.abort();
-          return {
-            content: [
-              { type: "text", text: `Profile switch denied. Staying in ${current} mode.` },
-            ],
-            details: {},
-          };
-        }
+      const content = readFileSync(planPath, "utf-8").trim();
+      if (!content) {
+        return {
+          content: [{ type: "text", text: "Plan file is empty. Write your plan using planWrite before calling planPresent." }],
+          details: {},
+          terminate: true,
+        };
       }
 
-      setCurrentProfile(target);
-      persistProfile(pi);
-      applyProfileTools(pi, target);
-      notifyProfileSwitch(ctx, current, target);
-      updateStatus(ctx);
-
-      // Flag for agent_end to send the switch context via triggerTurn.
-      // We can't use deliverAs:"followUp" here because the agent loop
-      // snapshots the tool list at turn start — follow-up turns within
-      // the same agent.prompt() call would see stale tools (missing
-      // write/edit). Instead, agent_end fires after the run completes
-      // (isStreaming=false), so sendMessage with triggerTurn calls
-      // agent.prompt() directly, which takes a fresh snapshot with the
-      // updated tool list.
-      pendingProfileSwitch = { from: current, to: target };
-
+      const markdown = formatPlanForDisplay(content);
       return {
-        content: [
-          {
-            type: "text",
-            text: `Switched to ${target} mode.${params.reason ? ` Reason: ${params.reason}` : ""}`,
-          },
-        ],
-        details: {},
+        content: [{ type: "text", text: "Plan ready for review." }],
+        details: { planPath, markdown },
         terminate: true,
       };
     },
   });
 }
-
-/** Profile switch pending delivery via agent_end → triggerTurn. */
-let pendingProfileSwitch: { from: ProfileName; to: ProfileName } | undefined;
 
 function switchToProfile(ctx: ExtensionContext, profile: ProfileName): void {
   const current = getCurrentProfile();
@@ -426,12 +447,28 @@ function switchToProfile(ctx: ExtensionContext, profile: ProfileName): void {
   setCurrentProfile(profile);
   persistProfile(pi);
   applyProfileTools(pi, profile);
-  ctx.ui.notify(`Switched to ${profile} mode`, "info");
+  ctx.ui.notify(`Switched from ${current} to ${profile} mode`, "info");
   updateStatus(ctx);
 }
 
 function formatRules(rules: Ruleset): string[] {
   return rules.map((r) => `  ${r.permission}: ${r.pattern} -> ${r.action} (${r.modes.join(",")})`);
+}
+
+function showCurrentPlan(ctx: ExtensionContext): void {
+  const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
+  if (!existsSync(planPath)) {
+    ctx.ui.notify("No plan file found for this session.", "info");
+    return;
+  }
+
+  const content = readFileSync(planPath, "utf-8").trim();
+  if (!content) {
+    ctx.ui.notify("The current plan file is empty.", "info");
+    return;
+  }
+
+  ctx.ui.notify(formatPlanForDisplay(content), "info");
 }
 
 function registerCommands(pi: ExtensionAPI) {
@@ -445,13 +482,18 @@ function registerCommands(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("spfy:plan", {
-    description: "Switch to plan mode (approval required)",
+    description: "Switch to plan mode",
     handler: async (_args, ctx) => switchToProfile(ctx, "plan"),
   });
 
   pi.registerCommand("spfy:build", {
     description: "Switch to build mode (full access)",
     handler: async (_args, ctx) => switchToProfile(ctx, "build"),
+  });
+
+  pi.registerCommand("spfy:plan-show", {
+    description: "Show the current plan",
+    handler: async (_args, ctx) => showCurrentPlan(ctx),
   });
 
   pi.registerCommand("spfy:rules", {
@@ -499,6 +541,11 @@ function registerShortcuts(pi: ExtensionAPI) {
       switchToProfile(ctx, next);
     },
   });
+
+  pi.registerShortcut("ctrl+shift+\\", {
+    description: "Show the current plan",
+    handler: async (ctx) => showCurrentPlan(ctx),
+  });
 }
 
 function updateStatus(ctx: ExtensionContext) {
@@ -543,7 +590,8 @@ export default function spfyExtension(api: ExtensionAPI) {
   pi = api;
   storage = new PermissionStorage(pi, process.cwd());
 
-  registerSwitchProfileTool(pi);
+  registerPlanTools(pi);
+  questionnaire(pi);
   registerCommands(pi);
   registerShortcuts(pi);
 
@@ -568,8 +616,13 @@ export default function spfyExtension(api: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     await restoreSessionState(ctx, { init: true, notify: true });
 
+    // Ensure plans directory exists
+    mkdirSync(plansDir, { recursive: true });
+
     if (pi.getFlag("build") === true) {
       setCurrentProfile("build");
+      persistProfile(pi);
+      applyProfileTools(pi, "build");
       updateStatus(ctx);
     }
     if (pi.getFlag("plan-on-error") === true) {
@@ -581,36 +634,23 @@ export default function spfyExtension(api: ExtensionAPI) {
   pi.on("tool_call", handleToolCall);
   pi.on("tool_result", handleToolResult);
 
-  // Clear turn-limited temp rules when the agent finishes (user gets a turn)
-  // If a profile switch is pending, send the context message via triggerTurn.
-  // This starts a fresh agent.prompt() call with an updated tool snapshot,
-  // so the model sees the correct active tools (e.g. write/edit in build mode).
+  // Clear turn-limited temp rules when the agent finishes (user gets a turn).
   pi.on("agent_end", async () => {
     storage.temp.clearTurnRules();
-    if (pendingProfileSwitch) {
-      const { from, to } = pendingProfileSwitch;
-      pendingProfileSwitch = undefined;
-      pi.sendMessage(
-        {
-          customType: "spfy:profile:context",
-          content: getProfileSwitchMessage(from, to),
-          display: true,
-        },
-        { triggerTurn: true },
-      );
-    }
   });
 
   pi.on("context", async (event) => {
     return { messages: filterProfileContext(event.messages) };
   });
 
-  pi.on("before_agent_start", async () => {
+  pi.on("before_agent_start", async (_event, ctx) => {
     const profile = getCurrentProfile();
+    const sessionId = ctx.sessionManager.getSessionId();
+    const planPath = getPlanFilePath(sessionId);
     return {
       message: {
         customType: "spfy:profile:context",
-        content: getProfileContextMessage(profile),
+        content: getProfileContextMessage(profile, planPath),
         display: false,
       },
     };

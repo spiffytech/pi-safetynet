@@ -11,7 +11,6 @@ import {
   visibleWidth,
 } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
-import type { ProfileName } from "./types.ts";
 import { toDisplayPath } from "./project.ts";
 
 // ─── Public types ───────────────────────────────────────────────────────────
@@ -529,24 +528,4 @@ export async function showRulesEditor(
   };
 }
 
-// ─── Public: promptProfileEscalation ──────────────────────────────────────
 
-export async function promptProfileEscalation(
-  ctx: ExtensionContext,
-  reason?: string,
-): Promise<boolean> {
-  if (!ctx.hasUI) return false;
-
-  const msg = reason
-    ? `Switch to build mode?\n\nReason: ${reason}`
-    : "Switch to build mode?";
-  return withToolsExpanded(ctx, () => ctx.ui.confirm("Profile Escalation", msg));
-}
-
-export function notifyProfileSwitch(
-  ctx: ExtensionContext,
-  from: ProfileName,
-  to: ProfileName,
-): void {
-  ctx.ui.notify(`Switched from ${from} to ${to} mode`, "info");
-}

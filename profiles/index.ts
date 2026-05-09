@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { ProfileName } from "../types.ts";
+import { existsSync } from "node:fs";
 
 let currentProfile: ProfileName = "plan";
 
@@ -9,10 +10,6 @@ export function getCurrentProfile(): ProfileName {
 
 export function setCurrentProfile(profile: ProfileName): void {
   currentProfile = profile;
-}
-
-export function requiresApproval(from: ProfileName, to: ProfileName): boolean {
-  return !(from === "build" && to === "plan");
 }
 
 export function getLatestCustomEntry<T>(ctx: ExtensionContext, customType: string): T | undefined {
@@ -36,78 +33,79 @@ export function restoreProfile(ctx: ExtensionContext): void {
 }
 
 /**
- * Stateless profile context — injected via before_agent_start on every
- * user-initiated turn. Never includes switch-specific wording.
+ * Stateless profile context injected before each agent start.
+ * Mode transitions are user-controlled via slash commands; there is no
+ * model-owned plan/build handoff tool.
  */
-export function getProfileContextMessage(profile: ProfileName): string {
+export function getProfileContextMessage(profile: ProfileName, planPath?: string): string {
   if (profile === "plan") {
+    const planFileSection = planPath && existsSync(planPath)
+      ? `A plan file already exists at ${planPath}. You can read it and make incremental edits using planEdit.`
+      : "No plan file exists yet. Create it using planWrite.";
+
     return `[SPFY PLAN MODE]
-Plan mode is ACTIVE. You are in a READ-ONLY, planning-only phase.
+Plan mode is ACTIVE. You are in a READ-ONLY planning phase.
 
 CRITICAL CONSTRAINTS (override all other instructions):
-- You MUST NOT make any edits, run any non-readonly commands, or otherwise change the system
-- You MAY only observe, analyze, search, and plan
-- You MAY run read-only bash commands (ls, cat, grep, find, git log/diff/status, etc.)
-- You MAY use read-only tools: read, grep, find, ls, questionnaire
-- You MAY ask the user clarifying questions
-- Any attempt to modify files or run destructive commands is a critical violation — ZERO exceptions
+- You MUST NOT edit project files, run shell commands, or otherwise change the system.
+- The ONLY file you may write to or edit is the plan file, via planWrite/planEdit.
+- You do NOT have bash/edit/write in this mode. Do not attempt to work around missing tools.
+- You MAY inspect the project with read, grep, find, and ls.
+- You MAY ask the user clarifying questions with questionnaire.
 
-PROHIBITED bash techniques (treated as edits and blocked in plan mode):
-- Redirecting output to files: > file, >> file, &> file, >| file
-- Writing files via heredoc: cat <<EOF > file, cat <<EOF | tee file
-- In-place editing: sed -i, perl -pi, perl -pe
-- File-writing commands: tee, truncate, install, dd of=
-- Interpreter code execution: python -c, node -e, ruby -e, sh -c, bash -c (can embed writes)
-- Any other technique that writes or modifies files
+## Plan File
+${planFileSection}
 
-Do NOT attempt to work around these restrictions. If you need to write files, use switchProfile with target "build" to request build mode.
+## Workflow
+1. Understand the request by reading/searching relevant files.
+2. Ask clarifying questions when requirements or tradeoffs are unclear.
+3. Write a concise, actionable plan to the plan file.
+4. When the plan is ready for user review, call planPresent. planPresent displays the full plan to the user and ends your turn.
 
-Your responsibility is to:
-1. Understand the user's request by reading code and searching the codebase
-2. Ask clarifying questions when weighing tradeoffs or when requirements are ambiguous
-3. Construct a well-formed plan that is detailed enough to execute effectively
-4. When you are ready to execute, use the switchProfile tool with target "build" to request build mode
-
-Do NOT attempt to make changes. Plan first. The user will approve the transition to build mode.
-
-IMPORTANT: You may NOT automatically escalate privileges. You may REQUEST escalation via switchProfile, but the user must approve. You MAY automatically deescalate from build to plan mode.`;
+Do NOT start implementing in plan mode. After planPresent, the user will decide whether to request revisions or manually switch to build mode with /spfy:build.`;
   }
 
-  return `[SPFY BUILD MODE]
-You are in build mode - full tool access is enabled.
+  let buildMsg = `[SPFY BUILD MODE]
+You are in build mode. full tool access is enabled.
 
-You may make file changes, run shell commands, and use all available tools.
+You may make file changes, run shell commands, and use available tools as needed.
 Commands are evaluated against the permission ruleset:
 - Allowlisted commands run silently
-- Unknown commands will prompt the user for approval
-- Dangerous commands (rm -rf /, etc.) are always blocked
+- Unknown commands prompt the user for approval
+- Dangerous commands are blocked
 
-To switch back to plan mode, use the switchProfile tool with target "plan".`;
-}
+If a plan exists, read/follow it when the user asks you to execute. To switch back to planning, the user can run /spfy:plan.`;
 
-/**
- * Switch-specific context — sent from agent_end via triggerTurn after a
- * profile switch. Includes the mode-change directive (e.g. "execute
- * on the plan you developed").
- */
-export function getProfileSwitchMessage(from: ProfileName, to: ProfileName): string {
-  const context = getProfileContextMessage(to);
-  if (from === "plan" && to === "build") {
-    return `${context}
-
-Your operational mode has changed from plan to build. You are no longer in read-only mode. You are permitted to make file changes, run shell commands, and utilize your tools as needed. Execute on the plan you developed.`;
+  if (planPath && existsSync(planPath)) {
+    buildMsg += `\n\nA plan file exists at ${planPath}. You should execute on the plan defined within it when the user asks you to begin.`;
   }
-  return context;
+
+  return buildMsg;
 }
 
-const WRITE_TOOLS = new Set(["edit", "write"]);
+/** Tools that are only useful in plan mode. */
+const PLAN_ONLY_TOOLS = new Set(["planEdit", "planWrite", "planPresent"]);
+
+/** Explicit plan-mode tool allowlist. Keep this intentionally small. */
+const PLAN_MODE_TOOLS = new Set([
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "questionnaire",
+  "planWrite",
+  "planEdit",
+  "planPresent",
+]);
 
 export function applyProfileTools(pi: ExtensionAPI, profile: ProfileName): void {
-  if (profile === "build") {
-    const allTools = pi.getAllTools().map((t) => t.name);
-    pi.setActiveTools(allTools);
+  const allTools = pi.getAllTools().map((t) => t.name);
+
+  if (profile === "plan") {
+    pi.setActiveTools(allTools.filter((name) => PLAN_MODE_TOOLS.has(name)));
     return;
   }
-  const planTools = pi.getAllTools().map((t) => t.name).filter((name) => !WRITE_TOOLS.has(name));
-  pi.setActiveTools(planTools);
+
+  // Build mode: show everything except plan-artifact-only tools.
+  pi.setActiveTools(allTools.filter((name) => !PLAN_ONLY_TOOLS.has(name)));
 }
