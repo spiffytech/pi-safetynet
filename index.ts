@@ -370,6 +370,45 @@ function formatPlanForDisplay(content: string): string {
   return `Plan ready for review.\n\n${content}\n\nIf you want revisions, reply with feedback. If you approve, switch to build mode with /safetynet:build and tell me to begin.`;
 }
 
+/** Read the plan file and return a present-result, or an error result if absent/empty. */
+function readPlanForPresentation(sessionId: string): { content: { type: "text"; text: string }[]; details: Record<string, unknown>; terminate: true } {
+  const planPath = getPlanFilePath(sessionId);
+  if (!existsSync(planPath)) {
+    return {
+      content: [{ type: "text", text: "No plan file found. Write your plan using planWrite first." }],
+      details: {},
+      terminate: true,
+    };
+  }
+
+  const content = readFileSync(planPath, "utf-8").trim();
+  if (!content) {
+    return {
+      content: [{ type: "text", text: "Plan file is empty. Write your plan using planWrite first." }],
+      details: {},
+      terminate: true,
+    };
+  }
+
+  lastActionWasPlanWrite = false;
+
+  const markdown = formatPlanForDisplay(content);
+  return {
+    content: [{ type: "text", text: "Plan ready for review." }],
+    details: { planPath, markdown },
+    terminate: true,
+  };
+}
+
+function renderPresentResult(result: { content: { type: string; text?: string }[]; details: unknown }) {
+  const markdown = (result.details as { markdown?: unknown } | undefined)?.markdown;
+  if (typeof markdown !== "string") {
+    const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text");
+    return new Text(text?.text ?? "No plan content", 0, 0);
+  }
+  return new Markdown(markdown, 0, 0, getMarkdownTheme());
+}
+
 function registerPlanTools(pi: ExtensionAPI) {
   const baseWriteAgentTool = createWriteTool(extDir);
   const baseEditAgentTool = createEditTool(extDir);
@@ -377,16 +416,23 @@ function registerPlanTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "planWrite",
     label: "Plan Write",
-    description: "Create or overwrite the plan file. Use planPresent when the plan is ready to show the full plan to the user.",
+    description: "Create or overwrite the plan file. If the plan is ready for the user's review, use presentToUser=true to automatically display it to them.",
     parameters: Type.Object({
       content: Type.String({ description: "Content to write to the plan file" }),
+      presentToUser: Type.Optional(Type.Boolean({ description: "If the plan is ready for the user's review, use presentToUser=true to automatically display it to them." })),
     }),
+    renderResult: renderPresentResult,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
       const result = await baseWriteAgentTool.execute(toolCallId, { path: planPath, content: params.content }, signal, onUpdate);
+
+      if (params.presentToUser) {
+        return readPlanForPresentation(ctx.sessionManager.getSessionId());
+      }
+
       return {
         ...result,
-        content: [{ type: "text", text: `Plan file updated at ${planPath}. Call planPresent when the plan is ready to show it to the user.` }],
+        content: [{ type: "text", text: `Plan file updated at ${planPath}. Set presentToUser=true on your final planWrite to display it to the user.` }],
       };
     },
   });
@@ -394,19 +440,26 @@ function registerPlanTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "planEdit",
     label: "Plan Edit",
-    description: "Edit the plan file. Use planPresent when the plan is ready to show the full plan to the user.",
+    description: "Edit the plan file. If the plan is ready for the user's review, use presentToUser=true to automatically display it to them.",
     parameters: Type.Object({
       edits: Type.Array(Type.Object({
         oldText: Type.String({ description: "Exact text to replace" }),
         newText: Type.String({ description: "Replacement text" }),
       }), { description: "Edits to apply to the plan file" }),
+      presentToUser: Type.Optional(Type.Boolean({ description: "If the plan is ready for the user's review, use presentToUser=true to automatically display it to them." })),
     }),
+    renderResult: renderPresentResult,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
       const result = await baseEditAgentTool.execute(toolCallId, { path: planPath, edits: params.edits } as any, signal, onUpdate);
+
+      if (params.presentToUser) {
+        return readPlanForPresentation(ctx.sessionManager.getSessionId());
+      }
+
       return {
         ...result,
-        content: [{ type: "text", text: `Plan file updated at ${planPath}. Call planPresent when the plan is ready to show it to the user.` }],
+        content: [{ type: "text", text: `Plan file updated at ${planPath}. Set presentToUser=true on your final planEdit to display it to the user.` }],
       };
     },
   });
@@ -414,47 +467,15 @@ function registerPlanTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "planPresent",
     label: "Plan Present",
-    description: "Present the current plan to the user for review and end the turn. Call this when the plan is complete. This does not switch modes; the user must run /safetynet:build to approve implementation.",
+    description: "Present the current plan to the user for review and end the turn. This does not switch modes; the user must run /safetynet:build to approve implementation.",
     parameters: Type.Object({
       confirmation: Type.Optional(Type.String({
         description: "Brief summary confirming the plan is ready for review",
       })),
     }),
-    renderResult(result) {
-      const markdown = (result.details as { markdown?: unknown } | undefined)?.markdown;
-      if (typeof markdown !== "string") {
-        const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text");
-        return new Text(text?.text ?? "No plan content", 0, 0);
-      }
-      return new Markdown(markdown, 0, 0, getMarkdownTheme());
-    },
+    renderResult: renderPresentResult,
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
-      if (!existsSync(planPath)) {
-        return {
-          content: [{ type: "text", text: "No plan file found. Write your plan using planWrite before calling planPresent." }],
-          details: {},
-          terminate: true,
-        };
-      }
-
-      const content = readFileSync(planPath, "utf-8").trim();
-      if (!content) {
-        return {
-          content: [{ type: "text", text: "Plan file is empty. Write your plan using planWrite before calling planPresent." }],
-          details: {},
-          terminate: true,
-        };
-      }
-
-      lastActionWasPlanWrite = false;
-
-      const markdown = formatPlanForDisplay(content);
-      return {
-        content: [{ type: "text", text: "Plan ready for review." }],
-        details: { planPath, markdown },
-        terminate: true,
-      };
+      return readPlanForPresentation(ctx.sessionManager.getSessionId());
     },
   });
 }

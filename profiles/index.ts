@@ -56,13 +56,17 @@ CRITICAL CONSTRAINTS (override all other instructions):
 ## Plan File
 ${planFileSection}
 
+## Presenting the Plan
+When the plan is ready for the user to review, set presentToUser=true on your final planWrite or planEdit call. This displays the plan and ends your turn.
+If you need to present the plan without writing changes (e.g. after questionnaire responses), call planPresent instead.
+
 ## Workflow
 1. Understand the request by reading/searching relevant files.
 2. Ask clarifying questions when requirements or tradeoffs are unclear.
 3. Write a concise, actionable plan to the plan file.
-4. When the plan is ready for user review, call planPresent. planPresent displays the full plan to the user and ends your turn.
+4. Set presentToUser=true on your final planWrite/planEdit to display the plan to the user.
 
-Do NOT start implementing in plan mode. After planPresent, the user will decide whether to request revisions or manually switch to build mode with /safetynet:build.`;
+Do NOT start implementing in plan mode. After the plan is presented, the user will decide whether to request revisions or manually switch to build mode with /safetynet:build.`;
   }
 
   let buildMsg = `[SAFENET BUILD MODE]
