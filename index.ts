@@ -329,7 +329,9 @@ async function handleToolResult(event: ToolResultEvent, _ctx: ExtensionContext) 
   // Track whether the last action in plan mode was a plan write
   if (getCurrentProfile() === "plan") {
     if (event.toolName === "planWrite" || event.toolName === "planEdit") {
-      lastActionWasPlanWrite = true;
+      // Only flag for auto-present if the tool didn't already present via presentToUser=true
+      // (the renderResult already handles display in that case)
+      lastActionWasPlanWrite = !event.input.presentToUser;
     } else {
       lastActionWasPlanWrite = false;
     }
