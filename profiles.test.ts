@@ -47,7 +47,7 @@ describe("profiles", () => {
 
     it("plan message explains user-controlled build transition", () => {
       const msg = getProfileContextMessage("plan");
-      assert.ok(msg.includes("/spfy:build"));
+      assert.ok(msg.includes("/safetynet:build"));
     });
 
     it("build message mentions full access", () => {
@@ -56,9 +56,9 @@ describe("profiles", () => {
       assert.ok(msg.includes("full tool access") || msg.includes("full access"));
     });
 
-    it("build message mentions /spfy:plan", () => {
+    it("build message mentions /safetynet:plan", () => {
       const msg = getProfileContextMessage("build");
-      assert.ok(msg.includes("/spfy:plan"));
+      assert.ok(msg.includes("/safetynet:plan"));
     });
 
     it("build message with plan path references plan file", () => {

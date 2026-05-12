@@ -12,7 +12,7 @@ import {
 } from "./project.ts";
 
 describe("findProjectRoot", () => {
-  const base = join(tmpdir(), `spfy-test-project-${Date.now()}`);
+  const base = join(tmpdir(), `safetynet-test-project-${Date.now()}`);
 
   beforeEach(() => {
     mkdirSync(join(base, "src"), { recursive: true });
@@ -36,7 +36,7 @@ describe("findProjectRoot", () => {
   });
 
   it("falls back to startPath when no .pi found", () => {
-    const noPi = join(tmpdir(), `spfy-test-nopi-${Date.now()}`);
+    const noPi = join(tmpdir(), `safetynet-test-nopi-${Date.now()}`);
     try {
       mkdirSync(noPi, { recursive: true });
       assert.equal(findProjectRoot(noPi), noPi);

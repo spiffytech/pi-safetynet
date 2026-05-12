@@ -212,7 +212,7 @@ async function resolvePermission(
         await storage.addGlobalRules(newRules);
       } else {
         storage.addSessionRules(newRules);
-        pi.appendEntry("spfy:session-rules", { rules: newRules });
+        pi.appendEntry("safetynet:session-rules", { rules: newRules });
       }
     } else {
       // "turn" or "timed"
@@ -283,7 +283,7 @@ async function handleToolCall(
     if (event.toolName === "edit" || event.toolName === "write") {
       if (profile === "plan") {
         ctx.abort();
-        return { block: true, reason: `Plan mode: ${event.toolName} is disabled. The user must switch to build mode with /spfy:build before implementation.` };
+        return { block: true, reason: `Plan mode: ${event.toolName} is disabled. The user must switch to build mode with /safetynet:build before implementation.` };
       }
       const filePath = event.input.path as string;
       const rules = storage.getAllRules();
@@ -341,12 +341,12 @@ async function handleToolResult(event: ToolResultEvent, _ctx: ExtensionContext) 
 function filterProfileContext(messages: AgentMessage[]): AgentMessage[] {
   return messages.filter((m) => {
     const msg = m as AgentMessage & { customType?: string };
-    if (msg.customType === "spfy:profile:context") return false;
+    if (msg.customType === "safetynet:profile:context") return false;
 
     if (msg.role === "user") {
       const content = msg.content;
       if (typeof content === "string") {
-        return !hasPlanOnErrorMarker(content) && !content.includes("[SPFY_PROFILE_CONTEXT]") && !content.includes("[SPFY PLAN MODE]") && !content.includes("[SPFY BUILD MODE]");
+        return !hasPlanOnErrorMarker(content) && !content.includes("[SAFENET_PROFILE_CONTEXT]") && !content.includes("[SAFENET PLAN MODE]") && !content.includes("[SAFENET BUILD MODE]");
       }
     }
     return true;
@@ -354,7 +354,7 @@ function filterProfileContext(messages: AgentMessage[]): AgentMessage[] {
 }
 
 function formatPlanForDisplay(content: string): string {
-  return `Plan ready for review.\n\n${content}\n\nIf you want revisions, reply with feedback. If you approve, switch to build mode with /spfy:build and tell me to begin.`;
+  return `Plan ready for review.\n\n${content}\n\nIf you want revisions, reply with feedback. If you approve, switch to build mode with /safetynet:build and tell me to begin.`;
 }
 
 function registerPlanTools(pi: ExtensionAPI) {
@@ -401,7 +401,7 @@ function registerPlanTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "planPresent",
     label: "Plan Present",
-    description: "Present the current plan to the user for review and end the turn. Call this when the plan is complete. This does not switch modes; the user must run /spfy:build to approve implementation.",
+    description: "Present the current plan to the user for review and end the turn. Call this when the plan is complete. This does not switch modes; the user must run /safetynet:build to approve implementation.",
     parameters: Type.Object({}),
     renderResult(result) {
       const markdown = (result.details as { markdown?: unknown } | undefined)?.markdown;
@@ -474,7 +474,7 @@ function showCurrentPlan(ctx: ExtensionContext): void {
 }
 
 function registerCommands(pi: ExtensionAPI) {
-  pi.registerCommand("spfy:plan-on-error", {
+  pi.registerCommand("safetynet:plan-on-error", {
     description: "Toggle plan-on-error mode",
     handler: async (_args, ctx) => {
       const enabled = togglePlanOnError(pi);
@@ -483,22 +483,22 @@ function registerCommands(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("spfy:plan", {
+  pi.registerCommand("safetynet:plan", {
     description: "Switch to plan mode",
     handler: async (_args, ctx) => switchToProfile(ctx, "plan"),
   });
 
-  pi.registerCommand("spfy:build", {
+  pi.registerCommand("safetynet:build", {
     description: "Switch to build mode (full access)",
     handler: async (_args, ctx) => switchToProfile(ctx, "build"),
   });
 
-  pi.registerCommand("spfy:plan-show", {
+  pi.registerCommand("safetynet:plan-show", {
     description: "Show the current plan",
     handler: async (_args, ctx) => showCurrentPlan(ctx),
   });
 
-  pi.registerCommand("spfy:rules", {
+  pi.registerCommand("safetynet:rules", {
     description: "Show current permission rules",
     handler: async (_args, ctx) => {
       const profile = getCurrentProfile();
@@ -560,7 +560,7 @@ function updateStatus(ctx: ExtensionContext) {
   const poe = isPlanOnErrorEnabled();
   let text = profile;
   if (poe) text += " +poe";
-  ctx.ui.setStatus("spfy", text);
+  ctx.ui.setStatus("safetynet", text);
 }
 
 let pi: ExtensionAPI;
@@ -589,11 +589,11 @@ async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): P
   updateStatus(ctx);
 
   if (opts?.notify && ctx.hasUI) {
-    ctx.ui.notify(`spfy loaded in ${getCurrentProfile()} mode`, "info");
+    ctx.ui.notify(`safetynet loaded in ${getCurrentProfile()} mode`, "info");
   }
 }
 
-export default function spfyExtension(api: ExtensionAPI) {
+export default function safetynetExtension(api: ExtensionAPI) {
   pi = api;
   storage = new PermissionStorage(pi, process.cwd());
 
@@ -656,7 +656,7 @@ export default function spfyExtension(api: ExtensionAPI) {
     const planPath = getPlanFilePath(sessionId);
     return {
       message: {
-        customType: "spfy:profile:context",
+        customType: "safetynet:profile:context",
         content: getProfileContextMessage(profile, planPath),
         display: false,
       },

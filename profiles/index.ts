@@ -22,13 +22,13 @@ export function getLatestCustomEntry<T>(ctx: ExtensionContext, customType: strin
 }
 
 export function persistProfile(pi: ExtensionAPI): void {
-  pi.appendEntry("spfy:profile", {
+  pi.appendEntry("safetynet:profile", {
     enabled: currentProfile,
   });
 }
 
 export function restoreProfile(ctx: ExtensionContext): void {
-  const entry = getLatestCustomEntry<{ enabled?: ProfileName }>(ctx, "spfy:profile");
+  const entry = getLatestCustomEntry<{ enabled?: ProfileName }>(ctx, "safetynet:profile");
   if (entry?.enabled) currentProfile = entry.enabled;
 }
 
@@ -43,7 +43,7 @@ export function getProfileContextMessage(profile: ProfileName, planPath?: string
       ? `A plan file already exists at ${planPath}. You can read it and make incremental edits using planEdit.`
       : "No plan file exists yet. Create it using planWrite.";
 
-    return `[SPFY PLAN MODE]
+    return `[SAFENET PLAN MODE]
 Plan mode is ACTIVE. You are in a READ-ONLY planning phase.
 
 CRITICAL CONSTRAINTS (override all other instructions):
@@ -62,10 +62,10 @@ ${planFileSection}
 3. Write a concise, actionable plan to the plan file.
 4. When the plan is ready for user review, call planPresent. planPresent displays the full plan to the user and ends your turn.
 
-Do NOT start implementing in plan mode. After planPresent, the user will decide whether to request revisions or manually switch to build mode with /spfy:build.`;
+Do NOT start implementing in plan mode. After planPresent, the user will decide whether to request revisions or manually switch to build mode with /safetynet:build.`;
   }
 
-  let buildMsg = `[SPFY BUILD MODE]
+  let buildMsg = `[SAFENET BUILD MODE]
 You are in build mode. full tool access is enabled.
 
 You may make file changes, run shell commands, and use available tools as needed.
@@ -74,7 +74,7 @@ Commands are evaluated against the permission ruleset:
 - Unknown commands prompt the user for approval
 - Dangerous commands are blocked
 
-If a plan exists, read/follow it when the user asks you to execute. To switch back to planning, the user can run /spfy:plan.`;
+If a plan exists, read/follow it when the user asks you to execute. To switch back to planning, the user can run /safetynet:plan.`;
 
   if (planPath && existsSync(planPath)) {
     buildMsg += `\n\nA plan file exists at ${planPath}. You should execute on the plan defined within it when the user asks you to begin.`;

@@ -24,11 +24,11 @@ afterEach(() => {
 
 describe("global-config", () => {
   describe("getGlobalConfigDir / getGlobalConfigPath", () => {
-    it("returns ~/.config/spfy/ for dir", () => {
+    it("returns ~/.config/pi-safetynet/ for dir", () => {
       assert.equal(getGlobalConfigDir(), join(TMP_HOME, ".config", "pi-safetynet"));
     });
 
-    it("returns ~/.config/spfy/config.json for path", () => {
+    it("returns ~/.config/pi-safetynet/config.json for path", () => {
       assert.equal(getGlobalConfigPath(), join(TMP_HOME, ".config", "pi-safetynet", "config.json"));
     });
   });

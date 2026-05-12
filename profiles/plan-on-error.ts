@@ -3,7 +3,7 @@ import { getLatestCustomEntry } from "./index.ts";
 
 let planOnErrorEnabled = true;
 
-const MARKER = "[SPFY_PLAN_ON_ERROR]";
+const MARKER = "[SAFENET_PLAN_ON_ERROR]";
 
 export function isPlanOnErrorEnabled(): boolean {
   return planOnErrorEnabled;
@@ -11,23 +11,23 @@ export function isPlanOnErrorEnabled(): boolean {
 
 export function setPlanOnError(enabled: boolean, pi: ExtensionAPI): void {
   planOnErrorEnabled = enabled;
-  pi.appendEntry("spfy:plan-on-error", { enabled });
+  pi.appendEntry("safetynet:plan-on-error", { enabled });
 }
 
 export function togglePlanOnError(pi: ExtensionAPI): boolean {
   planOnErrorEnabled = !planOnErrorEnabled;
-  pi.appendEntry("spfy:plan-on-error", { enabled: planOnErrorEnabled });
+  pi.appendEntry("safetynet:plan-on-error", { enabled: planOnErrorEnabled });
   return planOnErrorEnabled;
 }
 
 export function restorePlanOnError(ctx: ExtensionContext): void {
-  const entry = getLatestCustomEntry<{ enabled?: boolean }>(ctx, "spfy:plan-on-error");
+  const entry = getLatestCustomEntry<{ enabled?: boolean }>(ctx, "safetynet:plan-on-error");
   if (entry?.enabled !== undefined) planOnErrorEnabled = entry.enabled;
 }
 
 export function getPlanOnErrorInstruction(): string | null {
   if (!planOnErrorEnabled) return null;
-  return `${MARKER}\nIf this result represents an error, tell the user that switching to plan mode with /spfy:plan may help diagnose it.`;
+  return `${MARKER}\nIf this result represents an error, tell the user that switching to plan mode with /safetynet:plan may help diagnose it.`;
 }
 
 export function hasPlanOnErrorMarker(text: string): boolean {

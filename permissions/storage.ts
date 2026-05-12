@@ -51,7 +51,7 @@ class PersistedRuleStore {
 
   constructor(cwd: string) {
     const root = findProjectRoot(cwd);
-    this.filePath = join(root, ".pi", "extensions", "spfy", "approvals.json");
+    this.filePath = join(root, ".pi", "extensions", "safetynet", "approvals.json");
   }
 
   getFilePath(): string {
@@ -195,7 +195,7 @@ export function reconstructSessionRules(
   for (const entry of entries) {
     if (
       entry.type === "custom" &&
-      (entry as { customType?: string }).customType === "spfy:session-rules"
+      (entry as { customType?: string }).customType === "safetynet:session-rules"
     ) {
       const data = (entry as { data?: { rules?: Ruleset } }).data;
       if (data?.rules) rules.push(...data.rules);

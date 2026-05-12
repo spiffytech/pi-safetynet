@@ -1,4 +1,4 @@
-# spfy Extension
+# pi-safetynet Extension
 
 ## Commands
 
