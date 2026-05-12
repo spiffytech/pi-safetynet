@@ -47,6 +47,10 @@ import { normalizePathForMatching, findProjectRoot } from "./project.ts";
 
 let storage: PermissionStorage;
 
+/** Tracks whether the last tool result in plan mode was planWrite/planEdit.
+ *  Used to auto-present when the agent stops after writing the plan. */
+let lastActionWasPlanWrite = false;
+
 /** Extension directory — resolved at module load via import.meta.url */
 const extDir = dirname(fileURLToPath(import.meta.url));
 
@@ -322,6 +326,15 @@ async function handleToolCall(
 }
 
 async function handleToolResult(event: ToolResultEvent, _ctx: ExtensionContext) {
+  // Track whether the last action in plan mode was a plan write
+  if (getCurrentProfile() === "plan") {
+    if (event.toolName === "planWrite" || event.toolName === "planEdit") {
+      lastActionWasPlanWrite = true;
+    } else {
+      lastActionWasPlanWrite = false;
+    }
+  }
+
   if (!isPlanOnErrorEnabled() || !isBashToolResult(event)) return;
 
   const instruction = getPlanOnErrorInstruction();
@@ -402,7 +415,11 @@ function registerPlanTools(pi: ExtensionAPI) {
     name: "planPresent",
     label: "Plan Present",
     description: "Present the current plan to the user for review and end the turn. Call this when the plan is complete. This does not switch modes; the user must run /safetynet:build to approve implementation.",
-    parameters: Type.Object({}),
+    parameters: Type.Object({
+      confirmation: Type.Optional(Type.String({
+        description: "Brief summary confirming the plan is ready for review",
+      })),
+    }),
     renderResult(result) {
       const markdown = (result.details as { markdown?: unknown } | undefined)?.markdown;
       if (typeof markdown !== "string") {
@@ -429,6 +446,8 @@ function registerPlanTools(pi: ExtensionAPI) {
           terminate: true,
         };
       }
+
+      lastActionWasPlanWrite = false;
 
       const markdown = formatPlanForDisplay(content);
       return {
@@ -642,8 +661,20 @@ export default function safetynetExtension(api: ExtensionAPI) {
   pi.on("tool_result", handleToolResult);
 
   // Clear turn-limited temp rules when the agent finishes (user gets a turn).
-  pi.on("agent_end", async () => {
+  // Also auto-present the plan if the model's last action was writing it.
+  pi.on("agent_end", async (_event, ctx) => {
     storage.temp.clearTurnRules();
+
+    if (lastActionWasPlanWrite) {
+      const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
+      if (existsSync(planPath)) {
+        const content = readFileSync(planPath, "utf-8").trim();
+        if (content) {
+          ctx.ui.notify(formatPlanForDisplay(content), "info");
+        }
+      }
+      lastActionWasPlanWrite = false;
+    }
   });
 
   pi.on("context", async (event) => {
