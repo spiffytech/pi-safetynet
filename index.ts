@@ -188,7 +188,7 @@ async function resolvePermission(
       }
     }
 
-    if (duration === "session" || duration === "project") {
+    if (duration === "session" || duration === "project" || duration === "global") {
       const newModes: ProfileName[] = profile === "plan" ? ["plan", "build"] : ["build"];
       const newRules: Ruleset = patterns.map((p) => ({
         permission: opts.permission as Rule["permission"],
@@ -208,6 +208,8 @@ async function resolvePermission(
 
       if (duration === "project") {
         await storage.addPersistedRules(newRules);
+      } else if (duration === "global") {
+        await storage.addGlobalRules(newRules);
       } else {
         storage.addSessionRules(newRules);
         pi.appendEntry("spfy:session-rules", { rules: newRules });
@@ -501,6 +503,7 @@ function registerCommands(pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       const profile = getCurrentProfile();
       const baseline = getBaselineRules();
+      const global = storage.global.getRules();
       const persisted = storage.persisted.getRules();
       const session = storage.session.getRules();
       const temp = storage.temp.getRules();
@@ -514,6 +517,10 @@ function registerCommands(pi: ExtensionAPI) {
         "--- BASELINE ---",
         ...formatRules(baseline),
       ];
+
+      if (global.length > 0) {
+        lines.push("", "--- GLOBAL ---", ...formatRules(global));
+      }
 
       if (persisted.length > 0) {
         lines.push("", "--- PERSISTED ---", ...formatRules(persisted));

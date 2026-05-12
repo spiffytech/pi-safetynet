@@ -128,7 +128,8 @@ When pi-safetynet prompts for approval, you choose how long the permission lasts
 | **Turn** | Until the agent finishes its current turn | In-memory, cleared on `agent_end` |
 | **15m** (timed) | 15 minutes (configurable) | In-memory, auto-expires |
 | **Session** | Rest of this session | In-memory, survives across turns |
-| **Project** | All future sessions | Saved to `.pi/extensions/safetynet/approvals.json` |
+| **Project** | All future sessions in this project | Saved to `.pi/extensions/safetynet/approvals.json` |
+| **Global** | All future sessions across all projects | Saved to `~/.config/pi-safetynet/config.json` |
 
 ## Permission prompts
 
@@ -183,9 +184,71 @@ This table reflects the gaps that motivated building pi-safetynet. I haven't rig
 pi-safetynet uses a layered rule system (last match wins):
 
 1. **Baseline** — Built-in rules shipped with pi-safetynet (read-only commands auto-approved, writes asked, etc.)
-2. **Persisted** — User-approved rules saved to `.pi/extensions/safetynet/approvals.json`
-3. **Session** — Rules added during this session
-4. **Temporary** — Time-limited or turn-limited rules
+2. **Global** — User-defined rules from `~/.config/pi-safetynet/config.json` (see below)
+3. **Persisted** — User-approved rules saved to `.pi/extensions/safetynet/approvals.json`
+4. **Session** — Rules added during this session
+5. **Temporary** — Time-limited or turn-limited rules
+
+### Global config
+
+You can define rules that apply across all projects via the global config file at `~/.config/pi-safetynet/config.json`. This is useful for commands you always want to allow (or deny), regardless of which project you're working in.
+
+```json
+{
+  "rules": [
+    { "permission": "bash", "pattern": "npm test", "action": "allow", "modes": ["build", "plan"] },
+    { "permission": "bash", "pattern": "cargo test", "action": "allow", "modes": ["build", "plan"] },
+    { "permission": "bash", "pattern": "npm publish *", "action": "deny", "modes": ["build", "plan"] }
+  ]
+}
+```
+
+Each rule has:
+
+- **`permission`** — `bash`, `edit`, `read`, or `*` (matches any)
+- **`pattern`** — For `bash`/`*`: a command pattern where `*` is a wildcard (e.g. `npm *`). For `edit`/`read`: a [picomatch](https://github.com/micromatch/picomatch) glob pattern (e.g. `src/**/*.ts`).
+- **`action`** — `allow`, `deny`, or `ask`
+- **`modes`** — Which profiles the rule applies to: `["build"]`, `["plan"]`, or `["build", "plan"]`
+
+#### Denylist-style rules
+
+Because the rule system uses last-match-wins ordering, you can create denylist patterns: place a broad `allow` rule first, then `deny` (or `ask`) rules for specific exceptions. This works in the global config, project rules, and session rules alike.
+
+For example, to allow all `npm` subcommands but deny `npm publish`:
+
+```json
+{
+  "rules": [
+    { "permission": "bash", "pattern": "npm *", "action": "allow", "modes": ["build", "plan"] },
+    { "permission": "bash", "pattern": "npm publish *", "action": "deny", "modes": ["build", "plan"] }
+  ]
+}
+```
+
+Or to allow all `git` subcommands but require approval for force pushes:
+
+```json
+{
+  "rules": [
+    { "permission": "bash", "pattern": "git *", "action": "allow", "modes": ["build"] },
+    { "permission": "bash", "pattern": "git push --force *", "action": "ask", "modes": ["build"] },
+    { "permission": "bash", "pattern": "git push -f *", "action": "ask", "modes": ["build"] }
+  ]
+}
+```
+
+For file edits, you could auto-approve editing source files but always ask about migrations:
+
+```json
+{
+  "rules": [
+    { "permission": "edit", "pattern": "src/**", "action": "allow", "modes": ["build"] },
+    { "permission": "edit", "pattern": "**/migrations/**", "action": "ask", "modes": ["build"] }
+  ]
+}
+```
+
+You can also add global rules through the approval prompt by selecting **Global** as the duration.
 
 Rules support both profile modes, so a rule can be scoped to build mode only and remain invisible to plan mode.
 

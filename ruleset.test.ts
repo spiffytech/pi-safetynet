@@ -205,6 +205,15 @@ describe("evaluatePermission", () => {
       assert.equal(result.action, "deny");
     });
 
+    it("denylist: allow * then deny specific pattern overrides the catch-all", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "*", action: "allow", modes: ALL_MODES },
+        { permission: "bash", pattern: "rm *", action: "deny", modes: ALL_MODES },
+      ];
+      assert.equal(evaluatePermission("bash", "curl", "build", rules).action, "allow");
+      assert.equal(evaluatePermission("bash", "rm file.txt", "build", rules).action, "deny");
+    });
+
     it("session rules override persisted rules override baseline", () => {
       const rules: Ruleset = [
         { permission: "bash", pattern: "*", action: "ask", modes: ["build", "plan"] },

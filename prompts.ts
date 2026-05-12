@@ -15,7 +15,7 @@ import { toDisplayPath } from "./project.ts";
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
-export type PermissionDuration = "once" | "session" | "project" | "turn" | "timed";
+export type PermissionDuration = "once" | "session" | "project" | "global" | "turn" | "timed";
 
 /**
  * Result from the permission prompt.
@@ -95,6 +95,7 @@ function getDurationOptions(timedMinutes: number): DurationOption[] {
     { value: "project", label: "Project" },
     { value: "turn", label: "Turn" },
     { value: "timed", label: `${timedMinutes}m` },
+    { value: "global", label: "Global" },
   ];
 }
 

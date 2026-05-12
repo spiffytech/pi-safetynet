@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { Rule, Ruleset, TempRule, ProfileName } from "../types.ts";
 import { findProjectRoot } from "../project.ts";
+import { loadGlobalRules, addGlobalRules as addGlobalRulesToConfig } from "../global-config.ts";
 import baselineData from "./baseline.json" with { type: "json" };
 
 const BASELINE: Ruleset = baselineData.rules as Ruleset;
@@ -129,9 +130,26 @@ export class TempRuleStore {
   }
 }
 
+export class GlobalRuleStore {
+  private rules: Ruleset = [];
+
+  getRules(): Ruleset {
+    return [...this.rules];
+  }
+
+  load(): void {
+    this.rules = loadGlobalRules();
+  }
+
+  async addRules(newRules: Ruleset): Promise<void> {
+    this.rules = addGlobalRulesToConfig(newRules);
+  }
+}
+
 export class PermissionStorage {
   session: SessionRuleStore;
   persisted: PersistedRuleStore;
+  global: GlobalRuleStore;
   temp: TempRuleStore;
   private cwd: string;
 
@@ -139,15 +157,17 @@ export class PermissionStorage {
     this.cwd = cwd;
     this.session = new SessionRuleStore();
     this.persisted = new PersistedRuleStore(cwd);
+    this.global = new GlobalRuleStore();
     this.temp = new TempRuleStore();
   }
 
   async init(_ctx: ExtensionContext): Promise<void> {
     this.persisted.load();
+    this.global.load();
   }
 
   getAllRules(): Ruleset {
-    return [...BASELINE, ...this.persisted.getRules(), ...this.session.getRules(), ...this.temp.getRules()];
+    return [...BASELINE, ...this.global.getRules(), ...this.persisted.getRules(), ...this.session.getRules(), ...this.temp.getRules()];
   }
 
   addSessionRules(rules: Ruleset): void {
@@ -160,6 +180,10 @@ export class PermissionStorage {
 
   async addPersistedRules(rules: Ruleset): Promise<void> {
     await this.persisted.addRules(rules);
+  }
+
+  async addGlobalRules(rules: Ruleset): Promise<void> {
+    await this.global.addRules(rules);
   }
 }
 
