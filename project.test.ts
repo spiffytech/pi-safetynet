@@ -8,6 +8,7 @@ import {
   isExternalPath,
   normalizePathForMatching,
   toDisplayPath,
+  fromDisplayPath,
   reanchorPattern,
 } from "./project.ts";
 
@@ -202,6 +203,78 @@ describe("toDisplayPath", () => {
       toDisplayPath("/project/lib/utils.ts", { cwd: "/project/src", projectRoot: "/project" }),
       "../lib/utils.ts",
     );
+  });
+});
+
+describe("fromDisplayPath", () => {
+  it("resolves relative path against cwd", () => {
+    assert.equal(
+      fromDisplayPath("src/foo.ts", { cwd: "/project", home: "/home" }),
+      "/project/src/foo.ts",
+    );
+  });
+
+  it("resolves ../path against cwd", () => {
+    assert.equal(
+      fromDisplayPath("../lib/utils.ts", { cwd: "/project/src", home: "/home" }),
+      "/project/lib/utils.ts",
+    );
+  });
+
+  it("expands ~/ to home directory", () => {
+    assert.equal(
+      fromDisplayPath("~/.config/app", { cwd: "/project", home: "/home/user" }),
+      "/home/user/.config/app",
+    );
+  });
+
+  it("expands bare ~ to home directory", () => {
+    assert.equal(
+      fromDisplayPath("~", { cwd: "/project", home: "/home/user" }),
+      "/home/user",
+    );
+  });
+
+  it("keeps absolute paths as-is", () => {
+    assert.equal(
+      fromDisplayPath("/tmp/build.log", { cwd: "/project", home: "/home" }),
+      "/tmp/build.log",
+    );
+  });
+
+  it("resolves bare filename against cwd", () => {
+    assert.equal(
+      fromDisplayPath("foo.ts", { cwd: "/project/src", home: "/home" }),
+      "/project/src/foo.ts",
+    );
+  });
+
+  it("round-trips with toDisplayPath for in-project file", () => {
+    const cwd = "/project/src";
+    const projectRoot = "/project";
+    const absPath = "/project/src/foo.ts";
+    const display = toDisplayPath(absPath, { cwd, projectRoot });
+    const restored = fromDisplayPath(display, { cwd });
+    assert.equal(restored, absPath);
+  });
+
+  it("round-trips with toDisplayPath for external home file", () => {
+    const cwd = "/project";
+    const projectRoot = "/project";
+    const home = process.env.HOME ?? "/home";
+    const absPath = home + "/.config/app";
+    const display = toDisplayPath(absPath, { cwd, projectRoot });
+    const restored = fromDisplayPath(display, { cwd, home });
+    assert.equal(restored, absPath);
+  });
+
+  it("round-trips with toDisplayPath for non-home external file", () => {
+    const cwd = "/project";
+    const projectRoot = "/project";
+    const absPath = "/tmp/build.log";
+    const display = toDisplayPath(absPath, { cwd, projectRoot });
+    const restored = fromDisplayPath(display, { cwd });
+    assert.equal(restored, absPath);
   });
 });
 

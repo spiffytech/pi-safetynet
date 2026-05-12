@@ -11,7 +11,7 @@ import {
   visibleWidth,
 } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
-import { toDisplayPath } from "./project.ts";
+import { toDisplayPath, fromDisplayPath } from "./project.ts";
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -295,12 +295,14 @@ class PermissionPromptComponent implements Component, Focusable {
     if (item.editing) return;
     item.editing = true;
 
+    const editValue = item.isFile ? toDisplayPath(item.text) : item.text;
+
     if (!item.input) {
       const input = new Input();
-      input.setValue(item.text);
+      input.setValue(editValue);
       item.input = input;
     } else {
-      item.input.setValue(item.text);
+      item.input.setValue(editValue);
     }
     this.invalidate();
   }
@@ -312,7 +314,7 @@ class PermissionPromptComponent implements Component, Focusable {
     if (confirm && item.input) {
       const newValue = item.input.getValue().trim();
       if (newValue.length > 0) {
-        item.text = newValue;
+        item.text = item.isFile ? fromDisplayPath(newValue) : newValue;
       }
     }
     // On cancel, item.text retains its pre-edit value

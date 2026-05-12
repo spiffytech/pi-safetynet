@@ -122,6 +122,30 @@ export function reanchorPattern(pattern: string, cwd: string, projectRoot: strin
   return cwdRelative + "/" + pattern;
 }
 
+/**
+ * Reverse of `toDisplayPath`: convert a user-facing display path back to an
+ * absolute path.
+ *
+ * - `~/...` → expand `$HOME`
+ * - Relative path (no leading `/`, no `~`) → resolve relative to cwd
+ * - Absolute path → keep as-is
+ */
+export function fromDisplayPath(displayPath: string, opts?: { cwd?: string; home?: string }): string {
+  const cwd = opts?.cwd ?? process.cwd();
+  const home = opts?.home ?? process.env.HOME ?? "/home";
+
+  if (displayPath.startsWith("~/")) {
+    return join(home, displayPath.slice(2));
+  }
+  if (displayPath === "~") {
+    return home;
+  }
+  if (!displayPath.startsWith("/")) {
+    return resolve(cwd, displayPath);
+  }
+  return displayPath;
+}
+
 export function normalizePathForMatching(filePath: string, projectRoot: string): string {
   let normalized = filePath;
 
