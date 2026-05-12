@@ -47,10 +47,6 @@ import { normalizePathForMatching, findProjectRoot } from "./project.ts";
 
 let storage: PermissionStorage;
 
-/** Tracks whether the last tool result in plan mode was planWrite/planEdit.
- *  Used to auto-present when the agent stops after writing the plan. */
-let lastActionWasPlanWrite = false;
-
 /** Extension directory — resolved at module load via import.meta.url */
 const extDir = dirname(fileURLToPath(import.meta.url));
 
@@ -326,17 +322,6 @@ async function handleToolCall(
 }
 
 async function handleToolResult(event: ToolResultEvent, _ctx: ExtensionContext) {
-  // Track whether the last action in plan mode was a plan write
-  if (getCurrentProfile() === "plan") {
-    if (event.toolName === "planWrite" || event.toolName === "planEdit") {
-      // Only flag for auto-present if the tool didn't already present via presentToUser=true
-      // (the renderResult already handles display in that case)
-      lastActionWasPlanWrite = !event.input.presentToUser;
-    } else {
-      lastActionWasPlanWrite = false;
-    }
-  }
-
   if (!isPlanOnErrorEnabled() || !isBashToolResult(event)) return;
 
   const instruction = getPlanOnErrorInstruction();
@@ -391,8 +376,6 @@ function readPlanForPresentation(sessionId: string): { content: { type: "text"; 
       terminate: true,
     };
   }
-
-  lastActionWasPlanWrite = false;
 
   const markdown = formatPlanForDisplay(content);
   return {
@@ -512,7 +495,7 @@ function showCurrentPlan(ctx: ExtensionContext): void {
     return;
   }
 
-  ctx.ui.notify(formatPlanForDisplay(content), "info");
+  ctx.ui.setWidget("plan", (_tui, _theme) => new Markdown(formatPlanForDisplay(content), 1, 0, getMarkdownTheme()));
 }
 
 function registerCommands(pi: ExtensionAPI) {
@@ -684,20 +667,8 @@ export default function safetynetExtension(api: ExtensionAPI) {
   pi.on("tool_result", handleToolResult);
 
   // Clear turn-limited temp rules when the agent finishes (user gets a turn).
-  // Also auto-present the plan if the model's last action was writing it.
   pi.on("agent_end", async (_event, ctx) => {
     storage.temp.clearTurnRules();
-
-    if (lastActionWasPlanWrite) {
-      const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
-      if (existsSync(planPath)) {
-        const content = readFileSync(planPath, "utf-8").trim();
-        if (content) {
-          ctx.ui.notify(formatPlanForDisplay(content), "info");
-        }
-      }
-      lastActionWasPlanWrite = false;
-    }
   });
 
   pi.on("context", async (event) => {
@@ -705,6 +676,8 @@ export default function safetynetExtension(api: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {
+    // Clear stale plan widget from a previous turn
+    ctx.ui.setWidget("plan", undefined);
     const profile = getCurrentProfile();
     const sessionId = ctx.sessionManager.getSessionId();
     const planPath = getPlanFilePath(sessionId);
