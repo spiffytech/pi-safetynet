@@ -16,7 +16,7 @@ import { Type } from "@sinclair/typebox";
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Rule, Ruleset, TempRule, ProfileName } from "./types.ts";
+import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction } from "./types.ts";
 import questionnaire from "./questionnaire.ts";
 import {
   getBaselineRules,
@@ -97,6 +97,17 @@ function makeTempRules(
   }));
 }
 
+/** Check headless-mode deny behavior. Pure function for testability. */
+export function headlessDeny(
+  hasUI: boolean,
+  action: PermissionAction,
+  permission: "bash" | "read" | "edit",
+): { block: boolean; reason: string } | undefined {
+  if (hasUI || action !== "ask") return undefined;
+  const label = permission[0]!.toUpperCase() + permission.slice(1);
+  return { block: true, reason: `${label} requires approval (headless mode)` };
+}
+
 async function resolvePermission(
   ctx: ExtensionContext,
   opts: {
@@ -114,6 +125,14 @@ async function resolvePermission(
     ctx.abort();
     const label = opts.permission[0]!.toUpperCase() + opts.permission.slice(1);
     return { block: true, reason: `${label} denied: ${opts.check.reason ?? "no matching allow rule"}` };
+  }
+
+  // Headless: no TUI available to show permission prompt, deny by default
+  const denied = headlessDeny(ctx.hasUI, action, opts.permission);
+  if (denied) {
+    if (!ctx.hasUI) console.error(`safetynet: ${denied.reason}`);
+    ctx.abort();
+    return denied;
   }
 
   const profile = getCurrentProfile();
@@ -650,6 +669,14 @@ export default function safetynetExtension(api: ExtensionAPI) {
 
     // Ensure plans directory exists
     mkdirSync(plansDir, { recursive: true });
+
+    // Headless: no UI for permission prompts or plan/build switching, so default to build
+    if (!ctx.hasUI) {
+      setCurrentProfile("build");
+      persistProfile(pi);
+      applyProfileTools(pi, "build");
+      updateStatus(ctx);
+    }
 
     if (pi.getFlag("build") === true) {
       setCurrentProfile("build");
