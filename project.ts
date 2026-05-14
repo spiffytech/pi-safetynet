@@ -1,7 +1,11 @@
 import { existsSync } from "node:fs";
 import { join, dirname, resolve, relative } from "node:path";
 
-export function findProjectRoot(startPath: string): string {
+/**
+ * Find the nearest ancestor directory containing a `.pi` config directory.
+ * Used by storage to locate the pi config tree (e.g. ~/.pi or a project-local .pi).
+ */
+export function findPiConfigDir(startPath: string): string {
   let current = startPath;
   while (true) {
     if (existsSync(join(current, ".pi"))) {
@@ -31,7 +35,7 @@ export function isExternalPath(filePath: string, projectRoot: string): boolean {
 export function toDisplayPath(filePath: string, opts?: { cwd?: string; projectRoot?: string }): string {
   const base = opts?.cwd ?? process.cwd();
   const home = process.env.HOME ?? "/home";
-  const root = opts?.projectRoot ?? findProjectRoot(base);
+  const root = opts?.projectRoot ?? base;
 
   // Resolve to absolute for comparison
   let absPath = filePath;
@@ -99,6 +103,13 @@ export function reanchorPattern(pattern: string, cwd: string, projectRoot: strin
   // **/ already matches at every depth.
   const recursive = toRecursiveGlob(pattern);
   if (recursive !== pattern) return recursive;
+
+  // Expand ~ to home directory — picomatch treats ~ as literal, not $HOME.
+  // After expansion the path is absolute; normalizePathForMatching handles it.
+  if (pattern.startsWith("~")) {
+    const expanded = join(process.env.HOME ?? "/home", pattern.slice(1));
+    return normalizePathForMatching(expanded, projectRoot);
+  }
 
   // If the pattern is already absolute, normalize it for matching
   if (pattern.startsWith("/")) return normalizePathForMatching(pattern, projectRoot);

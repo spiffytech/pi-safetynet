@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { Rule, Ruleset, TempRule, ProfileName } from "../types.ts";
-import { findProjectRoot } from "../project.ts";
+import { findPiConfigDir } from "../project.ts";
 import { loadGlobalRules, addGlobalRules as addGlobalRulesToConfig } from "../global-config.ts";
 import baselineData from "./baseline.json" with { type: "json" };
 
@@ -50,7 +50,7 @@ class PersistedRuleStore {
   private filePath: string;
 
   constructor(cwd: string) {
-    const root = findProjectRoot(cwd);
+    const root = findPiConfigDir(cwd);
     this.filePath = join(root, ".pi", "extensions", "safetynet", "approvals.json");
   }
 

@@ -43,7 +43,7 @@ import {
   showPermissionPrompt,
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./check.ts";
-import { normalizePathForMatching, findProjectRoot, reanchorPattern } from "./project.ts";
+import { normalizePathForMatching, reanchorPattern } from "./project.ts";
 
 let storage: PermissionStorage;
 
@@ -137,7 +137,7 @@ async function resolvePermission(
 
   const profile = getCurrentProfile();
   const timedMinutes = getTimedApprovalMinutes();
-  const root = findProjectRoot(process.cwd());
+  const root = process.cwd();
   const isFile = opts.permission === "read" || opts.permission === "edit";
 
   let reprompt = false;
@@ -188,7 +188,8 @@ async function resolvePermission(
     const patterns: string[] = [];
     for (const [original, edited] of approved) {
       if (isFile) {
-        patterns.push(reanchorPattern(edited, process.cwd(), root));
+        const pattern = reanchorPattern(edited, process.cwd(), root);
+        patterns.push(pattern);
       } else {
         patterns.push(edited);
       }

@@ -709,5 +709,33 @@ describe("composition: bash permission end-to-end", () => {
       assert.equal(checkFileTarget("test.ts", "edit", "build", rules).action, "allow");
       assert.equal(checkFileTarget("src/deep/test.ts", "edit", "build", rules).action, "allow");
     });
+
+    it("tilde-prefixed glob matches external home path", () => {
+      const home = process.env.HOME ?? "/home/user";
+      const projectRoot = "/project";
+      // User types ~/.bun/**/*.ts in approval prompt
+      const pattern = reanchorPattern("~/.bun/**/*.ts", projectRoot, projectRoot);
+      // Should expand ~ to absolute: /home/user/.bun/**/*.ts
+      assert.equal(pattern, home + "/.bun/**/*.ts");
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "edit", pattern, action: "allow", modes: ["build"] },
+      ];
+      // checkFileTarget normalizes absolute external path to absolute form
+      const target = home + "/.bun/install/global/node_modules/@scope/pkg/dist/types.d.ts";
+      assert.equal(checkFileTarget(target, "edit", "build", rules, projectRoot).action, "allow");
+    });
+
+    it("tilde-prefixed specific path matches", () => {
+      const home = process.env.HOME ?? "/home/user";
+      const projectRoot = "/project";
+      const pattern = reanchorPattern("~/config/app.yaml", projectRoot, projectRoot);
+      assert.equal(pattern, home + "/config/app.yaml");
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "edit", pattern, action: "allow", modes: ["build"] },
+      ];
+      assert.equal(checkFileTarget(home + "/config/app.yaml", "edit", "build", rules, projectRoot).action, "allow");
+    });
   });
 });

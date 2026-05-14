@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import type { ProfileName, PermissionAction, Ruleset } from "./types.ts";
 import { evaluatePermission } from "./permissions/ruleset.ts";
 import { parseCommand, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
-import { isExternalPath, normalizePathForMatching, findProjectRoot } from "./project.ts";
+import { isExternalPath, normalizePathForMatching } from "./project.ts";
 
 /** Device files that are always safe to use as redirect targets. */
 const SAFE_DEVICE_FILES = new Set([
@@ -38,7 +38,7 @@ export function checkFileTarget(
     return { action: "allow" };
   }
 
-  const root = projectRoot ?? findProjectRoot(process.cwd());
+  const root = projectRoot ?? process.cwd();
   const normalized = normalizePathForMatching(filePath, root);
 
   const result = evaluatePermission(permission, normalized, profile, rules);
@@ -122,7 +122,7 @@ export function checkBashPermission(
   const redirectTargets: Array<{ permission: "read" | "edit"; path: string }> = [];
   let worstAction: PermissionAction = "allow";
 
-  const root = projectRoot ?? findProjectRoot(process.cwd());
+  const root = projectRoot ?? process.cwd();
 
   for (const sub of parsed.subcommands) {
     // Auto-approve cd when the target is within (or equal to) the project root.
