@@ -8,6 +8,7 @@ import {
 import type { Rule, Ruleset, ProfileName } from "./types.ts";
 import baselineData from "./permissions/baseline.json" with { type: "json" };
 import { checkBashPermission, checkFileTarget } from "./check.ts";
+import { reanchorPattern } from "./project.ts";
 
 const BASELINE: Ruleset = baselineData.rules as Ruleset;
 const ALL_MODES: ProfileName[] = ["build", "plan"];
@@ -655,6 +656,58 @@ describe("composition: bash permission end-to-end", () => {
       ];
       assert.equal(checkFileTarget("anything.ts", "edit", "build", rules).action, "allow");
       assert.equal(checkFileTarget("src/anything.ts", "edit", "build", rules).action, "allow");
+    });
+  });
+
+  describe("glob approval via reanchorPattern", () => {
+    it("src/subdir/**/*.ts pattern matches nested file", () => {
+      // Simulates user editing path to glob in approval prompt
+      const pattern = reanchorPattern("src/awesome-script/**/*.ts", "/project", "/project");
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "edit", pattern, action: "allow", modes: ["build"] },
+      ];
+      assert.equal(checkFileTarget("src/awesome-script/utils/playerStore.ts", "edit", "build", rules).action, "allow");
+      assert.equal(checkFileTarget("src/awesome-script/playerStore.ts", "edit", "build", rules).action, "allow");
+      assert.equal(checkFileTarget("src/other/file.ts", "edit", "build", rules).action, "ask");
+    });
+
+    it("absolute path input is normalized as rule pattern", () => {
+      // Non-edited file item: item.text = absolute path from tool call
+      const pattern = reanchorPattern("/project/src/foo.ts", "/project", "/project");
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "edit", pattern, action: "allow", modes: ["build"] },
+      ];
+      assert.equal(checkFileTarget("src/foo.ts", "edit", "build", rules).action, "allow");
+    });
+
+    it("absolute path input normalized when cwd is subdirectory", () => {
+      // cwd differs from project root
+      const pattern = reanchorPattern("/project/src/foo.ts", "/project/src", "/project");
+      assert.equal(pattern, "src/foo.ts");
+    });
+
+    it("cwd-relative edit reanchored when cwd is subdirectory", () => {
+      // User edits in prompt, display-relative path gets reanchored
+      const pattern = reanchorPattern("awesome-script/**/*.ts", "/project/src", "/project");
+      assert.equal(pattern, "src/awesome-script/**/*.ts");
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "edit", pattern, action: "allow", modes: ["build"] },
+      ];
+      assert.equal(checkFileTarget("src/awesome-script/utils/playerStore.ts", "edit", "build", rules).action, "allow");
+    });
+
+    it("rootless glob in user edit becomes recursive", () => {
+      const pattern = reanchorPattern("*.ts", "/project/src", "/project");
+      assert.equal(pattern, "**/*.ts");
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "edit", pattern, action: "allow", modes: ["build"] },
+      ];
+      assert.equal(checkFileTarget("test.ts", "edit", "build", rules).action, "allow");
+      assert.equal(checkFileTarget("src/deep/test.ts", "edit", "build", rules).action, "allow");
     });
   });
 });

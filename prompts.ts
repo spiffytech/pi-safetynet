@@ -11,7 +11,7 @@ import {
   visibleWidth,
 } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
-import { toDisplayPath, fromDisplayPath } from "./project.ts";
+import { toDisplayPath } from "./project.ts";
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -314,7 +314,7 @@ class PermissionPromptComponent implements Component, Focusable {
     if (confirm && item.input) {
       const newValue = item.input.getValue().trim();
       if (newValue.length > 0) {
-        item.text = item.isFile ? fromDisplayPath(newValue) : newValue;
+        item.text = newValue;
       }
     }
     // On cancel, item.text retains its pre-edit value

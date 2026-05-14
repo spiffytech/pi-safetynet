@@ -43,7 +43,7 @@ import {
   showPermissionPrompt,
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./check.ts";
-import { normalizePathForMatching, findProjectRoot } from "./project.ts";
+import { normalizePathForMatching, findProjectRoot, reanchorPattern } from "./project.ts";
 
 let storage: PermissionStorage;
 
@@ -188,7 +188,7 @@ async function resolvePermission(
     const patterns: string[] = [];
     for (const [original, edited] of approved) {
       if (isFile) {
-        patterns.push(normalizePathForMatching(edited, root));
+        patterns.push(reanchorPattern(edited, process.cwd(), root));
       } else {
         patterns.push(edited);
       }
@@ -201,7 +201,7 @@ async function resolvePermission(
         if (approved.has(rt.path)) {
           redirectPatterns.push({
             permission: rt.permission,
-            pattern: normalizePathForMatching(rt.path, root),
+            pattern: reanchorPattern(rt.path, process.cwd(), root),
           });
         }
       }
