@@ -167,6 +167,10 @@ describe("evaluatePermission", () => {
       assert.equal(evaluatePermission("bash", "[[ -f package.json ]]", "build", BASELINE).action, "allow");
     });
 
+    it("diff is allowed by baseline", () => {
+      assert.equal(evaluatePermission("bash", "diff file1.txt file2.txt", "build", BASELINE).action, "allow");
+    });
+
     it("true/false/yes are allowed by baseline", () => {
       assert.equal(evaluatePermission("bash", "true", "build", BASELINE).action, "allow");
       assert.equal(evaluatePermission("bash", "false", "build", BASELINE).action, "allow");

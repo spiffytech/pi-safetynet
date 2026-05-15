@@ -35,6 +35,7 @@
     { "permission": "bash", "pattern": "git status *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "git log *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "git diff *", "action": "allow", "modes": ["build", "plan"] },
+    { "permission": "bash", "pattern": "diff *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "git show *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "git branch *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "git remote *", "action": "allow", "modes": ["build", "plan"] },
