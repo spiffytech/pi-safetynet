@@ -21,8 +21,8 @@ export function togglePlanOnError(pi: ExtensionAPI): boolean {
 }
 
 export function restorePlanOnError(ctx: ExtensionContext): void {
-  const entry = getLatestCustomEntry<{ enabled?: boolean }>(ctx, "safetynet:plan-on-error");
-  if (entry?.enabled !== undefined) planOnErrorEnabled = entry.enabled;
+  const entry = getLatestCustomEntry<{ enabled: boolean }>(ctx, "safetynet:plan-on-error");
+  if (entry?.data?.enabled !== undefined) planOnErrorEnabled = entry.data.enabled;
 }
 
 export function getPlanOnErrorInstruction(): string | null {

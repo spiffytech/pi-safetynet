@@ -12,13 +12,13 @@ export function setCurrentProfile(profile: ProfileName): void {
   currentProfile = profile;
 }
 
-export function getLatestCustomEntry<T>(ctx: ExtensionContext, customType: string): T | undefined {
+export function getLatestCustomEntry<T>(ctx: ExtensionContext, customType: string): { data?: T } | undefined {
   const entries = ctx.sessionManager.getEntries();
   return entries
-    .filter((e: { type: string; customType?: string }) =>
+    .filter((e) =>
       e.type === "custom" && e.customType === customType,
     )
-    .pop() as T | undefined;
+    .pop() as { data?: T } | undefined;
 }
 
 export function persistProfile(pi: ExtensionAPI): void {
@@ -28,8 +28,8 @@ export function persistProfile(pi: ExtensionAPI): void {
 }
 
 export function restoreProfile(ctx: ExtensionContext): void {
-  const entry = getLatestCustomEntry<{ enabled?: ProfileName }>(ctx, "safetynet:profile");
-  if (entry?.enabled) currentProfile = entry.enabled;
+  const entry = getLatestCustomEntry<{ enabled: ProfileName }>(ctx, "safetynet:profile");
+  if (entry?.data?.enabled) currentProfile = entry.data.enabled;
 }
 
 /**
