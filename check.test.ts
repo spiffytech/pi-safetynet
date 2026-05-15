@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { checkBashPermission } from "./check.ts";
+import { checkBashPermission, checkFileTarget } from "./check.ts";
+import { parseCommand } from "./bash-parser.ts";
 import { getBaselineRules } from "./permissions/index.ts";
 
 const RULES = getBaselineRules();
@@ -162,4 +163,39 @@ describe("checkBashPermission plan-mode edit denial", () => {
       assert.equal(result.action, "allow");
     });
   }
+});
+
+describe("read-only tools (grep/find/ls) use read permission, not bash parsing", () => {
+  // These tools are handled via checkFileTarget(permission="read") instead
+  // of checkBashPermission. The pattern should never be bash-parsed.
+  //
+  // This test verifies that a grep pattern containing shell metacharacters
+  // (like |) is NOT treated as a pipe by the permission system.
+  // Before the fix, `grep registerTool|renderShell` was bash-parsed
+  // into two subcommands: "grep registerTool" and "renderShell",
+  // causing a spurious approval prompt for the phantom "renderShell" command.
+
+  it("bash parser splits grep with pipe in pattern (confirming the old bug)", () => {
+    const parsed = parseCommand("grep registerTool|renderShell");
+    assert.ok(parsed.subcommands.includes("renderShell"),
+      `Expected "renderShell" in subcommands, got: ${parsed.subcommands}`);
+  });
+
+  it("checkFileTarget treats path as a read target, not a bash command", () => {
+    // The directory /tmp is outside the project root, so it should
+    // be "ask" (not "deny" and not bash-parsed)
+    const result = checkFileTarget("/tmp/some/dir", "read", "build", RULES, PROJECT_ROOT);
+    assert.equal(result.action, "ask");
+    assert.ok(!result.reason?.includes("renderShell"));
+  });
+
+  it("checkFileTarget allows reads within project root", () => {
+    const result = checkFileTarget(`${PROJECT_ROOT}/src/index.ts`, "read", "build", RULES, PROJECT_ROOT);
+    assert.equal(result.action, "allow");
+  });
+
+  it("checkFileTarget denies hazardous files", () => {
+    const result = checkFileTarget(`${PROJECT_ROOT}/.env`, "read", "build", RULES, PROJECT_ROOT);
+    assert.equal(result.action, "deny");
+  });
 });

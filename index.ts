@@ -301,23 +301,14 @@ async function handleToolCall(
       });
     }
 
-    if (event.toolName === "grep") {
-      const pattern = event.input.pattern as string;
+    if (event.toolName === "grep" || event.toolName === "find" || event.toolName === "ls") {
+      const filePath = (event.input.path as string) ?? process.cwd();
       const rules = storage.getAllRules();
-      const check = checkBashPermission(`grep ${pattern}`, profile, rules);
-
-      if (check.action === "deny") {
-        ctx.abort();
-        const detail = check.reason ?? `Denied by ruleset: ${(check.unapproved ?? []).join(", ")}`;
-        ctx.ui.notify(`Grep denied: ${pattern} (${detail})`, "error");
-        return { block: true, reason: `Grep denied: ${detail}` };
-      }
-
       return resolvePermission(ctx, {
-        permission: "bash",
-        target: `grep ${pattern}`,
-        check,
-        recheck: () => checkBashPermission(`grep ${pattern}`, profile, storage.getAllRules()),
+        permission: "read",
+        target: filePath,
+        check: checkFileTarget(filePath, "read", profile, rules),
+        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules()),
       });
     }
 
