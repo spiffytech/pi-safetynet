@@ -46,7 +46,6 @@ export function sanitizeRules(raw: unknown[]): Ruleset {
 }
 
 class PersistedRuleStore {
-  private rules: Ruleset = [];
   private filePath: string;
 
   constructor(cwd: string) {
@@ -58,30 +57,29 @@ class PersistedRuleStore {
     return this.filePath;
   }
 
+  /** Re-read rules from disk on every call so other sessions' approvals are visible. */
   getRules(): Ruleset {
-    return [...this.rules];
-  }
-
-  load(): void {
-    if (!existsSync(this.filePath)) {
-      this.rules = [];
-      return;
-    }
+    if (!existsSync(this.filePath)) return [];
     try {
       const data = JSON.parse(readFileSync(this.filePath, "utf-8"));
-      this.rules = sanitizeRules(data.rules ?? []);
+      return sanitizeRules(data.rules ?? []);
     } catch {
-      this.rules = [];
+      return [];
     }
+  }
+
+  /** Validate the file is readable at startup. */
+  load(): void {
+    // Trigger a read to catch parse errors early; result is not cached.
+    this.getRules();
   }
 
   async save(rules: Ruleset): Promise<void> {
-    this.rules = [...rules];
     const dir = dirname(this.filePath);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
-    const sorted = [...this.rules].sort((a, b) => {
+    const sorted = [...rules].sort((a, b) => {
       const order: Record<string, number> = { bash: 0, edit: 1, read: 2, "*": 3 };
       return (order[a.permission] ?? 4) - (order[b.permission] ?? 4);
     });
@@ -89,8 +87,9 @@ class PersistedRuleStore {
   }
 
   async addRules(newRules: Ruleset): Promise<void> {
-    this.rules.push(...newRules);
-    await this.save(this.rules);
+    const current = this.getRules();
+    current.push(...newRules);
+    await this.save(current);
   }
 }
 
@@ -131,18 +130,19 @@ export class TempRuleStore {
 }
 
 export class GlobalRuleStore {
-  private rules: Ruleset = [];
-
+  /** Re-read rules from disk on every call so other sessions' approvals are visible. */
   getRules(): Ruleset {
-    return [...this.rules];
+    return loadGlobalRules();
   }
 
+  /** Validate the config is readable at startup. */
   load(): void {
-    this.rules = loadGlobalRules();
+    // Trigger a read to catch parse errors early; result is not cached.
+    this.getRules();
   }
 
   async addRules(newRules: Ruleset): Promise<void> {
-    this.rules = addGlobalRulesToConfig(newRules);
+    addGlobalRulesToConfig(newRules);
   }
 }
 
