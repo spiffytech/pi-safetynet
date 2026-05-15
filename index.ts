@@ -4,13 +4,14 @@ import type {
   ToolCallEvent,
   ToolResultEvent,
 } from "@mariozechner/pi-coding-agent";
-import { Markdown, Text } from "@mariozechner/pi-tui";
+import { Box, Container, Markdown, Text } from "@mariozechner/pi-tui";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
   createEditTool,
   createWriteTool,
   getMarkdownTheme,
   isBashToolResult,
+  type Theme,
 } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
@@ -422,13 +423,39 @@ function readPlanForPresentation(sessionId: string): { content: { type: "text"; 
   };
 }
 
-function renderPresentResult(result: { content: { type: string; text?: string }[]; details: unknown }) {
+/** Build a visually distinct component for plan display. */
+function buildPlanComponent(theme: Theme, content: string): Container {
+  const container = new Container();
+
+  // Header banner
+  const header = new Text(theme.fg("accent", theme.bold("  📋 Plan — Awaiting Review")), 0, 0);
+  container.addChild(header);
+
+  // Separator
+  const separator = new Text(theme.fg("borderAccent", "  ─────────────────────────────────────────"), 0, 0);
+  container.addChild(separator);
+
+  // Plan content (markdown)
+  const md = new Markdown(content, 1, 0, getMarkdownTheme());
+  container.addChild(md);
+
+  // Footer hint
+  const footer = new Text(theme.fg("muted", "  ↵ Reply with feedback, or run /safetynet:build to approve"), 0, 1);
+  container.addChild(footer);
+
+  // Wrap in a tinted box (cyan-tinted bg, tuned for dark themes)
+  const box = new Box(0, 0, (s) => `\x1b[48;2;42;53;70m${s}\x1b[49m`);
+  box.addChild(container);
+  return box;
+}
+
+function renderPresentResult(result: { content: { type: string; text?: string }[]; details: unknown }, _options: unknown, theme: Theme) {
   const markdown = (result.details as { markdown?: unknown } | undefined)?.markdown;
   if (typeof markdown !== "string") {
     const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text");
-    return new Text(text?.text ?? "No plan content", 0, 0);
+    return new Text(theme.fg("warning", text?.text ?? "No plan content"), 1, 0);
   }
-  return new Markdown(markdown, 0, 0, getMarkdownTheme());
+  return buildPlanComponent(theme, markdown);
 }
 
 function registerPlanTools(pi: ExtensionAPI) {
@@ -444,6 +471,7 @@ function registerPlanTools(pi: ExtensionAPI) {
       presentToUser: Type.Optional(Type.Boolean({ description: "If the plan is ready for the user's review, use presentToUser=true to automatically display it to them." })),
     }),
     renderResult: renderPresentResult,
+    ...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
       const result = await baseWriteAgentTool.execute(toolCallId, { path: planPath, content: params.content }, signal, onUpdate);
@@ -471,6 +499,7 @@ function registerPlanTools(pi: ExtensionAPI) {
       presentToUser: Type.Optional(Type.Boolean({ description: "If the plan is ready for the user's review, use presentToUser=true to automatically display it to them." })),
     }),
     renderResult: renderPresentResult,
+    ...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
       const result = await baseEditAgentTool.execute(toolCallId, { path: planPath, edits: params.edits } as any, signal, onUpdate);
@@ -496,6 +525,7 @@ function registerPlanTools(pi: ExtensionAPI) {
       })),
     }),
     renderResult: renderPresentResult,
+    ...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       return readPlanForPresentation(ctx.sessionManager.getSessionId());
     },
@@ -532,7 +562,7 @@ function showCurrentPlan(ctx: ExtensionContext): void {
     return;
   }
 
-  ctx.ui.setWidget("plan", (_tui, _theme) => new Markdown(formatPlanForDisplay(content), 1, 0, getMarkdownTheme()));
+  ctx.ui.setWidget("plan", (_tui, theme) => buildPlanComponent(theme, formatPlanForDisplay(content)));
 }
 
 function registerCommands(pi: ExtensionAPI) {
