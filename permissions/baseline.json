@@ -71,6 +71,7 @@
     { "permission": "bash", "pattern": "ln *", "action": "ask", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "env", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "printenv *", "action": "allow", "modes": ["build", "plan"] },
+    { "permission": "read", "pattern": "/tmp/pi-clipboard-*", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "read", "pattern": "**", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "edit", "pattern": "**", "action": "ask", "modes": ["build", "plan"] }
   ]
