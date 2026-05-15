@@ -78,10 +78,13 @@ Commands are evaluated against the permission ruleset:
 - Unknown commands prompt the user for approval
 - Dangerous commands are blocked
 
-If a plan exists, read/follow it when the user asks you to execute. To switch back to planning, the user can run /safetynet:plan.`;
+To switch back to planning, the user can run /safetynet:plan.`;
 
   if (planPath && existsSync(planPath)) {
-    buildMsg += `\n\nA plan file exists at ${planPath}. You should execute on the plan defined within it when the user asks you to begin.`;
+    buildMsg += `\n\nA plan file exists at ${planPath}.
+- Use the standard edit/write tools for project files.
+- Use planEdit/planWrite ONLY to update the plan itself (e.g., ticking off boxes or refining implementation steps).
+- Follow the plan defined within it when implementing.`;
   }
 
   return buildMsg;
@@ -110,6 +113,6 @@ export function applyProfileTools(pi: ExtensionAPI, profile: ProfileName): void 
     return;
   }
 
-  // Build mode: show everything except plan-artifact-only tools.
-  pi.setActiveTools(allTools.filter((name) => !PLAN_ONLY_TOOLS.has(name)));
+  // Build mode: show everything.
+  pi.setActiveTools(allTools);
 }
