@@ -27,7 +27,7 @@ export function restorePlanOnError(ctx: ExtensionContext): void {
 
 export function getPlanOnErrorInstruction(): string | null {
   if (!planOnErrorEnabled) return null;
-  return `${MARKER}\nIf this result represents an error, tell the user that switching to plan mode with /safetynet:plan may help diagnose it.`;
+  return `Command exited with a non-zero status. If you're stuck or going in circles, consider stepping back: switch to plan mode with /safetynet:plan and ask the user for input before continuing.`;
 }
 
 export function hasPlanOnErrorMarker(text: string): boolean {

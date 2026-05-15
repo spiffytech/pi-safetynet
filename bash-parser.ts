@@ -9,6 +9,15 @@ import type {
   Word,
 } from "@aliou/sh";
 
+/** Threshold (chars) beyond which a quoted string is considered "opaque"
+ *  and collapsed to a placeholder.  Strings at or below this length that
+ *  contain no newlines are kept verbatim for readability. */
+const OPAQUE_STRING_THRESHOLD = 40;
+
+function isOpaqueString(value: string): boolean {
+  return value.includes("\n") || value.length > OPAQUE_STRING_THRESHOLD;
+}
+
 function dblQuotedToString(p: WordPart): string | null {
   const parts = (p as { type: "DblQuoted"; parts: WordPart[] }).parts;
   if (!parts?.length) return "";
@@ -23,10 +32,14 @@ function wordToString(w: Word): string | null {
   if (!w.parts?.length) return null;
   return w.parts
     .map((p: WordPart) => {
-      if (p.type === "Literal" || p.type === "SglQuoted") return p.value ?? "";
+      if (p.type === "Literal") return p.value ?? "";
+      if (p.type === "SglQuoted") {
+        const v = p.value ?? "";
+        return isOpaqueString(v) ? "'...'" : v;
+      }
       if (p.type === "DblQuoted") {
         const literal = dblQuotedToString(p);
-        if (literal !== null) return literal;
+        if (literal !== null) return isOpaqueString(literal) ? '"..."' : literal;
         return '"..."';
       }
       if (p.type === "ParamExp") return "${...}";
@@ -313,6 +326,38 @@ function wordsToString(words: Word[]): string {
   return parts.join(" ");
 }
 
+/** Append heredoc / here-string suffixes to a subcommand string.
+ *
+ *  `<<<` and `<<` redirects carry opaque content (scripts, data) that
+ *  is not useful for permission matching but is important context for
+ *  the user — they need to see that a command receives stdin input.
+ *  We collapse the content to `'...'` so the subcommand reads like
+ *  `bun -e <<< '...'` instead of just `bun -e` (content lost) or the
+ *  full script body (unusable for editing).
+ */
+function appendRedirectSuffix(
+  subcommand: string,
+  redirects: Array<{ op: string; target: Word }> | undefined,
+  hasHeredoc: boolean,
+): string {
+  let suffix = "";
+  if (redirects) {
+    for (const r of redirects) {
+      if (r.op === "<<<") {
+        suffix += " <<< '...'";
+      } else if (r.op === "<<" || r.op === "<<-") {
+        suffix += " << '...'";
+      }
+    }
+  }
+  // When the heredoc fallback path (stripHeredocBodies) was used,
+  // the << redirect is no longer in the AST, but we know one existed.
+  if (hasHeredoc && !suffix.includes("<<")) {
+    suffix += " << '...'";
+  }
+  return suffix ? subcommand + suffix : subcommand;
+}
+
 const SYSTEM_HALT_COMMANDS = new Set(["shutdown", "reboot", "halt", "poweroff", "init"]);
 
 function getBaseWord(cmd: SimpleCommand): string | null {
@@ -518,6 +563,7 @@ export function parseCommand(command: string): ParsedCommand {
             } else if (r.op === ">" || r.op === ">>" || r.op === "&>" || r.op === "&>>" || r.op === ">|" || r.op === "<>") {
               redirects.push({ path: target, direction: "output" });
             }
+            // <<< / << / <<- are handled via appendRedirectSuffix below
           }
         }
 
@@ -527,11 +573,11 @@ export function parseCommand(command: string): ParsedCommand {
         if (name === "find") {
           const dangerous = hasFindDangerousFlag(cmd);
           if (dangerous === "exec") {
-            subcommands.push("find:exec");
+            subcommands.push(appendRedirectSuffix("find:exec", cmd.redirects, false));
             return true;
           }
           if (dangerous === "delete") {
-            subcommands.push("find:delete");
+            subcommands.push(appendRedirectSuffix("find:delete", cmd.redirects, false));
             return false;
           }
         }
@@ -569,13 +615,13 @@ export function parseCommand(command: string): ParsedCommand {
           const innerWords = words.slice(innerStart);
           const allWords = [...prefixWords, ...innerWords];
           if (allWords.length) {
-            subcommands.push(wordsToString(allWords));
+            subcommands.push(appendRedirectSuffix(wordsToString(allWords), cmd.redirects, false));
           } else {
             // xargs with no command defaults to echo
             subcommands.push("echo");
           }
         } else {
-          subcommands.push(commandToString(cmd));
+          subcommands.push(appendRedirectSuffix(commandToString(cmd), cmd.redirects, false));
         }
 
         // [ (test) and [[ check file existence/properties, which
@@ -626,6 +672,7 @@ export function parseCommand(command: string): ParsedCommand {
               } else if (r.op === ">" || r.op === ">>" || r.op === "&>" || r.op === "&>>" || r.op === ">|" || r.op === "<>") {
                 redirects.push({ path: target, direction: "output" });
               }
+              // <<< / << / <<- handled via appendRedirectSuffix below
             }
           }
 
@@ -635,11 +682,11 @@ export function parseCommand(command: string): ParsedCommand {
           if (name === "find") {
             const dangerous = hasFindDangerousFlag(cmd);
             if (dangerous === "exec") {
-              subcommands.push("find:exec");
+              subcommands.push(appendRedirectSuffix("find:exec", cmd.redirects, true));
               return true;
             }
             if (dangerous === "delete") {
-              subcommands.push("find:delete");
+              subcommands.push(appendRedirectSuffix("find:delete", cmd.redirects, true));
               return false;
             }
           }
@@ -673,12 +720,12 @@ export function parseCommand(command: string): ParsedCommand {
             const innerWords = words.slice(innerStart);
             const allWords = [...prefixWords, ...innerWords];
             if (allWords.length) {
-              subcommands.push(wordsToString(allWords));
+              subcommands.push(appendRedirectSuffix(wordsToString(allWords), cmd.redirects, true));
             } else {
               subcommands.push("echo");
             }
           } else {
-            subcommands.push(commandToString(cmd));
+            subcommands.push(appendRedirectSuffix(commandToString(cmd), cmd.redirects, true));
           }
 
           if (name === "[" || name === "[[") {
@@ -690,7 +737,7 @@ export function parseCommand(command: string): ParsedCommand {
 
           return true;
         }, (expr, words) => {
-          subcommands.push(expr);
+          subcommands.push(appendRedirectSuffix(expr, undefined, true));
           const wordStrs = words.map((w) => wordToString(w)).filter((s: string | null): s is string => s !== null);
           for (const p of extractTestFilePaths(wordStrs)) {
             redirects.push({ path: p, direction: "input" });

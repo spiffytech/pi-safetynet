@@ -234,6 +234,79 @@ describe("parseCommand", () => {
     });
   });
 
+  describe("opaque string collapsing", () => {
+    it("collapses long single-quoted strings to '...'", () => {
+      const longScript = "a".repeat(41);
+      const r = parseCommand(`bun -e '${longScript}'`);
+      assert.equal(r.subcommands[0], "bun -e '...'");
+    });
+
+    it("keeps short single-quoted strings inline", () => {
+      const r = parseCommand("bun -e 'console.log(1)'");
+      assert.equal(r.subcommands[0], "bun -e console.log(1)");
+    });
+
+    it("collapses multiline single-quoted strings regardless of length", () => {
+      const r = parseCommand("bun -e 'line1\nline2'");
+      assert.equal(r.subcommands[0], "bun -e '...'");
+    });
+
+    it("collapses long double-quoted strings to \"...\"", () => {
+      const longStr = "a".repeat(41);
+      const r = parseCommand(`echo "${longStr}"`);
+      assert.equal(r.subcommands[0], 'echo "..."');
+    });
+
+    it("keeps short double-quoted strings inline", () => {
+      const r = parseCommand('echo "hello world"');
+      assert.equal(r.subcommands[0], "echo hello world");
+    });
+
+    it("collapses multiline double-quoted strings regardless of length", () => {
+      const r = parseCommand('echo "line1\nline2"');
+      assert.equal(r.subcommands[0], 'echo "..."');
+    });
+
+    it("appends <<< '...' for here-string redirects", () => {
+      const r = parseCommand("bun -e <<< 'script content'");
+      assert.equal(r.subcommands[0], "bun -e <<< '...'");
+    });
+
+    it("appends << '...' for heredoc redirects (fallback path)", () => {
+      const r = parseCommand("cat <<EOF > file.txt\nhello\nEOF");
+      assert.equal(r.subcommands.length, 1);
+      assert.ok(r.subcommands[0]!.includes("<< '...'"));
+    });
+
+    it("still detects output redirects in heredoc fallback", () => {
+      const r = parseCommand("cat <<EOF > file.txt\nhello\nEOF");
+      assert.ok(r.redirects.some((t) => t.path === "file.txt" && t.direction === "output"));
+    });
+
+    it("collapsing produces identical subcommands for different opaque content (rule-matching semantics)", () => {
+      // Two completely different long scripts should produce the same subcommand
+      // so that approving one creates a rule that matches the other.
+      const longA = "a".repeat(41);
+      const longB = "b".repeat(41);
+      const sub1 = parseCommand(`bun -e '${longA}'`).subcommands[0];
+      const sub2 = parseCommand(`bun -e '${longB}'`).subcommands[0];
+      assert.equal(sub1, sub2);
+
+      // Same for here-strings
+      const heredoc1 = parseCommand("bun -e <<< 'script A'").subcommands[0];
+      const heredoc2 = parseCommand("bun -e <<< 'script B'").subcommands[0];
+      assert.equal(heredoc1, heredoc2);
+
+      // Same for heredocs
+      const heredocA = parseCommand("cat <<EOF > a.txt\nalpha\nEOF").subcommands[0];
+      const heredocB = parseCommand("cat <<EOF > b.txt\nbeta\nEOF").subcommands[0];
+      assert.equal(heredocA, heredocB);
+
+      // Inline vs here-string are different shapes — different subcommands
+      assert.notEqual(sub1, heredoc1);
+    });
+  });
+
   describe("redirects", () => {
     const EXACT: [string, { path: string; direction: "input" | "output" }[]][] = [
       ["ls > out.txt", [{ path: "out.txt", direction: "output" }]],

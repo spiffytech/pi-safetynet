@@ -300,6 +300,26 @@ async function handleToolCall(
       });
     }
 
+    if (event.toolName === "grep") {
+      const pattern = event.input.pattern as string;
+      const rules = storage.getAllRules();
+      const check = checkBashPermission(`grep ${pattern}`, profile, rules);
+
+      if (check.action === "deny") {
+        ctx.abort();
+        const detail = check.reason ?? `Denied by ruleset: ${(check.unapproved ?? []).join(", ")}`;
+        ctx.ui.notify(`Grep denied: ${pattern} (${detail})`, "error");
+        return { block: true, reason: `Grep denied: ${detail}` };
+      }
+
+      return resolvePermission(ctx, {
+        permission: "bash",
+        target: `grep ${pattern}`,
+        check,
+        recheck: () => checkBashPermission(`grep ${pattern}`, profile, storage.getAllRules()),
+      });
+    }
+
     if (event.toolName === "edit" || event.toolName === "write") {
       if (profile === "plan") {
         ctx.abort();
@@ -342,26 +362,23 @@ async function handleToolCall(
 }
 
 async function handleToolResult(event: ToolResultEvent, _ctx: ExtensionContext) {
-  if (!isPlanOnErrorEnabled() || !isBashToolResult(event)) return;
+  if (!isPlanOnErrorEnabled() || !event.isError || !isBashToolResult(event)) return;
 
   const instruction = getPlanOnErrorInstruction();
   if (!instruction) return;
 
-  const content = event.content;
-  if (Array.isArray(content)) {
-    const textContent = content.find(
-      (c): c is { type: "text"; text: string } => c.type === "text",
-    );
-    if (textContent) {
-      textContent.text += `\n\n${instruction}`;
-    }
-  }
+  pi.sendMessage({
+    customType: "safetynet:plan-on-error",
+    content: instruction,
+    display: false,
+  });
 }
 
 function filterProfileContext(messages: AgentMessage[]): AgentMessage[] {
   return messages.filter((m) => {
     const msg = m as AgentMessage & { customType?: string };
     if (msg.customType === "safetynet:profile:context") return false;
+    if (msg.customType === "safetynet:plan-on-error") return false;
 
     if (msg.role === "user") {
       const content = msg.content;
