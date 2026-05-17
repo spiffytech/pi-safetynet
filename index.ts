@@ -27,10 +27,10 @@ import {
 import {
   getCurrentProfile,
   setCurrentProfile,
-  getProfileContextMessage,
+  getEphemeralContextMessage,
+  EPHEMERAL_CUSTOM_TYPE,
   persistProfile,
   restoreProfile,
-  applyProfileTools,
 } from "./profiles/index.ts";
 import {
   isPlanOnErrorEnabled,
@@ -38,7 +38,6 @@ import {
   togglePlanOnError,
   restorePlanOnError,
   getPlanOnErrorInstruction,
-  hasPlanOnErrorMarker,
 } from "./profiles/plan-on-error.ts";
 import {
   showPermissionPrompt,
@@ -365,20 +364,21 @@ async function handleToolResult(event: ToolResultEvent, _ctx: ExtensionContext) 
   });
 }
 
-function filterProfileContext(messages: AgentMessage[]): AgentMessage[] {
-  return messages.filter((m) => {
-    const msg = m as AgentMessage & { customType?: string };
-    if (msg.customType === "safetynet:profile:context") return false;
-    if (msg.customType === "safetynet:plan-on-error") return false;
-
-    if (msg.role === "user") {
-      const content = msg.content;
-      if (typeof content === "string") {
-        return !hasPlanOnErrorMarker(content) && !content.includes("[SAFENET_PROFILE_CONTEXT]") && !content.includes("[SAFENET PLAN MODE]") && !content.includes("[SAFENET BUILD MODE]");
-      }
-    }
-    return true;
-  });
+/**
+ * Swap the ephemeral context message in the message list.
+ *
+ * Removes any previous ephemeral message (identified by customType) and
+ * appends the current one at the end. This ensures:
+ * - Exactly one ephemeral message exists at any time
+ * - It is always the last item before model generation (suffix position)
+ * - All prior messages are an immutable, stable prefix for KV caching
+ */
+function swapEphemeralMessage(messages: AgentMessage[], ephemeralMessage: AgentMessage): AgentMessage[] {
+  const filtered = messages.filter(
+    (m) => (m as AgentMessage & { customType?: string }).customType !== EPHEMERAL_CUSTOM_TYPE,
+  );
+  filtered.push(ephemeralMessage);
+  return filtered;
 }
 
 function formatPlanForDisplay(content: string): string {
@@ -530,9 +530,17 @@ function switchToProfile(ctx: ExtensionContext, profile: ProfileName): void {
   }
   setCurrentProfile(profile);
   persistProfile(pi);
-  applyProfileTools(pi, profile);
   ctx.ui.notify(`Switched from ${current} to ${profile} mode`, "info");
   updateStatus(ctx);
+
+  // Leave a permanent mode-switch marker in the session.
+  // This is NOT the ephemeral context — it's a tiny permanent record
+  // that stays in the conversation prefix forever.
+  pi.sendMessage({
+    customType: "safetynet:mode-switch",
+    content: `Switched to ${profile} mode`,
+    display: true,
+  });
 }
 
 function formatRules(rules: Ruleset): string[] {
@@ -667,7 +675,6 @@ async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): P
     if (sessionRules.length > 0) storage.addSessionRules(sessionRules);
   }
 
-  applyProfileTools(pi, getCurrentProfile());
   updateStatus(ctx);
 
   if (opts?.notify && ctx.hasUI) {
@@ -712,14 +719,12 @@ export default function safetynetExtension(api: ExtensionAPI) {
     if (!ctx.hasUI) {
       setCurrentProfile("build");
       persistProfile(pi);
-      applyProfileTools(pi, "build");
       updateStatus(ctx);
     }
 
     if (pi.getFlag("build") === true) {
       setCurrentProfile("build");
       persistProfile(pi);
-      applyProfileTools(pi, "build");
       updateStatus(ctx);
     }
     if (pi.getFlag("plan-on-error") === true) {
@@ -736,23 +741,25 @@ export default function safetynetExtension(api: ExtensionAPI) {
     storage.temp.clearTurnRules();
   });
 
+  // The context hook fires before every API call. We use it to swap the
+  // ephemeral profile-context message: remove the old one, append the
+  // current one. This keeps the message at the tail (suffix position),
+  // maximizing the shared KV-cached prefix.
   pi.on("context", async (event) => {
-    return { messages: filterProfileContext(event.messages) };
+    const profile = getCurrentProfile();
+    const ephemeralMessage: AgentMessage & { customType: string; display: boolean } = {
+      role: "custom",
+      customType: EPHEMERAL_CUSTOM_TYPE,
+      content: getEphemeralContextMessage(profile),
+      display: false,
+      timestamp: Date.now(),
+    };
+    return { messages: swapEphemeralMessage(event.messages, ephemeralMessage) };
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {
     // Clear stale plan widget from a previous turn
     ctx.ui.setWidget("plan", undefined);
-    const profile = getCurrentProfile();
-    const sessionId = ctx.sessionManager.getSessionId();
-    const planPath = getPlanFilePath(sessionId);
-    return {
-      message: {
-        customType: "safetynet:profile:context",
-        content: getProfileContextMessage(profile, planPath),
-        display: false,
-      },
-    };
   });
 
   pi.on("session_fork", async (_event, ctx) => {

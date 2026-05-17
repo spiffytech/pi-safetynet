@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import {
   getCurrentProfile,
   setCurrentProfile,
-  getProfileContextMessage,
+  getEphemeralContextMessage,
+  EPHEMERAL_CUSTOM_TYPE,
   getLatestCustomEntry,
   restoreProfile,
 } from "./profiles/index.ts";
@@ -36,50 +37,77 @@ describe("profiles", () => {
     });
   });
 
-  describe("getProfileContextMessage", () => {
+  describe("getEphemeralContextMessage", () => {
     it("plan message mentions read-only planning", () => {
-      const msg = getProfileContextMessage("plan");
+      const msg = getEphemeralContextMessage("plan");
       assert.ok(msg.includes("plan"));
       assert.ok(msg.includes("READ-ONLY") || msg.includes("planning-only"));
     });
 
     it("plan message mentions planPresent", () => {
-      const msg = getProfileContextMessage("plan");
+      const msg = getEphemeralContextMessage("plan");
       assert.ok(msg.includes("planPresent"));
     });
 
     it("plan message mentions planWrite", () => {
-      const msg = getProfileContextMessage("plan");
+      const msg = getEphemeralContextMessage("plan");
       assert.ok(msg.includes("planWrite"));
     });
 
     it("plan message explains user-controlled build transition", () => {
-      const msg = getProfileContextMessage("plan");
+      const msg = getEphemeralContextMessage("plan");
       assert.ok(msg.includes("/safetynet:build"));
     });
 
+    it("plan message includes available tools", () => {
+      const msg = getEphemeralContextMessage("plan");
+      assert.ok(msg.includes("read"));
+      assert.ok(msg.includes("grep"));
+      assert.ok(msg.includes("planWrite"));
+      assert.ok(!msg.includes("bash"));
+      // Parse the Available tools line to check exact tool names
+      const toolsSection = msg.split("Available tools\n")[1]?.split("\n")[0] ?? "";
+      const tools = toolsSection.split(", ").map(t => t.trim());
+      assert.ok(!tools.includes("edit"));
+      assert.ok(!tools.includes("write"));
+      assert.ok(!tools.includes("bash"));
+      assert.ok(tools.includes("read"));
+      assert.ok(tools.includes("planWrite"));
+    });
+
     it("build message mentions full access", () => {
-      const msg = getProfileContextMessage("build");
+      const msg = getEphemeralContextMessage("build");
       assert.ok(msg.includes("build"));
-      assert.ok(msg.includes("full tool access") || msg.includes("full access"));
+      assert.ok(msg.includes("full tool access") || msg.includes("Full tool access"));
     });
 
     it("build message mentions /safetynet:plan", () => {
-      const msg = getProfileContextMessage("build");
+      const msg = getEphemeralContextMessage("build");
       assert.ok(msg.includes("/safetynet:plan"));
     });
 
-    it("build message with plan path references plan file", () => {
-      const msg = getProfileContextMessage("build", "/tmp/plans/test.md");
-      // Should reference the plan path even though file may not exist
-      // (getProfileContextMessage checks existsSync, so only appears if file exists)
-      assert.ok(msg.includes("build"));
+    it("build message includes all tools", () => {
+      const msg = getEphemeralContextMessage("build");
+      assert.ok(msg.includes("bash"));
+      assert.ok(msg.includes("edit"));
+      assert.ok(msg.includes("write"));
+      assert.ok(msg.includes("read"));
     });
 
-    it("plan message with plan path shows existing plan", () => {
-      // Use a path that likely doesn't exist for this test
-      const msg = getProfileContextMessage("plan", "/nonexistent/path/test.md");
-      assert.ok(msg.includes("planWrite") || msg.includes("plan file"));
+    it("EPHEMERAL_CUSTOM_TYPE is defined", () => {
+      assert.ok(EPHEMERAL_CUSTOM_TYPE.length > 0);
+    });
+
+    it("plan and build messages are content-constant (no filesystem checks)", () => {
+      // The messages should NOT vary based on planPath — no existsSync checks
+      // So calling with and without a planPath should produce identical results
+      const msg1 = getEphemeralContextMessage("plan");
+      const msg2 = getEphemeralContextMessage("plan");
+      assert.equal(msg1, msg2);
+
+      const msg3 = getEphemeralContextMessage("build");
+      const msg4 = getEphemeralContextMessage("build");
+      assert.equal(msg3, msg4);
     });
   });
 

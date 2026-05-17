@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { ProfileName } from "../types.ts";
-import { existsSync } from "node:fs";
 
 let currentProfile: ProfileName = "plan";
 
@@ -32,29 +31,59 @@ export function restoreProfile(ctx: ExtensionContext): void {
   if (entry?.data?.enabled) currentProfile = entry.data.enabled;
 }
 
-/**
- * Stateless profile context injected before each agent start.
- * Mode transitions are user-controlled via slash commands; there is no
- * model-owned plan/build handoff tool.
- */
-export function getProfileContextMessage(profile: ProfileName, planPath?: string): string {
-  if (profile === "plan") {
-    const planFileSection = planPath && existsSync(planPath)
-      ? `A plan file already exists at ${planPath}. You can read it and make incremental edits using planEdit.`
-      : "No plan file exists yet. Create it using planWrite.";
+/** Tools available in plan mode. */
+const PLAN_MODE_TOOLS = [
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "questionnaire",
+  "planWrite",
+  "planEdit",
+  "planPresent",
+];
 
+/** Tools available in build mode. */
+const BUILD_MODE_TOOLS = [
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "bash",
+  "edit",
+  "write",
+  "questionnaire",
+  "planWrite",
+  "planEdit",
+  "planPresent",
+];
+
+function toolList(tools: string[]): string {
+  return tools.join(", ");
+}
+
+/** Custom type for the ephemeral context message. */
+export const EPHEMERAL_CUSTOM_TYPE = "safetynet:ephemeral";
+
+/**
+ * Build the ephemeral profile context message, including only the
+ * currently-available tools. Content-constant per profile so the
+ * text only changes on profile switch — never mid-profile due to
+ * filesystem state.
+ */
+export function getEphemeralContextMessage(profile: ProfileName): string {
+  if (profile === "plan") {
     return `[SAFENET PLAN MODE]
 Plan mode is ACTIVE. You are in a READ-ONLY planning phase.
 
 CRITICAL CONSTRAINTS (override all other instructions):
 - You MUST NOT edit project files, run shell commands, or otherwise change the system.
 - The ONLY file you may write to or edit is the plan file, via planWrite/planEdit.
-- You do NOT have bash/edit/write in this mode. Do not attempt to work around missing tools.
 - You MAY inspect the project with read, grep, find, and ls.
 - You MAY ask the user clarifying questions with questionnaire.
 
 ## Plan File
-${planFileSection}
+Use planWrite to create or overwrite the plan file. Use planEdit to make incremental edits.
 
 ## Presenting the Plan
 When the plan is ready for the user to review, set presentToUser=true on your final planWrite or planEdit call. This displays the plan and ends your turn.
@@ -66,11 +95,14 @@ If you need to present the plan without writing changes (e.g. after questionnair
 3. Write a concise, actionable plan to the plan file.
 4. Set presentToUser=true on your final planWrite/planEdit to display the plan to the user.
 
-Do NOT start implementing in plan mode. After the plan is presented, the user will decide whether to request revisions or manually switch to build mode with /safetynet:build.`;
+Do NOT start implementing in plan mode. After the plan is presented, the user will decide whether to request revisions or manually switch to build mode with /safetynet:build.
+
+## Available tools
+${toolList(PLAN_MODE_TOOLS)}`;
   }
 
-  let buildMsg = `[SAFENET BUILD MODE]
-You are in build mode. full tool access is enabled.
+  return `[SAFENET BUILD MODE]
+You are in build mode. Full tool access is enabled.
 
 You may make file changes, run shell commands, and use available tools as needed.
 Commands are evaluated against the permission ruleset:
@@ -78,41 +110,10 @@ Commands are evaluated against the permission ruleset:
 - Unknown commands prompt the user for approval
 - Dangerous commands are blocked
 
-To switch back to planning, the user can run /safetynet:plan.`;
+To switch back to planning, the user can run /safetynet:plan.
 
-  if (planPath && existsSync(planPath)) {
-    buildMsg += `\n\nA plan file exists at ${planPath}.
-- Use the standard edit/write tools for project files.
-- Use planEdit/planWrite ONLY to update the plan itself (e.g., ticking off boxes or refining implementation steps).
-- Follow the plan defined within it when implementing.`;
-  }
-
-  return buildMsg;
+## Available tools
+${toolList(BUILD_MODE_TOOLS)}`;
 }
 
-/** Tools that are only useful in plan mode. */
-const PLAN_ONLY_TOOLS = new Set(["planEdit", "planWrite", "planPresent"]);
 
-/** Explicit plan-mode tool allowlist. Keep this intentionally small. */
-const PLAN_MODE_TOOLS = new Set([
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "questionnaire",
-  "planWrite",
-  "planEdit",
-  "planPresent",
-]);
-
-export function applyProfileTools(pi: ExtensionAPI, profile: ProfileName): void {
-  const allTools = pi.getAllTools().map((t) => t.name);
-
-  if (profile === "plan") {
-    pi.setActiveTools(allTools.filter((name) => PLAN_MODE_TOOLS.has(name)));
-    return;
-  }
-
-  // Build mode: show everything.
-  pi.setActiveTools(allTools);
-}
