@@ -86,9 +86,11 @@ export default function questionnaire(pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!ctx.hasUI) {
+				ctx.abort();
 				return errorResult("Error: UI not available (running in non-interactive mode)");
 			}
 			if (params.questions.length === 0) {
+				ctx.abort();
 				return errorResult("Error: No questions provided");
 			}
 
@@ -389,6 +391,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 			});
 
 			if (result.cancelled) {
+				ctx.abort();
 				return {
 					content: [{ type: "text", text: "User cancelled the questionnaire" }],
 					details: result,
