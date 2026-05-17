@@ -16,6 +16,10 @@ export function matchesPattern(
   if (permission === "bash" || permission === "*") {
     return bashPatternToRegex(pattern).test(target);
   }
+  // "." represents the project root directory itself.
+  // picomatch("**")(".") returns false, but semantically the root
+  // IS contained within ** — it is the zero-segment match.
+  if (target === "." && pattern === "**") return true;
   return picomatch(pattern, { dot: true })(target);
 }
 

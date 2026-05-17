@@ -8,7 +8,7 @@ import {
 import type { Rule, Ruleset, ProfileName } from "./types.ts";
 import baselineData from "./permissions/baseline.json" with { type: "json" };
 import { checkBashPermission, checkFileTarget } from "./check.ts";
-import { reanchorPattern } from "./project.ts";
+import { toRecursiveGlob, normalizePathForMatching } from "./project.ts";
 
 const BASELINE: Ruleset = baselineData.rules as Ruleset;
 const ALL_MODES: ProfileName[] = ["build", "plan"];
@@ -108,6 +108,19 @@ describe("matchesPattern", () => {
       assert.equal(matchesPattern("edit", "**", ".env"), true);
       assert.equal(matchesPattern("edit", "**", ".gitignore"), true);
       assert.equal(matchesPattern("edit", "**", "src/main.ts"), true);
+    });
+
+    it("matches '.' (project root) against '**'", () => {
+      // '.' is what normalizePathForMatching returns for the project root itself.
+      // picomatch("**")(".") returns false, but semantically the root IS
+      // contained within ** — it is the zero-segment match.
+      assert.equal(matchesPattern("read", "**", "."), true);
+      assert.equal(matchesPattern("edit", "**", "."), true);
+    });
+
+    it("does NOT match '.' against non-** patterns", () => {
+      assert.equal(matchesPattern("read", "*.ts", "."), false);
+      assert.equal(matchesPattern("read", "src/*", "."), false);
     });
   });
 
@@ -397,7 +410,16 @@ describe("composition: bash permission end-to-end", () => {
   });
 
   describe("subcommand extraction: pipes and sudo", () => {
-    it("allows piped commands when both are allowlisted", () => {
+    it("returns ask for piped commands when neither subcommand is allowlisted", () => {
+      // Neither "curl" nor "python3" has a baseline allow rule;
+      // each matches the * catch-all (ask). This proves the pipeline
+      // is split and each subcommand is individually evaluated.
+      const result = checkBashPermission("curl | python3", "build", BASELINE);
+      assert.equal(result.action, "ask");
+      assert.deepEqual(result.unapproved, ["curl", "python3"]);
+    });
+
+    it("allows piped commands when both subcommands match allow rules", () => {
       assert.equal(checkBashPermission("ls | grep foo", "build", BASELINE).action, "allow");
     });
 
@@ -663,10 +685,10 @@ describe("composition: bash permission end-to-end", () => {
     });
   });
 
-  describe("glob approval via reanchorPattern", () => {
+  describe("glob approval via normalizePathForMatching + toRecursiveGlob", () => {
     it("src/subdir/**/*.ts pattern matches nested file", () => {
       // Simulates user editing path to glob in approval prompt
-      const pattern = reanchorPattern("src/awesome-script/**/*.ts", "/project", "/project");
+      const pattern = toRecursiveGlob(normalizePathForMatching("src/awesome-script/**/*.ts", "/project"));
       const rules: Ruleset = [
         ...BASELINE,
         { permission: "edit", pattern, action: "allow", modes: ["build"] },
@@ -678,7 +700,7 @@ describe("composition: bash permission end-to-end", () => {
 
     it("absolute path input is normalized as rule pattern", () => {
       // Non-edited file item: item.text = absolute path from tool call
-      const pattern = reanchorPattern("/project/src/foo.ts", "/project", "/project");
+      const pattern = toRecursiveGlob(normalizePathForMatching("/project/src/foo.ts", "/project"));
       const rules: Ruleset = [
         ...BASELINE,
         { permission: "edit", pattern, action: "allow", modes: ["build"] },
@@ -686,25 +708,8 @@ describe("composition: bash permission end-to-end", () => {
       assert.equal(checkFileTarget("src/foo.ts", "edit", "build", rules).action, "allow");
     });
 
-    it("absolute path input normalized when cwd is subdirectory", () => {
-      // cwd differs from project root
-      const pattern = reanchorPattern("/project/src/foo.ts", "/project/src", "/project");
-      assert.equal(pattern, "src/foo.ts");
-    });
-
-    it("cwd-relative edit reanchored when cwd is subdirectory", () => {
-      // User edits in prompt, display-relative path gets reanchored
-      const pattern = reanchorPattern("awesome-script/**/*.ts", "/project/src", "/project");
-      assert.equal(pattern, "src/awesome-script/**/*.ts");
-      const rules: Ruleset = [
-        ...BASELINE,
-        { permission: "edit", pattern, action: "allow", modes: ["build"] },
-      ];
-      assert.equal(checkFileTarget("src/awesome-script/utils/playerStore.ts", "edit", "build", rules).action, "allow");
-    });
-
     it("rootless glob in user edit becomes recursive", () => {
-      const pattern = reanchorPattern("*.ts", "/project/src", "/project");
+      const pattern = toRecursiveGlob(normalizePathForMatching("*.ts", "/project"));
       assert.equal(pattern, "**/*.ts");
       const rules: Ruleset = [
         ...BASELINE,
@@ -716,9 +721,9 @@ describe("composition: bash permission end-to-end", () => {
 
     it("tilde-prefixed glob matches external home path", () => {
       const home = process.env.HOME ?? "/home/user";
-      const projectRoot = "/project";
+      const cwd = "/project";
       // User types ~/.bun/**/*.ts in approval prompt
-      const pattern = reanchorPattern("~/.bun/**/*.ts", projectRoot, projectRoot);
+      const pattern = toRecursiveGlob(normalizePathForMatching("~/.bun/**/*.ts", cwd));
       // Should expand ~ to absolute: /home/user/.bun/**/*.ts
       assert.equal(pattern, home + "/.bun/**/*.ts");
       const rules: Ruleset = [
@@ -727,19 +732,19 @@ describe("composition: bash permission end-to-end", () => {
       ];
       // checkFileTarget normalizes absolute external path to absolute form
       const target = home + "/.bun/install/global/node_modules/@scope/pkg/dist/types.d.ts";
-      assert.equal(checkFileTarget(target, "edit", "build", rules, projectRoot).action, "allow");
+      assert.equal(checkFileTarget(target, "edit", "build", rules, cwd).action, "allow");
     });
 
     it("tilde-prefixed specific path matches", () => {
       const home = process.env.HOME ?? "/home/user";
-      const projectRoot = "/project";
-      const pattern = reanchorPattern("~/config/app.yaml", projectRoot, projectRoot);
+      const cwd = "/project";
+      const pattern = toRecursiveGlob(normalizePathForMatching("~/config/app.yaml", cwd));
       assert.equal(pattern, home + "/config/app.yaml");
       const rules: Ruleset = [
         ...BASELINE,
         { permission: "edit", pattern, action: "allow", modes: ["build"] },
       ];
-      assert.equal(checkFileTarget(home + "/config/app.yaml", "edit", "build", rules, projectRoot).action, "allow");
+      assert.equal(checkFileTarget(home + "/config/app.yaml", "edit", "build", rules, cwd).action, "allow");
     });
   });
 });

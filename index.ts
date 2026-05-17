@@ -44,7 +44,7 @@ import {
   showPermissionPrompt,
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./check.ts";
-import { normalizePathForMatching, reanchorPattern } from "./project.ts";
+import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
 
 let storage: PermissionStorage;
 
@@ -138,7 +138,6 @@ async function resolvePermission(
 
   const profile = getCurrentProfile();
   const timedMinutes = getTimedApprovalMinutes();
-  const root = process.cwd();
   const isFile = opts.permission === "read" || opts.permission === "edit";
 
   let reprompt = false;
@@ -189,7 +188,7 @@ async function resolvePermission(
     const patterns: string[] = [];
     for (const [original, edited] of approved) {
       if (isFile) {
-        const pattern = reanchorPattern(edited, process.cwd(), root);
+        const pattern = toRecursiveGlob(normalizePathForMatching(edited, process.cwd()));
         patterns.push(pattern);
       } else {
         patterns.push(edited);
@@ -203,7 +202,7 @@ async function resolvePermission(
         if (approved.has(rt.path)) {
           redirectPatterns.push({
             permission: rt.permission,
-            pattern: reanchorPattern(rt.path, process.cwd(), root),
+            pattern: toRecursiveGlob(normalizePathForMatching(rt.path, process.cwd())),
           });
         }
       }

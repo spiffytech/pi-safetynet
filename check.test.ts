@@ -5,26 +5,26 @@ import { parseCommand } from "./bash-parser.ts";
 import { getBaselineRules } from "./permissions/index.ts";
 
 const RULES = getBaselineRules();
-const PROJECT_ROOT = "/home/user/project";
+const CWD = "/home/user/project";
 
 describe("checkBashPermission cd auto-approve", () => {
-  it("auto-approves cd to project root", () => {
+  it("auto-approves cd to cwd", () => {
     const result = checkBashPermission(
-      `cd ${PROJECT_ROOT} && git diff`,
+      `cd ${CWD} && git diff`,
       "plan",
       RULES,
-      PROJECT_ROOT,
+      CWD,
     );
     assert.equal(result.action, "allow");
     assert.deepEqual(result.unapproved, []);
   });
 
-  it("auto-approves cd to subdirectory within project", () => {
+  it("auto-approves cd to subdirectory within cwd", () => {
     const result = checkBashPermission(
-      `cd ${PROJECT_ROOT}/src && ls`,
+      `cd ${CWD}/src && ls`,
       "plan",
       RULES,
-      PROJECT_ROOT,
+      CWD,
     );
     assert.equal(result.action, "allow");
     assert.deepEqual(result.unapproved, []);
@@ -35,7 +35,7 @@ describe("checkBashPermission cd auto-approve", () => {
       "cd && git status",
       "plan",
       RULES,
-      PROJECT_ROOT,
+      CWD,
     );
     assert.equal(result.action, "allow");
     assert.deepEqual(result.unapproved, []);
@@ -46,22 +46,22 @@ describe("checkBashPermission cd auto-approve", () => {
       "cd src && ls",
       "plan",
       RULES,
-      PROJECT_ROOT,
+      CWD,
     );
     assert.equal(result.action, "allow");
     assert.deepEqual(result.unapproved, []);
   });
 
-  it("auto-approves cd with ~ expansion to project", () => {
-    // Set HOME so ~ resolves to something within project root
+  it("auto-approves cd with ~ expansion to cwd", () => {
+    // Set HOME so ~ resolves to something within cwd
     const origHome = process.env.HOME;
-    process.env.HOME = PROJECT_ROOT;
+    process.env.HOME = CWD;
     try {
       const result = checkBashPermission(
         "cd ~/src && ls",
         "plan",
         RULES,
-        PROJECT_ROOT,
+        CWD,
       );
       assert.equal(result.action, "allow");
     } finally {
@@ -69,33 +69,33 @@ describe("checkBashPermission cd auto-approve", () => {
     }
   });
 
-  it("still requires approval for cd outside project root", () => {
+  it("still requires approval for cd outside cwd", () => {
     const result = checkBashPermission(
       "cd /tmp && ls",
       "plan",
       RULES,
-      PROJECT_ROOT,
+      CWD,
     );
     assert.equal(result.action, "ask");
     assert.ok(result.unapproved!.some((c) => c.startsWith("cd /tmp")));
   });
 
-  it("still requires approval for cd to parent of project root", () => {
+  it("still requires approval for cd to parent of cwd", () => {
     const result = checkBashPermission(
       "cd /home/user && ls",
       "plan",
       RULES,
-      PROJECT_ROOT,
+      CWD,
     );
     assert.equal(result.action, "ask");
   });
 
-  it("auto-approves quoted cd path within project", () => {
+  it("auto-approves quoted cd path within cwd", () => {
     const result = checkBashPermission(
-      `cd "${PROJECT_ROOT}/src" && ls`,
+      `cd "${CWD}/src" && ls`,
       "plan",
       RULES,
-      PROJECT_ROOT,
+      CWD,
     );
     assert.equal(result.action, "allow");
   });
@@ -134,13 +134,13 @@ describe("checkBashPermission plan-mode edit denial", () => {
 
   for (const [cmd, label] of DENY_IN_PLAN) {
     it(`denies in plan mode: ${label}`, () => {
-      const result = checkBashPermission(cmd, "plan", RULES, PROJECT_ROOT);
+      const result = checkBashPermission(cmd, "plan", RULES, CWD);
       assert.equal(result.action, "deny");
       assert.ok(result.reason?.includes("Plan mode"));
     });
 
     it(`does not deny in build mode: ${label}`, () => {
-      const result = checkBashPermission(cmd, "build", RULES, PROJECT_ROOT);
+      const result = checkBashPermission(cmd, "build", RULES, CWD);
       assert.notEqual(result.action, "deny");
     });
   }
@@ -159,7 +159,7 @@ describe("checkBashPermission plan-mode edit denial", () => {
 
   for (const [cmd, label] of ALLOW_IN_PLAN) {
     it(`allows in plan mode: ${label}`, () => {
-      const result = checkBashPermission(cmd, "plan", RULES, PROJECT_ROOT);
+      const result = checkBashPermission(cmd, "plan", RULES, CWD);
       assert.equal(result.action, "allow");
     });
   }
@@ -184,18 +184,38 @@ describe("read-only tools (grep/find/ls) use read permission, not bash parsing",
   it("checkFileTarget treats path as a read target, not a bash command", () => {
     // The directory /tmp is outside the project root, so it should
     // be "ask" (not "deny" and not bash-parsed)
-    const result = checkFileTarget("/tmp/some/dir", "read", "build", RULES, PROJECT_ROOT);
+    const result = checkFileTarget("/tmp/some/dir", "read", "build", RULES, CWD);
     assert.equal(result.action, "ask");
     assert.ok(!result.reason?.includes("renderShell"));
   });
 
   it("checkFileTarget allows reads within project root", () => {
-    const result = checkFileTarget(`${PROJECT_ROOT}/src/index.ts`, "read", "build", RULES, PROJECT_ROOT);
+    const result = checkFileTarget(`${CWD}/src/index.ts`, "read", "build", RULES, CWD);
     assert.equal(result.action, "allow");
   });
 
   it("checkFileTarget denies hazardous files", () => {
-    const result = checkFileTarget(`${PROJECT_ROOT}/.env`, "read", "build", RULES, PROJECT_ROOT);
+    const result = checkFileTarget(`${CWD}/.env`, "read", "build", RULES, CWD);
     assert.equal(result.action, "deny");
+  });
+
+  it("checkFileTarget auto-approves reading the project root itself (ls .)", () => {
+    // normalizePathForMatching turns "." into ".", which matches "**" via
+    // the special case in matchesPattern.
+    const result = checkFileTarget(".", "read", "build", RULES, "/home/user/project");
+    assert.equal(result.action, "allow");
+  });
+
+  it("checkFileTarget auto-approves reading the project root via ~-prefixed path", () => {
+    // normalizePathForMatching expands ~ and strips the project root prefix,
+    // producing "." which matches "**" via the special case in matchesPattern.
+    const home = process.env.HOME ?? "/home/user";
+    const result = checkFileTarget("~/project", "read", "build", RULES, home + "/project");
+    assert.equal(result.action, "allow");
+  });
+
+  it("checkFileTarget auto-approves reading the project root via absolute path", () => {
+    const result = checkFileTarget(CWD, "read", "build", RULES, CWD);
+    assert.equal(result.action, "allow");
   });
 });

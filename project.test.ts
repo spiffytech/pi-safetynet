@@ -9,7 +9,8 @@ import {
   normalizePathForMatching,
   toDisplayPath,
   fromDisplayPath,
-  reanchorPattern,
+  toRecursiveGlob,
+  expandHome,
 } from "./project.ts";
 
 describe("findPiConfigDir", () => {
@@ -64,27 +65,27 @@ describe("isExternalPath", () => {
     assert.equal(isExternalPath("/project", "/project"), false);
   });
 
-  it("does NOT flag relative paths inside project as external", () => {
+  it("does NOT flag relative paths inside cwd as external", () => {
     const cwd = process.cwd();
     assert.equal(isExternalPath("src/main.ts", cwd), false);
   });
 
-  it("does NOT flag ./-prefixed paths inside project as external", () => {
+  it("does NOT flag ./-prefixed paths inside cwd as external", () => {
     const cwd = process.cwd();
     assert.equal(isExternalPath("./src/main.ts", cwd), false);
   });
 
-  it("flags ./../ traversal that escapes project", () => {
+  it("flags ./../ traversal that escapes cwd", () => {
     const cwd = process.cwd();
     assert.equal(isExternalPath("./../../../etc/passwd", cwd), true);
   });
 
-  it("flags relative paths with .. that resolve outside project", () => {
+  it("flags relative paths with .. that resolve outside cwd", () => {
     const cwd = process.cwd();
     assert.equal(isExternalPath("../../../etc/passwd", cwd), true);
   });
 
-  it("does NOT flag relative paths with .. that stay inside project", () => {
+  it("does NOT flag relative paths with .. that stay inside cwd", () => {
     const cwd = process.cwd();
     assert.equal(isExternalPath("src/../other/file.ts", cwd), false);
   });
@@ -96,17 +97,42 @@ describe("isExternalPath", () => {
   it("flags path traversal via .. as external", () => {
     assert.equal(isExternalPath("/project/../../../etc/passwd", "/project"), true);
   });
+
+  it("expands ~ before checking — via expandHome", () => {
+    const home = process.env.HOME ?? "/home";
+    assert.equal(isExternalPath("~/project", home + "/project"), false);
+    assert.equal(isExternalPath("~/other", home + "/project"), true);
+    assert.equal(isExternalPath("~/project/src", home + "/project"), false);
+  });
+});
+
+describe("expandHome", () => {
+  it("expands ~/ to $HOME", () => {
+    const home = process.env.HOME ?? "/home";
+    assert.equal(expandHome("~/foo"), home + "/foo");
+  });
+
+  it("expands bare ~ to $HOME", () => {
+    const home = process.env.HOME ?? "/home";
+    assert.equal(expandHome("~"), home);
+  });
+
+  it("returns non-~-prefixed paths unchanged", () => {
+    assert.equal(expandHome("/etc/passwd"), "/etc/passwd");
+    assert.equal(expandHome("src/foo.ts"), "src/foo.ts");
+    assert.equal(expandHome("."), ".");
+  });
 });
 
 describe("normalizePathForMatching", () => {
-  it("strips project root prefix from absolute paths", () => {
+  it("strips cwd prefix from absolute paths", () => {
     assert.equal(
       normalizePathForMatching("/project/src/main.ts", "/project"),
       "src/main.ts",
     );
   });
 
-  it("converts project root itself to .", () => {
+  it("converts cwd itself to .", () => {
     assert.equal(normalizePathForMatching("/project", "/project"), ".");
   });
 
@@ -118,7 +144,7 @@ describe("normalizePathForMatching", () => {
     assert.equal(normalizePathForMatching("src/main.ts", "/project"), "src/main.ts");
   });
 
-  it("leaves paths outside project root as-is", () => {
+  it("leaves paths outside cwd as-is", () => {
     assert.equal(
       normalizePathForMatching("/etc/passwd", "/project"),
       "/etc/passwd",
@@ -132,76 +158,106 @@ describe("normalizePathForMatching", () => {
   });
 });
 
+describe("toRecursiveGlob", () => {
+  it("converts bare * to **", () => {
+    assert.equal(toRecursiveGlob("*"), "**");
+  });
+
+  it("converts rootless globs to recursive globs", () => {
+    assert.equal(toRecursiveGlob("*.ts"), "**/*.ts");
+    assert.equal(toRecursiveGlob("*.spec.js"), "**/*.spec.js");
+    assert.equal(toRecursiveGlob("*_test.*"), "**/*_test.*");
+  });
+
+  it("does not convert patterns with a directory component", () => {
+    assert.equal(toRecursiveGlob("src/*.ts"), "src/*.ts");
+    assert.equal(toRecursiveGlob("components/*.ts"), "components/*.ts");
+  });
+
+  it("does not convert non-glob patterns", () => {
+    assert.equal(toRecursiveGlob("foo.ts"), "foo.ts");
+    assert.equal(toRecursiveGlob("src/foo.ts"), "src/foo.ts");
+  });
+});
+
 describe("toDisplayPath", () => {
-  it("converts in-project path to cwd-relative", () => {
+  it("converts in-cwd path to cwd-relative", () => {
     assert.equal(
-      toDisplayPath("/project/src/foo.ts", { cwd: "/project/src", projectRoot: "/project" }),
+      toDisplayPath("/project/src/foo.ts", { cwd: "/project/src" }),
       "foo.ts",
     );
   });
 
-  it("converts in-project path above cwd to ../ form", () => {
+  it("shows path above cwd as absolute (outside the working directory)", () => {
     assert.equal(
-      toDisplayPath("/project/README.md", { cwd: "/project/src", projectRoot: "/project" }),
-      "../README.md",
+      toDisplayPath("/project/README.md", { cwd: "/project/src" }),
+      "/project/README.md",
     );
   });
 
   it("handles path equal to cwd", () => {
-    // Node\'s relative() returns "" when path equals base
+    // Node's relative() returns "" when path equals base;
+    // toDisplayPath converts that to "." for readability.
     assert.equal(
-      toDisplayPath("/project/src", { cwd: "/project/src", projectRoot: "/project" }),
-      "",
+      toDisplayPath("/project/src", { cwd: "/project/src" }),
+      ".",
     );
   });
 
-  it("handles ~-prefixed path inside project", () => {
+  it("handles ~-prefixed path inside cwd", () => {
     const home = process.env.HOME ?? "/home";
-    // ~/project/src/foo.ts with cwd=~/project/src, root=~/project -> foo.ts
     assert.equal(
-      toDisplayPath("~/project/src/foo.ts", { cwd: home + "/project/src", projectRoot: home + "/project" }),
+      toDisplayPath("~/project/src/foo.ts", { cwd: home + "/project/src" }),
       "foo.ts",
     );
   });
 
+  it("handles ~-prefixed path equal to cwd", () => {
+    const home = process.env.HOME ?? "/home";
+    assert.equal(
+      toDisplayPath("~/project/src", { cwd: home + "/project/src" }),
+      ".",
+    );
+  });
+
   it("returns relative paths as-is", () => {
-    assert.equal(toDisplayPath("src/main.ts", { cwd: "/project", projectRoot: "/project" }), "src/main.ts");
+    assert.equal(toDisplayPath("src/main.ts", { cwd: "/project" }), "src/main.ts");
   });
 
   it("converts $HOME-external path to ~/… form", () => {
     const home = process.env.HOME ?? "/home";
     assert.equal(
-      toDisplayPath(home + "/.config/app", { cwd: "/project", projectRoot: "/project" }),
+      toDisplayPath(home + "/.config/app", { cwd: "/project" }),
       "~/.config/app",
     );
   });
 
-  it("converts ~/… path outside project to ~/… form", () => {
+  it("converts ~/… path outside cwd to ~/… form", () => {
     const home = process.env.HOME ?? "/home";
     assert.equal(
-      toDisplayPath("~/.ssh/config", { cwd: "/project", projectRoot: "/project" }),
+      toDisplayPath("~/.ssh/config", { cwd: "/project" }),
       "~/.ssh/config",
     );
   });
 
   it("converts non-home external path to absolute", () => {
     assert.equal(
-      toDisplayPath("/tmp/build.log", { cwd: "/project/src", projectRoot: "/project" }),
+      toDisplayPath("/tmp/build.log", { cwd: "/project/src" }),
       "/tmp/build.log",
     );
   });
 
   it("converts /etc path to absolute", () => {
     assert.equal(
-      toDisplayPath("/etc/hosts", { cwd: "/project", projectRoot: "/project" }),
+      toDisplayPath("/etc/hosts", { cwd: "/project" }),
       "/etc/hosts",
     );
   });
 
-  it("converts in-project sibling dir path to ../ form", () => {
+  it("shows sibling dir path outside cwd as absolute", () => {
     assert.equal(
-      toDisplayPath("/project/lib/utils.ts", { cwd: "/project/src", projectRoot: "/project" }),
-      "../lib/utils.ts",
+      toDisplayPath("/project/lib/utils.ts", { cwd: "/project/src" }),
+      "/project/lib/utils.ts",
     );
   });
 });
@@ -249,95 +305,28 @@ describe("fromDisplayPath", () => {
     );
   });
 
-  it("round-trips with toDisplayPath for in-project file", () => {
+  it("round-trips with toDisplayPath for in-cwd file", () => {
     const cwd = "/project/src";
-    const projectRoot = "/project";
     const absPath = "/project/src/foo.ts";
-    const display = toDisplayPath(absPath, { cwd, projectRoot });
+    const display = toDisplayPath(absPath, { cwd });
     const restored = fromDisplayPath(display, { cwd });
     assert.equal(restored, absPath);
   });
 
   it("round-trips with toDisplayPath for external home file", () => {
     const cwd = "/project";
-    const projectRoot = "/project";
     const home = process.env.HOME ?? "/home";
     const absPath = home + "/.config/app";
-    const display = toDisplayPath(absPath, { cwd, projectRoot });
+    const display = toDisplayPath(absPath, { cwd });
     const restored = fromDisplayPath(display, { cwd, home });
     assert.equal(restored, absPath);
   });
 
   it("round-trips with toDisplayPath for non-home external file", () => {
     const cwd = "/project";
-    const projectRoot = "/project";
     const absPath = "/tmp/build.log";
-    const display = toDisplayPath(absPath, { cwd, projectRoot });
+    const display = toDisplayPath(absPath, { cwd });
     const restored = fromDisplayPath(display, { cwd });
     assert.equal(restored, absPath);
-  });
-});
-
-describe("reanchorPattern", () => {
-  it("re-anchors cwd-relative pattern to project-root-relative", () => {
-    assert.equal(
-      reanchorPattern("foo.ts", "/home/user/project/src", "/home/user/project"),
-      "src/foo.ts",
-    );
-  });
-
-  it("is no-op when cwd equals project root", () => {
-    assert.equal(
-      reanchorPattern("foo.ts", "/home/user/project", "/home/user/project"),
-      "foo.ts",
-    );
-  });
-
-  it("re-anchors nested pattern", () => {
-    assert.equal(
-      reanchorPattern("components/*.ts", "/home/user/project/src", "/home/user/project"),
-      "src/components/*.ts",
-    );
-  });
-
-  it("resolves ../ patterns to project-root-relative", () => {
-    assert.equal(
-      reanchorPattern("../lib/utils.ts", "/home/user/project/src", "/home/user/project"),
-      "lib/utils.ts",
-    );
-  });
-
-  it("normalizes absolute patterns via normalizePathForMatching", () => {
-    assert.equal(
-      reanchorPattern("/home/user/project/src/foo.ts", "/home/user/project/src", "/home/user/project"),
-      "src/foo.ts",
-    );
-  });
-
-  it("converts rootless globs to recursive globs", () => {
-    // *.ts → **/*.ts so it matches at any depth, not just top-level
-    assert.equal(
-      reanchorPattern("*.ts", "/home/user/project/src", "/home/user/project"),
-      "**/*.ts",
-    );
-  });
-
-  it("converts bare * to **", () => {
-    assert.equal(reanchorPattern("*", "/home/user/project/src", "/home/user/project"), "**");
-  });
-
-  it("does not convert patterns with a directory component", () => {
-    // src/*.ts has a directory prefix, so it should be reanchored normally
-    assert.equal(
-      reanchorPattern("components/*.ts", "/home/user/project/src", "/home/user/project"),
-      "src/components/*.ts",
-    );
-  });
-
-  it("rootless globs are recursive even when cwd equals project root", () => {
-    assert.equal(
-      reanchorPattern("*.ts", "/home/user/project", "/home/user/project"),
-      "**/*.ts",
-    );
   });
 });

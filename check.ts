@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import type { ProfileName, PermissionAction, Ruleset } from "./types.ts";
 import { evaluatePermission } from "./permissions/ruleset.ts";
 import { parseCommand, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
-import { isExternalPath, normalizePathForMatching } from "./project.ts";
+import { normalizePathForMatching, expandHome } from "./project.ts";
 
 /** Device files that are always safe to use as redirect targets. */
 const SAFE_DEVICE_FILES = new Set([
@@ -28,7 +28,7 @@ export function checkFileTarget(
   permission: "read" | "edit",
   profile: ProfileName,
   rules: Ruleset,
-  projectRoot?: string,
+  cwd?: string,
 ): PermissionCheck {
   if (isHazardousFile(filePath)) {
     return { action: "deny", reason: "Hazardous file (e.g., .env, .ssh, credentials)" };
@@ -38,8 +38,8 @@ export function checkFileTarget(
     return { action: "allow" };
   }
 
-  const root = projectRoot ?? process.cwd();
-  const normalized = normalizePathForMatching(filePath, root);
+  const absCwd = cwd ?? process.cwd();
+  const normalized = normalizePathForMatching(filePath, absCwd);
 
   const result = evaluatePermission(permission, normalized, profile, rules);
   if (result.action === "deny") {
@@ -54,7 +54,11 @@ export function checkFileTarget(
   // match but should not automatically approve — the user should be asked.
   // However, if an explicit non-catch-all rule matched (e.g. a user-added
   // allow rule for a specific external path), honour it.
-  if (isExternalPath(filePath, root)) {
+  //
+  // External paths are identified by the normalized form: internal paths
+  // are "." or relative (e.g. "src/foo.ts"), while external paths remain
+  // absolute (e.g. "/etc/passwd") after normalization.
+  if (normalized.startsWith("/")) {
     if (result.action === "allow" && result.matchedRule?.pattern === "**") {
       return { action: "ask", reason: "Path is outside project root" };
     }
@@ -65,10 +69,10 @@ export function checkFileTarget(
 
 /**
  * Check whether a subcommand is `cd <path>` where <path> resolves to
- * the project root or a directory below it.  Such commands are always
- * safe and auto-approved.
+ * cwd or a directory below it.  Such commands are always safe and
+ * auto-approved.
  */
-function isCdWithinProject(subcommand: string, projectRoot: string): boolean {
+function isCdWithinProject(subcommand: string, cwd: string): boolean {
   const trimmed = subcommand.trim();
   if (trimmed === "cd") return true; // bare cd → $HOME, harmless
 
@@ -85,24 +89,20 @@ function isCdWithinProject(subcommand: string, projectRoot: string): boolean {
     target = target.slice(1, -1);
   }
 
-  // Handle ~ expansion
-  if (target.startsWith("~")) {
-    target = (process.env.HOME ?? "/home") + target.slice(1);
-  }
+  target = expandHome(target);
 
-  // Resolve relative paths against the project root (not cwd),
-  // since the agent's cwd should be within the project.
-  const resolved = target.startsWith("/") ? target : resolve(projectRoot, target);
+  // Resolve relative paths against cwd.
+  const resolved = target.startsWith("/") ? target : resolve(cwd, target);
 
-  // Target must be within or equal to the project root
-  return resolved.startsWith(projectRoot + "/") || resolved === projectRoot;
+  // Target must be within or equal to cwd
+  return resolved.startsWith(cwd + "/") || resolved === cwd;
 }
 
 export function checkBashPermission(
   command: string,
   profile: ProfileName,
   rules: Ruleset,
-  projectRoot?: string,
+  cwd?: string,
 ): PermissionCheck {
   const parsed = parseCommand(command);
 
@@ -122,13 +122,13 @@ export function checkBashPermission(
   const redirectTargets: Array<{ permission: "read" | "edit"; path: string }> = [];
   let worstAction: PermissionAction = "allow";
 
-  const root = projectRoot ?? process.cwd();
+  const absCwd = cwd ?? process.cwd();
 
   for (const sub of parsed.subcommands) {
-    // Auto-approve cd when the target is within (or equal to) the project root.
+    // Auto-approve cd when the target is within (or equal to) cwd.
     // cd to the project or a subdirectory is always safe and the LLM
     // frequently emits it as a preamble (e.g. "cd <cwd> && git diff").
-    if (isCdWithinProject(sub, root)) continue;
+    if (isCdWithinProject(sub, absCwd)) continue;
 
     const result = evaluatePermission("bash", sub, profile, rules);
     if (result.action === "deny") {
@@ -142,7 +142,7 @@ export function checkBashPermission(
 
   for (const target of parsed.redirects) {
     const perm = target.direction === "input" ? "read" : "edit";
-    const targetResult = checkFileTarget(target.path, perm, profile, rules, projectRoot);
+    const targetResult = checkFileTarget(target.path, perm, profile, rules, cwd);
     if (targetResult.action === "deny") {
       worstAction = "deny";
       redirectTargets.push({ permission: perm, path: target.path });

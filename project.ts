@@ -19,37 +19,43 @@ export function findPiConfigDir(startPath: string): string {
   return startPath;
 }
 
-export function isExternalPath(filePath: string, projectRoot: string): boolean {
-  const absRoot = projectRoot.startsWith("/") ? projectRoot : join(process.cwd(), projectRoot);
-  const resolvedPath = resolve(filePath);
-  return !resolvedPath.startsWith(absRoot + "/") && resolvedPath !== absRoot;
+/** Expand `~` to `$HOME`. No-op for paths that don't start with `~`. */
+export function expandHome(path: string): string {
+  if (path.startsWith("~")) {
+    return join(process.env.HOME ?? "/home", path.slice(1));
+  }
+  return path;
+}
+
+export function isExternalPath(filePath: string, cwd: string): boolean {
+  const expanded = expandHome(filePath);
+  const absCwd = cwd.startsWith("/") ? cwd : join(process.cwd(), cwd);
+  const resolvedPath = resolve(expanded);
+  return !resolvedPath.startsWith(absCwd + "/") && resolvedPath !== absCwd;
 }
 
 /**
  * Convert a path to the most readable form for user display.
  *
- * - Paths inside the project root → cwd-relative (e.g. `src/foo.ts`, `../README.md`)
- * - Paths under $HOME but outside the project → `~/…` (e.g. `~/.config/app`)
+ * - Paths inside cwd → cwd-relative (e.g. `src/foo.ts`, `../README.md`)
+ * - Paths under $HOME but outside cwd → `~/…` (e.g. `~/.config/app`)
  * - Everything else → absolute (e.g. `/tmp/build.log`)
  */
-export function toDisplayPath(filePath: string, opts?: { cwd?: string; projectRoot?: string }): string {
-  const base = opts?.cwd ?? process.cwd();
+export function toDisplayPath(filePath: string, opts?: { cwd?: string }): string {
+  const cwd = opts?.cwd ?? process.cwd();
   const home = process.env.HOME ?? "/home";
-  const root = opts?.projectRoot ?? base;
 
   // Resolve to absolute for comparison
-  let absPath = filePath;
-  if (absPath.startsWith("~")) {
-    absPath = join(home, absPath.slice(1));
-  }
+  let absPath = expandHome(filePath);
   if (!absPath.startsWith("/")) return filePath;
 
-  // Inside project root → cwd-relative
-  if (!isExternalPath(absPath, root)) {
-    return relative(base, absPath);
+  // Inside cwd → cwd-relative
+  if (!isExternalPath(absPath, cwd)) {
+    const rel = relative(cwd, absPath);
+    return rel === "" ? "." : rel;
   }
 
-  // Under $HOME but outside project → ~/…
+  // Under $HOME but outside cwd → ~/…
   if (absPath.startsWith(home + "/") || absPath === home) {
     return "~" + absPath.slice(home.length);
   }
@@ -67,9 +73,9 @@ export function toDisplayPath(filePath: string, opts?: { cwd?: string; projectRo
  * '**\/' produces the expected recursive behaviour.
  *
  * Patterns that already have a directory component (e.g. 'src/*.ts',
- * 'dir/foo.*') are NOT rootless and should be reanchored normally.
+ * 'dir/foo.*') are NOT rootless and are returned unchanged.
  */
-function toRecursiveGlob(pattern: string): string {
+export function toRecursiveGlob(pattern: string): string {
   // Only transform patterns whose first segment is a glob — that is,
   // the pattern starts with `*` and contains no `/` before the first
   // `*` (which would indicate a directory component).  We also handle
@@ -83,54 +89,6 @@ function toRecursiveGlob(pattern: string): string {
     }
   }
   return pattern;
-}
-
-/**
- * Re-anchor a cwd-relative pattern to be project-root-relative.
- *
- * When cwd is a subdirectory of project root, a pattern like 'foo.ts'
- * (meaning "foo.ts relative to cwd") needs to become 'sub/foo.ts'
- * (meaning "foo.ts relative to project root") for correct rule matching.
- *
- * Rootless glob patterns (e.g. '*.ts') are converted to recursive globs
- * (e.g. '**\/*.ts') so they match at any depth, since that is almost
- * always what the user intends.  Without this, '*.ts' only matches
- * top-level files in picomatch.
- */
-export function reanchorPattern(pattern: string, cwd: string, projectRoot: string): string {
-  // Convert rootless globs to recursive globs first.
-  // This also ensures they are NOT reanchored with a cwd prefix, since
-  // **/ already matches at every depth.
-  const recursive = toRecursiveGlob(pattern);
-  if (recursive !== pattern) return recursive;
-
-  // Expand ~ to home directory — picomatch treats ~ as literal, not $HOME.
-  // After expansion the path is absolute; normalizePathForMatching handles it.
-  if (pattern.startsWith("~")) {
-    const expanded = join(process.env.HOME ?? "/home", pattern.slice(1));
-    return normalizePathForMatching(expanded, projectRoot);
-  }
-
-  // If the pattern is already absolute, normalize it for matching
-  if (pattern.startsWith("/")) return normalizePathForMatching(pattern, projectRoot);
-
-  // Compute the relative path from project root to cwd
-  // e.g. if root=/project and cwd=/project/src, result = "src"
-  const cwdRelative = relative(projectRoot, cwd);
-
-  // If cwd IS the project root, no re-anchoring needed
-  if (cwdRelative === "." || cwdRelative === "") return pattern;
-
-  // Patterns starting with ../ mean the user pointed above cwd but
-  // potentially below the project root. Resolve to absolute first.
-  if (pattern.startsWith("..")) {
-    const abs = resolve(cwd, pattern);
-    return normalizePathForMatching(abs, projectRoot);
-  }
-
-  // Prepend the cwd-relative-to-root prefix
-  // e.g. pattern "foo.ts" with cwdRelative "src" -> "src/foo.ts"
-  return cwdRelative + "/" + pattern;
 }
 
 /**
@@ -157,17 +115,13 @@ export function fromDisplayPath(displayPath: string, opts?: { cwd?: string; home
   return displayPath;
 }
 
-export function normalizePathForMatching(filePath: string, projectRoot: string): string {
-  let normalized = filePath;
-
-  if (normalized.startsWith("~")) {
-    normalized = join(process.env.HOME ?? "/home", normalized.slice(1));
-  }
+export function normalizePathForMatching(filePath: string, cwd: string): string {
+  let normalized = expandHome(filePath);
 
   if (normalized.startsWith("/")) {
-    const absRoot = projectRoot.startsWith("/") ? projectRoot : join(process.cwd(), projectRoot);
-    if (normalized.startsWith(absRoot + "/") || normalized === absRoot) {
-      normalized = normalized.slice(absRoot.length + 1) || ".";
+    const absCwd = cwd.startsWith("/") ? cwd : join(process.cwd(), cwd);
+    if (normalized.startsWith(absCwd + "/") || normalized === absCwd) {
+      normalized = normalized.slice(absCwd.length + 1) || ".";
     }
   }
 
