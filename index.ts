@@ -455,7 +455,7 @@ function registerPlanTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "planWrite",
     label: "Plan Write",
-    description: "Create or overwrite the plan file. If the plan is ready for the user's review, use presentToUser=true to automatically display it to them.",
+    description: "Create or overwrite the plan file. Only include remaining work. If the plan is ready for the user's review, use presentToUser=true to automatically display it to them.",
     parameters: Type.Object({
       content: Type.String({ description: "Content to write to the plan file" }),
       presentToUser: Type.Optional(Type.Boolean({ description: "If the plan is ready for the user's review, use presentToUser=true to automatically display it to them." })),
@@ -480,7 +480,7 @@ function registerPlanTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "planEdit",
     label: "Plan Edit",
-    description: "Edit the plan file. If the plan is ready for the user's review, use presentToUser=true to automatically display it to them.",
+    description: "Edit the plan file. Only include remaining work. If the plan is ready for the user's review, use presentToUser=true to automatically display it to them.",
     parameters: Type.Object({
       edits: Type.Array(Type.Object({
         oldText: Type.String({ description: "Exact text to replace" }),
