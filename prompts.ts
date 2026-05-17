@@ -300,9 +300,11 @@ class PermissionPromptComponent implements Component, Focusable {
     if (!item.input) {
       const input = new Input();
       input.setValue(editValue);
+      (input as any).cursor = editValue.length;
       item.input = input;
     } else {
       item.input.setValue(editValue);
+      (item.input as any).cursor = editValue.length;
     }
     this.invalidate();
   }
