@@ -22,6 +22,7 @@
     { "permission": "bash", "pattern": "df *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "pwd", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "which *", "action": "allow", "modes": ["build", "plan"] },
+    { "permission": "bash", "pattern": "break", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "whereis *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "type *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "whoami", "action": "allow", "modes": ["build", "plan"] },
