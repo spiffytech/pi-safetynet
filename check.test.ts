@@ -165,6 +165,73 @@ describe("checkBashPermission plan-mode edit denial", () => {
   }
 });
 
+describe("checkBashPermission bare variable assignment auto-approve", () => {
+  it("auto-approves single bare variable assignment", () => {
+    const result = checkBashPermission(
+      'ORDER_ID=ef0a6ea9-4f7d-4471-a51e-5db753d111ce && echo done',
+      "build",
+      RULES,
+      CWD,
+    );
+    assert.equal(result.action, "allow");
+    assert.deepEqual(result.unapproved, []);
+  });
+
+  it("auto-approves multiple bare variable assignments", () => {
+    const result = checkBashPermission(
+      'A=1 B=2 && echo hi',
+      "build",
+      RULES,
+      CWD,
+    );
+    assert.equal(result.action, "allow");
+    assert.deepEqual(result.unapproved, []);
+  });
+
+  it("auto-approves assignment with quoted value", () => {
+    const result = checkBashPermission(
+      'ORDER_ID="ef0a6ea9-4f7d-4471-a51e-5db753d111ce" && echo done',
+      "build",
+      RULES,
+      CWD,
+    );
+    // The parser strips quotes in the subcommand, so ORDER_ID=ef0a6ea9-... is detected
+    assert.equal(result.action, "allow");
+  });
+
+  it("still requires approval for assignment prefix to a real command", () => {
+    // A=1 bun cli.ts — the parser produces "A=1 bun cli.ts" as one subcommand,
+    // which does NOT match isBareAssignment (not all tokens are VAR=value)
+    const result = checkBashPermission(
+      'A=1 some_unknown_cmd',
+      "build",
+      RULES,
+      CWD,
+    );
+    assert.equal(result.action, "ask");
+  });
+
+  it("still denies catastrophic commands after bare assignment", () => {
+    const result = checkBashPermission(
+      'A=1 && rm -rf /',
+      "build",
+      RULES,
+      CWD,
+    );
+    assert.equal(result.action, "deny");
+  });
+
+  it("auto-approves bare assignment alone (no follow-up command)", () => {
+    const result = checkBashPermission(
+      'ORDER_ID=abc',
+      "build",
+      RULES,
+      CWD,
+    );
+    assert.equal(result.action, "allow");
+  });
+});
+
 describe("read-only tools (grep/find/ls) use read permission, not bash parsing", () => {
   // These tools are handled via checkFileTarget(permission="read") instead
   // of checkBashPermission. The pattern should never be bash-parsed.

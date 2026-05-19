@@ -67,6 +67,18 @@ export function checkFileTarget(
   return { action: result.action };
 }
 
+/** Check whether a subcommand consists entirely of variable assignments
+ *  (e.g. `A=1`, `ORDER_ID=abc`).  Such commands are always safe — they
+ *  only set env vars in the current shell context and don't execute any
+ *  external command.  Command substitutions within the value (e.g.
+ *  `A=$(cmd)`) are extracted as separate subcommands by the parser and
+ *  checked independently. */
+function isBareAssignment(subcommand: string): boolean {
+  const tokens = subcommand.trim().split(/\s+/);
+  return tokens.length > 0
+    && tokens.every((t) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
+}
+
 /**
  * Check whether a subcommand is `cd <path>` where <path> resolves to
  * cwd or a directory below it.  Such commands are always safe and
@@ -129,6 +141,10 @@ export function checkBashPermission(
     // cd to the project or a subdirectory is always safe and the LLM
     // frequently emits it as a preamble (e.g. "cd <cwd> && git diff").
     if (isCdWithinProject(sub, absCwd)) continue;
+
+    // Bare variable assignments (e.g. ORDER_ID=abc) are always safe.
+    // Command substitutions in values are extracted as separate subcommands.
+    if (isBareAssignment(sub)) continue;
 
     const result = evaluatePermission("bash", sub, profile, rules);
     if (result.action === "deny") {

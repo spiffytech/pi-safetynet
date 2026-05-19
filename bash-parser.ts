@@ -29,7 +29,7 @@ function dblQuotedToString(p: WordPart): string | null {
 }
 
 function wordToString(w: Word): string | null {
-  if (!w.parts?.length) return null;
+  if (!w?.parts?.length) return null;
   return w.parts
     .map((p: WordPart) => {
       if (p.type === "Literal") return p.value ?? "";
