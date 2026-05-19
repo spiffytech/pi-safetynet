@@ -115,6 +115,7 @@ async function resolvePermission(
     target: string;
     check: PermissionCheck;
     recheck: () => PermissionCheck;
+    cwd: string;
   },
 ): Promise<{ block: boolean; reason: string } | undefined> {
   const { action } = opts.check;
@@ -187,7 +188,7 @@ async function resolvePermission(
     const patterns: string[] = [];
     for (const [original, edited] of approved) {
       if (isFile) {
-        const pattern = toRecursiveGlob(normalizePathForMatching(edited, process.cwd()));
+        const pattern = toRecursiveGlob(normalizePathForMatching(edited, opts.cwd));
         patterns.push(pattern);
       } else {
         patterns.push(edited);
@@ -201,7 +202,7 @@ async function resolvePermission(
         if (approved.has(rt.path)) {
           redirectPatterns.push({
             permission: rt.permission,
-            pattern: toRecursiveGlob(normalizePathForMatching(rt.path, process.cwd())),
+            pattern: toRecursiveGlob(normalizePathForMatching(rt.path, opts.cwd)),
           });
         }
       }
@@ -279,10 +280,12 @@ async function handleToolCall(
   try {
     const profile = getCurrentProfile();
 
+    const cwd = ctx.cwd;
+
     if (event.toolName === "bash") {
       const command = event.input.command as string;
       const rules = storage.getAllRules();
-      const check = checkBashPermission(command, profile, rules);
+      const check = checkBashPermission(command, profile, rules, cwd);
 
       if (check.action === "deny") {
         ctx.abort();
@@ -295,18 +298,20 @@ async function handleToolCall(
         permission: "bash",
         target: command,
         check,
-        recheck: () => checkBashPermission(command, profile, storage.getAllRules()),
+        recheck: () => checkBashPermission(command, profile, storage.getAllRules(), cwd),
+        cwd,
       });
     }
 
     if (event.toolName === "grep" || event.toolName === "find" || event.toolName === "ls") {
-      const filePath = (event.input.path as string) ?? process.cwd();
+      const filePath = (event.input.path as string) ?? cwd;
       const rules = storage.getAllRules();
       return resolvePermission(ctx, {
         permission: "read",
         target: filePath,
-        check: checkFileTarget(filePath, "read", profile, rules),
-        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules()),
+        check: checkFileTarget(filePath, "read", profile, rules, cwd),
+        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules(), cwd),
+        cwd,
       });
     }
 
@@ -320,8 +325,9 @@ async function handleToolCall(
       return resolvePermission(ctx, {
         permission: "edit",
         target: filePath,
-        check: checkFileTarget(filePath, "edit", profile, rules),
-        recheck: () => checkFileTarget(filePath, "edit", profile, storage.getAllRules()),
+        check: checkFileTarget(filePath, "edit", profile, rules, cwd),
+        recheck: () => checkFileTarget(filePath, "edit", profile, storage.getAllRules(), cwd),
+        cwd,
       });
     }
 
@@ -331,8 +337,9 @@ async function handleToolCall(
       return resolvePermission(ctx, {
         permission: "read",
         target: filePath,
-        check: checkFileTarget(filePath, "read", profile, rules),
-        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules()),
+        check: checkFileTarget(filePath, "read", profile, rules, cwd),
+        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules(), cwd),
+        cwd,
       });
     }
 
@@ -343,6 +350,7 @@ async function handleToolCall(
         target: `tool:${event.toolName}`,
         check: { action: "ask", reason: "Unknown tool in plan mode requires approval" },
         recheck: () => ({ action: "ask", reason: "Unknown tool in plan mode requires approval" }),
+        cwd,
       });
     }
   } catch (err) {
