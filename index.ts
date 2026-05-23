@@ -390,7 +390,7 @@ function swapEphemeralMessage(messages: AgentMessage[], ephemeralMessage: AgentM
 }
 
 function formatPlanForDisplay(content: string): string {
-  return `Plan ready for review.\n\n${content}\n\nIf you want revisions, reply with feedback. If you approve, switch to build mode with /safetynet:build and tell me to begin.`;
+  return `Plan ready for review.\n\n${content}`;
 }
 
 /** Read the plan file and return a present-result, or an error result if absent/empty. */
@@ -437,14 +437,17 @@ function buildPlanComponent(theme: Theme, content: string): Container {
   const md = new Markdown(content, 1, 0, getMarkdownTheme());
   container.addChild(md);
 
-  // Footer hint
-  const footer = new Text(theme.fg("muted", "  ↵ Reply with feedback, or run /safetynet:build to approve"), 0, 1);
-  container.addChild(footer);
-
   // Wrap in a tinted box (cyan-tinted bg, tuned for dark themes)
   const box = new Box(0, 0, (s) => `\x1b[48;2;42;53;70m${s}\x1b[49m`);
   box.addChild(container);
-  return box;
+
+  // Footer hint (outside the box so it's visually separate)
+  const footer = new Text(theme.fg("muted", "  ↵ Reply with feedback, or run /safetynet:build to approve"), 0, 1);
+
+  const outer = new Container();
+  outer.addChild(box);
+  outer.addChild(footer);
+  return outer;
 }
 
 function renderPresentResult(result: { content: { type: string; text?: string }[]; details: unknown }, _options: unknown, theme: Theme) {
