@@ -157,8 +157,8 @@ describe("evaluatePermission", () => {
     });
 
     it("returns ask for unknown bash commands (catch-all * rule)", () => {
-      assert.equal(evaluatePermission("bash", "hostname", "build", BASELINE).action, "ask");
-      assert.equal(evaluatePermission("bash", "hostname", "plan", BASELINE).action, "ask");
+      assert.equal(evaluatePermission("bash", "gcc", "build", BASELINE).action, "ask");
+      assert.equal(evaluatePermission("bash", "gcc", "plan", BASELINE).action, "ask");
       assert.equal(evaluatePermission("bash", "python3", "build", BASELINE).action, "ask");
     });
 
@@ -507,7 +507,7 @@ describe("composition: bash permission end-to-end", () => {
 
   describe("unapproved tracking", () => {
     it("lists only unapproved subcommands", () => {
-      assert.deepEqual(checkBashPermission("hostname", "build", BASELINE).unapproved, ["hostname"]);
+      assert.deepEqual(checkBashPermission("gcc", "build", BASELINE).unapproved, ["gcc"]);
     });
 
     it("empty unapproved when all allowed", () => {
