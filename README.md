@@ -146,8 +146,11 @@ The approval UI shows exactly what needs approval — individual subcommands in 
 | Flag | Default | Description |
 |---|---|---|
 | `--build` | `false` | Start in build mode (full access) |
+| `--allow <rules>` | | Comma-separated allow rules (format: `permission: pattern`) |
 | `--plan-on-error` | `true` | Enable plan-on-error mode |
 | `--timed-approval-minutes` | `15` | Minutes for timed approval duration |
+
+**Example:** `pi --build --allow "edit: src/**, bash: npm *"`
 
 ## Commands
 
@@ -186,7 +189,8 @@ pi-safetynet uses a layered rule system (last match wins):
 1. **Baseline** — Built-in rules shipped with pi-safetynet (read-only commands auto-approved, writes asked, etc.)
 2. **Global** — User-defined rules from `~/.config/pi-safetynet/config.json` (see below)
 3. **Persisted** — User-approved rules saved to `.pi/extensions/safetynet/approvals.json`
-4. **Session** — Rules added during this session
+4. **Flag** — Rules from the `--allow` CLI flag (session-scoped, not persisted)
+5. **Session** — Rules added interactively during this session
 5. **Temporary** — Time-limited or turn-limited rules
 
 ### Global config

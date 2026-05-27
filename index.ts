@@ -61,6 +61,31 @@ function getPlanFilePath(sessionId: string): string {
 /** Default number of minutes for timed approval. */
 const DEFAULT_TIMED_APPROVAL_MINUTES = 15;
 
+const VALID_PERMISSIONS = new Set(["bash", "edit", "read", "*"]);
+
+/**
+ * Parse a comma-separated `--allow` flag value into rules.
+ * Format: "permission: pattern, permission: pattern"
+ * Example: "edit: src/**, bash: npm *"
+ */
+export function parseAllowFlag(raw: string): Ruleset {
+  return raw.split(",").flatMap((entry) => {
+    const trimmed = entry.trim();
+    if (!trimmed) return [];
+    const colonIdx = trimmed.indexOf(":");
+    if (colonIdx === -1) return [];
+    const permission = trimmed.slice(0, colonIdx).trim();
+    const pattern = trimmed.slice(colonIdx + 1).trim();
+    if (!VALID_PERMISSIONS.has(permission) || !pattern) return [];
+    return [{
+      permission: permission as Rule["permission"],
+      pattern,
+      action: "allow" as const,
+      modes: ["build" as const],
+    }];
+  });
+}
+
 function getTimedApprovalMinutes(): number {
   const val = pi.getFlag("timed-approval-minutes");
   if (typeof val === "string") {
@@ -606,6 +631,7 @@ function registerCommands(pi: ExtensionAPI) {
       const baseline = getBaselineRules();
       const global = storage.global.getRules();
       const persisted = storage.persisted.getRules();
+      const flag = storage.flag.getRules();
       const session = storage.session.getRules();
       const temp = storage.temp.getRules();
 
@@ -625,6 +651,10 @@ function registerCommands(pi: ExtensionAPI) {
 
       if (persisted.length > 0) {
         lines.push("", "--- PERSISTED ---", ...formatRules(persisted));
+      }
+
+      if (flag.length > 0) {
+        lines.push("", "--- FLAG (--allow) ---", ...formatRules(flag));
       }
 
       if (session.length > 0) {
@@ -720,6 +750,11 @@ export default function safetynetExtension(api: ExtensionAPI) {
     default: String(DEFAULT_TIMED_APPROVAL_MINUTES),
   });
 
+  pi.registerFlag("allow", {
+    description: "Add temporary allow rules (comma-separated, format: \"permission: pattern\")",
+    type: "string",
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     await restoreSessionState(ctx, { init: true, notify: true });
 
@@ -741,6 +776,13 @@ export default function safetynetExtension(api: ExtensionAPI) {
     if (pi.getFlag("plan-on-error") === true) {
       setPlanOnError(true, pi);
       updateStatus(ctx);
+    }
+    const allowFlag = pi.getFlag("allow");
+    if (typeof allowFlag === "string" && allowFlag.trim()) {
+      const rules = parseAllowFlag(allowFlag);
+      if (rules.length > 0) {
+        storage.addFlagRules(rules);
+      }
     }
   });
 

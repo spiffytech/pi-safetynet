@@ -150,6 +150,7 @@ export class PermissionStorage {
   session: SessionRuleStore;
   persisted: PersistedRuleStore;
   global: GlobalRuleStore;
+  flag: SessionRuleStore;
   temp: TempRuleStore;
   private cwd: string;
 
@@ -158,6 +159,7 @@ export class PermissionStorage {
     this.session = new SessionRuleStore();
     this.persisted = new PersistedRuleStore(cwd);
     this.global = new GlobalRuleStore();
+    this.flag = new SessionRuleStore();
     this.temp = new TempRuleStore();
   }
 
@@ -167,11 +169,15 @@ export class PermissionStorage {
   }
 
   getAllRules(): Ruleset {
-    return [...BASELINE, ...this.global.getRules(), ...this.persisted.getRules(), ...this.session.getRules(), ...this.temp.getRules()];
+    return [...BASELINE, ...this.global.getRules(), ...this.persisted.getRules(), ...this.flag.getRules(), ...this.session.getRules(), ...this.temp.getRules()];
   }
 
   addSessionRules(rules: Ruleset): void {
     this.session.addRules(rules);
+  }
+
+  addFlagRules(rules: Ruleset): void {
+    this.flag.addRules(rules);
   }
 
   addTempRules(rules: TempRule[]): void {
