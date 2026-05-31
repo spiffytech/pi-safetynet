@@ -515,10 +515,38 @@ function renderSubagentResult(
     return container;
   }
 
-  // Final result: just show text
+  // Final result
+  const expanded = options.expanded;
   const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text")?.text;
   if (!text) return undefined;
-  return new Text(theme.fg("toolOutput", text), 0, 0);
+
+  if (!expanded) {
+    // Collapsed: truncated preview + hint
+    const lines = text.split("\n");
+    const preview = lines.slice(-5).join("\n");
+    let summary = "";
+    if (activities && activities.length > 0) {
+      const actSlice = activities.slice(-3);
+      for (const act of actSlice) {
+        summary += theme.fg("muted", `  › ${act}`) + "\n";
+      }
+    }
+    summary += theme.fg("toolOutput", preview);
+    summary += "\n" + theme.fg("muted", "(Ctrl+O to expand)");
+    return new Text(summary, 0, 0);
+  }
+
+  // Expanded: full output with activities and markdown
+  const container = new Container();
+  if (activities && activities.length > 0) {
+    for (const act of activities) {
+      container.addChild(new Text(theme.fg("muted", `  › ${act}`), 0, 0));
+    }
+    container.addChild(new Text("", 0, 0));
+  }
+  const mdTheme = getMarkdownTheme();
+  container.addChild(new Markdown(text, 0, 0, mdTheme));
+  return container;
 }
 
 function registerPlanTools(pi: ExtensionAPI) {
