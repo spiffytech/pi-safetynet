@@ -498,7 +498,7 @@ function renderSubagentResult(
   // During execution: show activity feed + text preview
   if (isPartial && activities && activities.length > 0) {
     const container = new Container();
-    const maxShow = 6;
+    const maxShow = 3;
     const overflow = activities.length - maxShow;
     const shown = overflow > 0 ? activities.slice(-maxShow) : activities;
     if (overflow > 0) {
