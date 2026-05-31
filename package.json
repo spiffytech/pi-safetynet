@@ -14,7 +14,7 @@
   "license": "ISC",
   "dependencies": {
     "@aliou/sh": "^0.1.0",
-    "@mariozechner/pi-coding-agent": "^0.73.1",
+    "@earendil-works/pi-coding-agent": "^0.78.0",
     "picomatch": "^4.0.4",
     "typescript": "^6.0.3",
     "valibot": "^1.4.1"
