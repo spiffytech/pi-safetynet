@@ -510,7 +510,7 @@ function renderSubagentResult(
     // If there's also text preview, show it below
     const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text")?.text;
     if (text?.trim()) {
-      container.addChild(new Text(theme.fg("toolOutput", `  ${text.split("\n").slice(-3).join("\n  ")}`), 0, 0));
+      container.addChild(new Text(theme.fg("toolOutput", `  ${text.split("\n").slice(-6).join("\n  ")}`), 0, 0));
     }
     return container;
   }
