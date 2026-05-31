@@ -48,6 +48,9 @@ import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
 
 let storage: PermissionStorage;
 
+/** Current model display string (provider/model-id), updated via model_select events. */
+let currentModelDisplay: string = "";
+
 /** Extension directory — resolved at module load via import.meta.url */
 const extDir = dirname(fileURLToPath(import.meta.url));
 
@@ -485,6 +488,20 @@ function renderPresentResult(result: { content: { type: string; text?: string }[
   return buildPlanComponent(theme, markdown);
 }
 
+/** Render subagent tool call title bar with model info. */
+function renderSubagentCall(
+  label: string,
+  args: { prompt: string; model?: string },
+  theme: Theme,
+) {
+  let content = theme.fg("toolTitle", theme.bold(label));
+  const modelDisplay = args.model ?? currentModelDisplay;
+  if (modelDisplay) {
+    content += theme.fg("muted", ` — ${modelDisplay}`);
+  }
+  return new Text(content, 0, 0);
+}
+
 /** Render subagent tool results with live activity feed during execution. */
 function renderSubagentResult(
   result: { content: { type: string; text?: string }[]; details: unknown },
@@ -763,6 +780,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 			model: Type.Optional(Type.String({ description: "Model to use (format: provider/model-id, e.g. anthropic/claude-sonnet-4-20250514). Defaults to current model." })),
 		}),
 		renderResult: renderSubagentResult,
+		renderCall: (args, theme) => renderSubagentCall("Subagent Explore", args, theme),
 		...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			return runSubagent({
@@ -790,6 +808,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 			model: Type.Optional(Type.String({ description: "Model to use (format: provider/model-id, e.g. anthropic/claude-sonnet-4-20250514). Defaults to current model." })),
 		}),
 		renderResult: renderSubagentResult,
+		renderCall: (args, theme) => renderSubagentCall("Subagent Build", args, theme),
 		...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			return runSubagent({
@@ -892,7 +911,14 @@ export default function safetynetExtension(api: ExtensionAPI) {
     type: "string",
   });
 
+  pi.on("model_select", async (event) => {
+    currentModelDisplay = `${event.model.provider}/${event.model.id}`;
+  });
+
   pi.on("session_start", async (_event, ctx) => {
+    if (ctx.model) {
+      currentModelDisplay = `${ctx.model.provider}/${ctx.model.id}`;
+    }
     await restoreSessionState(ctx, { init: true, notify: true });
 
     // Ensure plans directory exists
