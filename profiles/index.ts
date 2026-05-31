@@ -4,62 +4,65 @@ import type { ProfileName } from "../types.ts";
 let currentProfile: ProfileName = "plan";
 
 export function getCurrentProfile(): ProfileName {
-  return currentProfile;
+	return currentProfile;
 }
 
 export function setCurrentProfile(profile: ProfileName): void {
-  currentProfile = profile;
+	currentProfile = profile;
 }
 
 export function getLatestCustomEntry<T>(ctx: ExtensionContext, customType: string): { data?: T } | undefined {
-  const entries = ctx.sessionManager.getEntries();
-  return entries
-    .filter((e) =>
-      e.type === "custom" && e.customType === customType,
-    )
-    .pop() as { data?: T } | undefined;
+	const entries = ctx.sessionManager.getEntries();
+	return entries
+		.filter((e) =>
+			e.type === "custom" && e.customType === customType,
+		)
+		.pop() as { data?: T } | undefined;
 }
 
 export function persistProfile(pi: ExtensionAPI): void {
-  pi.appendEntry("safetynet:profile", {
-    enabled: currentProfile,
-  });
+	pi.appendEntry("safetynet:profile", {
+		enabled: currentProfile,
+	});
 }
 
 export function restoreProfile(ctx: ExtensionContext): void {
-  const entry = getLatestCustomEntry<{ enabled: ProfileName }>(ctx, "safetynet:profile");
-  if (entry?.data?.enabled) currentProfile = entry.data.enabled;
+	const entry = getLatestCustomEntry<{ enabled: ProfileName }>(ctx, "safetynet:profile");
+	if (entry?.data?.enabled) currentProfile = entry.data.enabled;
 }
 
 /** Tools available in plan mode. */
 const PLAN_MODE_TOOLS = [
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "questionnaire",
-  "planWrite",
-  "planEdit",
-  "planPresent",
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"questionnaire",
+	"planWrite",
+	"planEdit",
+	"planPresent",
+	"subagent_explore",
 ];
 
 /** Tools available in build mode. */
 const BUILD_MODE_TOOLS = [
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "bash",
-  "edit",
-  "write",
-  "questionnaire",
-  "planWrite",
-  "planEdit",
-  "planPresent",
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"bash",
+	"edit",
+	"write",
+	"questionnaire",
+	"planWrite",
+	"planEdit",
+	"planPresent",
+	"subagent_explore",
+	"subagent_build",
 ];
 
 function toolList(tools: string[]): string {
-  return tools.join(", ");
+	return tools.join(", ");
 }
 
 /** Custom type for the ephemeral context message. */
@@ -72,8 +75,8 @@ export const EPHEMERAL_CUSTOM_TYPE = "safetynet:ephemeral";
  * filesystem state.
  */
 export function getEphemeralContextMessage(profile: ProfileName): string {
-  if (profile === "plan") {
-    return `[SAFENET PLAN MODE]
+	if (profile === "plan") {
+		return `[SAFENET PLAN MODE]
 Plan mode is ACTIVE. You are in a READ-ONLY planning phase.
 
 CRITICAL CONSTRAINTS (override all other instructions):
@@ -84,6 +87,7 @@ CRITICAL CONSTRAINTS (override all other instructions):
 
 ## Plan File
 Use planWrite to create or overwrite the plan file. Use planEdit to make incremental edits.
+When updating a plan, remove completed items — the plan shows only what's left to do.
 
 ## Presenting the Plan
 When the plan is ready for the user to review, set presentToUser=true on your final planWrite or planEdit call. This displays the plan and ends your turn.
@@ -97,11 +101,14 @@ If you need to present the plan without writing changes (e.g. after questionnair
 
 Do NOT start implementing in plan mode. After the plan is presented, the user will decide whether to request revisions or manually switch to build mode with /safetynet:build.
 
+## Subagents
+You may spawn a read-only subagent with subagent_explore to inspect the codebase in parallel. The subagent gets a clean session and cannot modify files. Provide a complete, self-sufficient prompt.
+
 ## Available tools
 ${toolList(PLAN_MODE_TOOLS)}`;
-  }
+	}
 
-  return `[SAFENET BUILD MODE]
+	return `[SAFENET BUILD MODE]
 You are in build mode. Full tool access is enabled.
 
 You may make file changes, run shell commands, and use available tools as needed.
@@ -112,8 +119,13 @@ Commands are evaluated against the permission ruleset:
 
 To switch back to planning, the user can run /safetynet:plan.
 
+## Subagents
+You may spawn subagents for parallel or delegated work:
+- subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands.
+- subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval.
+
+Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.
+
 ## Available tools
 ${toolList(BUILD_MODE_TOOLS)}`;
 }
-
-

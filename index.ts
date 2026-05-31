@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction } from "./types.ts";
 import questionnaire from "./questionnaire.ts";
+import { runSubagent } from "./subagent.ts";
 import {
   getBaselineRules,
   PermissionStorage,
@@ -368,7 +369,7 @@ async function handleToolCall(
       });
     }
 
-    const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "questionnaire", "planWrite", "planEdit", "planPresent"]);
+    const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "questionnaire", "planWrite", "planEdit", "planPresent", "subagent_explore", "subagent_build"]);
     if (!knownTools.has(event.toolName) && profile === "plan") {
       return resolvePermission(ctx, {
         permission: "bash",
@@ -482,6 +483,42 @@ function renderPresentResult(result: { content: { type: string; text?: string }[
     return new Text(theme.fg("warning", text?.text ?? "No plan content"), 1, 0);
   }
   return buildPlanComponent(theme, markdown);
+}
+
+/** Render subagent tool results with live activity feed during execution. */
+function renderSubagentResult(
+  result: { content: { type: string; text?: string }[]; details: unknown },
+  options: { expanded: boolean; isPartial: boolean },
+  theme: Theme,
+) {
+  const details = result.details as { activities?: string[] } | undefined;
+  const activities = details?.activities;
+  const isPartial = options.isPartial;
+
+  // During execution: show activity feed + text preview
+  if (isPartial && activities && activities.length > 0) {
+    const container = new Container();
+    const maxShow = 6;
+    const overflow = activities.length - maxShow;
+    const shown = overflow > 0 ? activities.slice(-maxShow) : activities;
+    if (overflow > 0) {
+      container.addChild(new Text(theme.fg("muted", `  … +${overflow} earlier`), 0, 0));
+    }
+    for (const act of shown) {
+      container.addChild(new Text(theme.fg("toolOutput", `  › ${act}`), 0, 0));
+    }
+    // If there's also text preview, show it below
+    const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text")?.text;
+    if (text?.trim()) {
+      container.addChild(new Text(theme.fg("toolOutput", `  ${text.split("\n").slice(-3).join("\n  ")}`), 0, 0));
+    }
+    return container;
+  }
+
+  // Final result: just show text
+  const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text")?.text;
+  if (!text) return undefined;
+  return new Text(theme.fg("toolOutput", text), 0, 0);
 }
 
 function registerPlanTools(pi: ExtensionAPI) {
@@ -671,6 +708,77 @@ function registerCommands(pi: ExtensionAPI) {
   });
 }
 
+function registerSubagentTools(pi: ExtensionAPI) {
+
+	// subagent_explore is also available in plan mode
+	// subagent_build is build-only
+
+	// Get timed-approval-minutes flag for subagent build
+	// (subagent uses parent's storage for rule propagation)
+	function resolveModel(modelSpec: string | undefined, ctx: ExtensionContext) {
+		if (!modelSpec) return ctx.model;
+		const slashIdx = modelSpec.indexOf("/");
+		if (slashIdx < 1) return ctx.model;
+		const provider = modelSpec.slice(0, slashIdx);
+		const modelId = modelSpec.slice(slashIdx + 1);
+		return ctx.modelRegistry.find(provider, modelId) ?? ctx.model;
+	}
+
+	pi.registerTool({
+		name: "subagent_explore",
+		label: "Explore",
+		description: "Spawn a read-only subagent to explore the codebase autonomously.\n\nWhen to use: searching the codebase, reading multiple files, tracing call chains, understanding architecture, answering questions about the code.\nWhen NOT to use: reading a single known file (use read), searching for a specific class (use find/grep), any task requiring file modification.\n\nKey properties:\n- Read-only: cannot modify files or run commands\n- Clean session: no conversation history — provide a complete, self-sufficient prompt\n- Runs in parallel: you can dispatch multiple explore agents simultaneously\n\nGuidance: Your prompt is the subagent's entire context. Be detailed and specific — tell it exactly what to find and how to report findings back.",
+		promptSnippet: "Spawn a read-only subagent to explore the codebase",
+		promptGuidelines: ["Use subagent_explore when you need to inspect or search the codebase in parallel. The subagent gets a clean session — provide a complete, self-sufficient prompt."],
+		parameters: Type.Object({
+			prompt: Type.String({ description: "Complete task description for the subagent" }),
+			model: Type.Optional(Type.String({ description: "Model to use (format: provider/model-id, e.g. anthropic/claude-sonnet-4-20250514). Defaults to current model." })),
+		}),
+		renderResult: renderSubagentResult,
+		...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			return runSubagent({
+				taskType: "explore",
+				prompt: params.prompt,
+				parentCtx: ctx,
+				parentStorage: storage,
+				initialRules: storage.getAllRules(),
+				signal,
+				onUpdate,
+				cwd: ctx.cwd,
+				model: resolveModel(params.model, ctx),
+			});
+		},
+	});
+
+	pi.registerTool({
+		name: "subagent_build",
+		label: "Subagent Build",
+		description: "Spawn a subagent with full build access. Permission prompts are shown to you for approval.\n\nWhen to use: self-contained implementation tasks that can be delegated to a focused agent.\nWhen NOT to use: trivial edits (do them directly), tasks requiring ongoing user interaction, tasks you can complete in a single tool call.\n\nKey properties:\n- Full access: read, write, edit, bash with your permission rules\n- Permission prompts routed to you: you approve or deny commands and file writes\n- Clean session: no conversation history — provide a complete, self-sufficient prompt\n\nGuidance: Include complete requirements in your prompt — file paths, expected behavior, verification commands. The subagent cannot ask you questions.",
+		promptSnippet: "Delegate implementation work to a focused subagent",
+		promptGuidelines: ["Use subagent_build when the task is self-contained and can be delegated to a focused agent. The subagent gets a clean session — provide a complete, self-sufficient prompt."],
+		parameters: Type.Object({
+			prompt: Type.String({ description: "Complete task description for the subagent" }),
+			model: Type.Optional(Type.String({ description: "Model to use (format: provider/model-id, e.g. anthropic/claude-sonnet-4-20250514). Defaults to current model." })),
+		}),
+		renderResult: renderSubagentResult,
+		...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			return runSubagent({
+				taskType: "build",
+				prompt: params.prompt,
+				parentCtx: ctx,
+				parentStorage: storage,
+				initialRules: storage.getAllRules(),
+				signal,
+				onUpdate,
+				cwd: ctx.cwd,
+				model: resolveModel(params.model, ctx),
+			});
+		},
+	});
+}
+
 function registerShortcuts(pi: ExtensionAPI) {
   pi.registerShortcut("ctrl+\\", {
     description: "Toggle between plan and build profile",
@@ -729,6 +837,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
 
   registerPlanTools(pi);
   questionnaire(pi);
+	registerSubagentTools(pi);
   registerCommands(pi);
   registerShortcuts(pi);
 
