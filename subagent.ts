@@ -7,8 +7,6 @@ import type { Model } from "@mariozechner/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
-	readOnlyTools,
-	codingTools,
 	SessionManager,
 	SettingsManager,
 	type CreateAgentSessionResult,
@@ -135,6 +133,7 @@ export interface SubagentOptions {
 	onUpdate?: AgentToolUpdateCallback<unknown> | undefined;
 	cwd: string;
 	model?: Model<any> | undefined;
+	thinkingLevel?: string | undefined;
 }
 
 /** Max agent turns before we abort the subagent. */
@@ -175,7 +174,9 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	const settingsManager = SettingsManager.create(cwd, agentDir);
 	settingsManager.setCompactionEnabled(false);
 
-	const tools = taskType === "explore" ? readOnlyTools : codingTools;
+	const tools = taskType === "explore"
+		? ["read", "grep", "find", "ls"]
+		: ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 	let hitPermissionDenied = false;
 
@@ -235,6 +236,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			cwd,
 			model,
 			tools,
+			thinkingLevel: opts.thinkingLevel as any,
 			modelRegistry,
 			resourceLoader: loader,
 			sessionManager: SessionManager.inMemory(cwd),

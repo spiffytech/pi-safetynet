@@ -13,7 +13,7 @@ import {
   isBashToolResult,
   type Theme,
 } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +50,10 @@ let storage: PermissionStorage;
 
 /** Current model display string (provider/model-id), updated via model_select events. */
 let currentModelDisplay: string = "";
+/** Whether the current model supports extended thinking. */
+let currentModelSupportsReasoning: boolean = false;
+/** Current thinking level, updated via thinking_level_select events. */
+let currentThinkingLevel: string = "off";
 
 /** Extension directory — resolved at module load via import.meta.url */
 const extDir = dirname(fileURLToPath(import.meta.url));
@@ -488,18 +492,24 @@ function renderPresentResult(result: { content: { type: string; text?: string }[
   return buildPlanComponent(theme, markdown);
 }
 
-/** Render subagent tool call title bar with model info. */
+/** Render subagent tool call title bar with model and thinking level info. */
 function renderSubagentCall(
   label: string,
   args: { prompt: string; model?: string },
   theme: Theme,
+  context: any,
 ) {
+  const text = (context.lastComponent as any) ?? new Text("", 0, 0);
   let content = theme.fg("toolTitle", theme.bold(label));
   const modelDisplay = args.model ?? currentModelDisplay;
   if (modelDisplay) {
     content += theme.fg("muted", ` — ${modelDisplay}`);
   }
-  return new Text(content, 0, 0);
+  if (currentModelSupportsReasoning) {
+    content += theme.fg("muted", ` • ${currentThinkingLevel}`);
+  }
+  text.setText(content);
+  return text;
 }
 
 /** Render subagent tool results with live activity feed during execution. */
@@ -507,7 +517,8 @@ function renderSubagentResult(
   result: { content: { type: string; text?: string }[]; details: unknown },
   options: { expanded: boolean; isPartial: boolean },
   theme: Theme,
-) {
+  _context: any,
+): any {
   const details = result.details as { activities?: string[] } | undefined;
   const activities = details?.activities;
   const isPartial = options.isPartial;
@@ -535,7 +546,7 @@ function renderSubagentResult(
   // Final result
   const expanded = options.expanded;
   const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text")?.text;
-  if (!text) return undefined;
+  if (!text) return new Text("(no output)", 0, 0);
 
   if (!expanded) {
     // Collapsed: truncated preview + hint
@@ -780,7 +791,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 			model: Type.Optional(Type.String({ description: "Model to use (format: provider/model-id, e.g. anthropic/claude-sonnet-4-20250514). Defaults to current model." })),
 		}),
 		renderResult: renderSubagentResult,
-		renderCall: (args, theme) => renderSubagentCall("Subagent Explore", args, theme),
+		renderCall: (args, theme, context) => renderSubagentCall("Subagent Explore", args, theme, context),
 		...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			return runSubagent({
@@ -793,6 +804,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 				onUpdate,
 				cwd: ctx.cwd,
 				model: resolveModel(params.model, ctx),
+				thinkingLevel: pi.getThinkingLevel(),
 			});
 		},
 	});
@@ -808,7 +820,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 			model: Type.Optional(Type.String({ description: "Model to use (format: provider/model-id, e.g. anthropic/claude-sonnet-4-20250514). Defaults to current model." })),
 		}),
 		renderResult: renderSubagentResult,
-		renderCall: (args, theme) => renderSubagentCall("Subagent Build", args, theme),
+		renderCall: (args, theme, context) => renderSubagentCall("Subagent Build", args, theme, context),
 		...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			return runSubagent({
@@ -821,6 +833,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 				onUpdate,
 				cwd: ctx.cwd,
 				model: resolveModel(params.model, ctx),
+				thinkingLevel: pi.getThinkingLevel(),
 			});
 		},
 	});
@@ -913,13 +926,20 @@ export default function safetynetExtension(api: ExtensionAPI) {
 
   pi.on("model_select", async (event) => {
     currentModelDisplay = `${event.model.provider}/${event.model.id}`;
+    currentModelSupportsReasoning = event.model.reasoning ?? false;
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("thinking_level_select", async (event) => {
+    currentThinkingLevel = event.level;
+  });
+
+  pi.on("session_start", async (event, ctx) => {
     if (ctx.model) {
       currentModelDisplay = `${ctx.model.provider}/${ctx.model.id}`;
+      currentModelSupportsReasoning = ctx.model.reasoning ?? false;
     }
-    await restoreSessionState(ctx, { init: true, notify: true });
+    currentThinkingLevel = pi.getThinkingLevel();
+    await restoreSessionState(ctx, { init: true, notify: true, replaceSession: event.reason === "fork" });
 
     // Ensure plans directory exists
     mkdirSync(plansDir, { recursive: true });
@@ -978,9 +998,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
     ctx.ui.setWidget("plan", undefined);
   });
 
-  pi.on("session_fork", async (_event, ctx) => {
-    await restoreSessionState(ctx, { init: true, replaceSession: true });
-  });
+
 
   pi.on("session_tree", async (_event, ctx) => {
     await restoreSessionState(ctx, { replaceSession: true });
