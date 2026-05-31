@@ -1,5 +1,5 @@
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
   type Focusable,
@@ -9,8 +9,8 @@ import {
   truncateToWidth,
   type TUI,
   visibleWidth,
-} from "@mariozechner/pi-tui";
-import type { Theme } from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-tui";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { toDisplayPath } from "./project.ts";
 
 // ─── Public types ───────────────────────────────────────────────────────────

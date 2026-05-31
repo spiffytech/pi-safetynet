@@ -4,12 +4,12 @@
  * Single question: simple options list
  * Multiple questions: tab bar navigation between questions
  *
- * Adapted from @mariozechner/pi-coding-agent/examples/extensions/questionnaire.ts
+ * Adapted from @earendil-works/pi-coding-agent/examples/extensions/questionnaire.ts
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { Theme } from "@mariozechner/pi-coding-agent";
-import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 // Types

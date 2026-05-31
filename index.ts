@@ -3,9 +3,9 @@ import type {
   ExtensionContext,
   ToolCallEvent,
   ToolResultEvent,
-} from "@mariozechner/pi-coding-agent";
-import { Box, Container, Markdown, Text } from "@mariozechner/pi-tui";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+} from "@earendil-works/pi-coding-agent";
+import { Box, Container, Markdown, Text } from "@earendil-works/pi-tui";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   createEditTool,
   createWriteTool,
@@ -13,7 +13,7 @@ import {
   getMarkdownTheme,
   isBashToolResult,
   type Theme,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

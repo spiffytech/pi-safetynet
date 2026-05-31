@@ -8,8 +8,8 @@
  *   Rules approved during the subagent session propagate to the parent.
  */
 
-import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@mariozechner/pi-coding-agent";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Rule, Ruleset, TempRule, ProfileName } from "./types.ts";
 import type { PermissionPromptOptions } from "./prompts.ts";
 import { showPermissionPrompt } from "./prompts.ts";

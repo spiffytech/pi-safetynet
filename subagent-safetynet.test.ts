@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createSubagentSafetynetExtension } from "./subagent-safetynet.ts";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Rule, Ruleset, TempRule } from "./types.ts";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

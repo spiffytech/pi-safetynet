@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Rule, Ruleset, TempRule, ProfileName } from "../types.ts";
 import { findPiConfigDir } from "../project.ts";
 import { loadGlobalRules, addGlobalRules as addGlobalRulesToConfig } from "../global-config.ts";

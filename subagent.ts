@@ -2,16 +2,16 @@
  * Subagent orchestration — spawn in-process AgentSessions via the SDK.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { Model } from "@mariozechner/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
 	SessionManager,
 	SettingsManager,
 	type CreateAgentSessionResult,
-} from "@mariozechner/pi-coding-agent";
-import type { AgentToolUpdateCallback } from "@mariozechner/pi-agent-core";
+} from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import type { Ruleset } from "./types.ts";
 import type { PermissionStorage } from "./permissions/index.ts";
 import { toDisplayPath } from "./project.ts";
