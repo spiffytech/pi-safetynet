@@ -123,6 +123,47 @@ function createDiagnosticExtension(): (pi: ExtensionAPI) => void {
 
 export type SubagentTaskType = "explore" | "build";
 
+export interface SubagentUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+}
+
+export const ZERO_USAGE: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+
+/** Add two SubagentUsage objects, returning a new object. */
+export function addUsage(a: SubagentUsage, b: SubagentUsage): SubagentUsage {
+	return {
+		input: a.input + b.input,
+		output: a.output + b.output,
+		cacheRead: a.cacheRead + b.cacheRead,
+		cacheWrite: a.cacheWrite + b.cacheWrite,
+		cost: a.cost + b.cost,
+	};
+}
+
+/** Format a token count like the built-in footer (1.2k, 45k, 1.5M). */
+export function formatTokenCount(count: number): string {
+	if (count < 1000) return count.toString();
+	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+	if (count < 1000000) return `${Math.round(count / 1000)}k`;
+	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+	return `${Math.round(count / 1000000)}M`;
+}
+
+/** Format SubagentUsage as a compact string (e.g. "+↑20k ↓8k $0.023"). */
+export function formatSubagentUsage(usage: SubagentUsage): string {
+	const parts: string[] = [];
+	if (usage.input) parts.push(`↑${formatTokenCount(usage.input)}`);
+	if (usage.output) parts.push(`↓${formatTokenCount(usage.output)}`);
+	if (usage.cacheRead) parts.push(`R${formatTokenCount(usage.cacheRead)}`);
+	if (usage.cacheWrite) parts.push(`W${formatTokenCount(usage.cacheWrite)}`);
+	if (usage.cost) parts.push(`$${usage.cost.toFixed(3)}`);
+	return parts.join(" ");
+}
+
 export interface SubagentOptions {
 	taskType: SubagentTaskType;
 	prompt: string;
@@ -283,11 +324,12 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	let hitTurnLimit = false;
 	let hitTimeout = false;
 	const activities: string[] = [];
+	const cumulativeUsage: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 
 	const emitUpdate = () => {
 		onUpdate?.({
 			content: [{ type: "text", text: fullText }],
-			details: { activities },
+			details: { activities, usage: { ...cumulativeUsage } },
 		});
 	};
 
@@ -300,6 +342,17 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			const delta = event.assistantMessageEvent;
 			if (delta.type === "text_delta" && delta.delta) {
 				fullText += delta.delta;
+				emitUpdate();
+			}
+		}
+		if (event.type === "message_end") {
+			const msg = event.message;
+			if (msg.role === "assistant" && msg.usage) {
+				cumulativeUsage.input += msg.usage.input || 0;
+				cumulativeUsage.output += msg.usage.output || 0;
+				cumulativeUsage.cacheRead += msg.usage.cacheRead || 0;
+				cumulativeUsage.cacheWrite += msg.usage.cacheWrite || 0;
+				cumulativeUsage.cost += msg.usage.cost?.total || 0;
 				emitUpdate();
 			}
 		}
@@ -330,7 +383,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 		if (!aborted && !hitTurnLimit && !hitTimeout && !hitPermissionDenied) {
 			return {
 				content: [{ type: "text", text: `Subagent error: ${err}` }],
-				details: { error: String(err), activities },
+				details: { error: String(err), activities, usage: { ...cumulativeUsage } },
 			};
 		}
 	} finally {
@@ -346,7 +399,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			: "Subagent completed with no output.";
 		return {
 			content: [{ type: "text", text: reason }],
-			details: { aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, taskType, activities },
+			details: { aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, taskType, activities, usage: { ...cumulativeUsage } },
 		};
 	}
 
@@ -357,6 +410,6 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 
 	return {
 		content: [{ type: "text", text: fullText + suffix }],
-		details: { taskType, aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, turnCount, activities },
+		details: { taskType, aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, turnCount, activities, usage: { ...cumulativeUsage } },
 	};
 }

@@ -9,6 +9,7 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
   createEditTool,
   createWriteTool,
+  FooterComponent,
   getMarkdownTheme,
   isBashToolResult,
   type Theme,
@@ -19,7 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction } from "./types.ts";
 import questionnaire from "./questionnaire.ts";
-import { runSubagent } from "./subagent.ts";
+import { runSubagent, addUsage, formatSubagentUsage, ZERO_USAGE, type SubagentUsage } from "./subagent.ts";
 import {
   getBaselineRules,
   PermissionStorage,
@@ -54,6 +55,70 @@ let currentModelDisplay: string = "";
 let currentModelSupportsReasoning: boolean = false;
 /** Current thinking level, updated via thinking_level_select events. */
 let currentThinkingLevel: string = "off";
+
+/** Cumulative subagent usage for the current turn. Reset on agent_end. */
+let subagentUsage: SubagentUsage = { ...ZERO_USAGE };
+/** Session reference captured during session_start for footer construction. */
+let footerSessionRef: any = null;
+
+/** Format subagent usage and refresh the footer to include it. */
+function refreshSubagentFooter(ctx: ExtensionContext) {
+	const formatted = formatSubagentUsage(subagentUsage);
+	const hasUsage = formatted.length > 0;
+
+	if (!hasUsage) {
+		ctx.ui.setFooter(undefined);
+		return;
+	}
+
+	ctx.ui.setFooter((_tui, theme, footerData) => {
+		const session = footerSessionRef;
+		const footer = session ? new FooterComponent(session, footerData) : null;
+
+		return {
+			render(width: number) {
+				if (!footer) return ["", formatted];
+				const lines = footer.render(width);
+
+				// Inject subagent segment into the stats line (index 1)
+				if (lines.length >= 2) {
+					const statsLine = lines[1]!;
+					const segment = `· subagents +${formatted}`;
+					// Find the padding between stats (left) and model info (right).
+					// The footer uses 2+ spaces as the separator between left and right sides.
+					const stripped = statsLine.replace(/\x1b\[[0-9;]*m/g, "");
+					const match = stripped.match(/ {2,}(?=\S)/);
+					if (match && match.index !== undefined) {
+						// Map text position back to raw string index
+						let rawIdx = 0;
+						let textIdx = 0;
+						while (textIdx < match.index && rawIdx < statsLine.length) {
+							if (statsLine[rawIdx] === "\x1b") {
+								while (rawIdx < statsLine.length && statsLine[rawIdx] !== "m") rawIdx++;
+								rawIdx++;
+							} else {
+								textIdx++;
+								rawIdx++;
+							}
+						}
+						lines[1] = statsLine.slice(0, rawIdx) + segment + "  " + statsLine.slice(rawIdx);
+					} else {
+						// No padding found — append at end
+						lines[1] = statsLine + "  " + segment;
+					}
+				}
+
+				return lines;
+			},
+			invalidate() {
+				footer?.invalidate();
+			},
+			dispose() {
+				footer?.dispose();
+			},
+		};
+	});
+}
 
 /** Extension directory — resolved at module load via import.meta.url */
 const extDir = dirname(fileURLToPath(import.meta.url));
@@ -794,7 +859,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 		renderCall: (args, theme, context) => renderSubagentCall("Subagent Explore", args, theme, context),
 		...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			return runSubagent({
+			const result = await runSubagent({
 				taskType: "explore",
 				prompt: params.prompt,
 				parentCtx: ctx,
@@ -806,6 +871,11 @@ function registerSubagentTools(pi: ExtensionAPI) {
 				model: resolveModel(params.model, ctx),
 				thinkingLevel: pi.getThinkingLevel(),
 			});
+			if (result.details && typeof result.details === "object" && "usage" in result.details) {
+				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
+				refreshSubagentFooter(ctx);
+			}
+			return result;
 		},
 	});
 
@@ -823,7 +893,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 		renderCall: (args, theme, context) => renderSubagentCall("Subagent Build", args, theme, context),
 		...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			return runSubagent({
+			const result = await runSubagent({
 				taskType: "build",
 				prompt: params.prompt,
 				parentCtx: ctx,
@@ -835,6 +905,11 @@ function registerSubagentTools(pi: ExtensionAPI) {
 				model: resolveModel(params.model, ctx),
 				thinkingLevel: pi.getThinkingLevel(),
 			});
+			if (result.details && typeof result.details === "object" && "usage" in result.details) {
+				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
+				refreshSubagentFooter(ctx);
+			}
+			return result;
 		},
 	});
 }
@@ -934,6 +1009,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
   });
 
   pi.on("session_start", async (event, ctx) => {
+    footerSessionRef = (event as any).session ?? (ctx as any).session ?? null;
     if (ctx.model) {
       currentModelDisplay = `${ctx.model.provider}/${ctx.model.id}`;
       currentModelSupportsReasoning = ctx.model.reasoning ?? false;
@@ -975,6 +1051,11 @@ export default function safetynetExtension(api: ExtensionAPI) {
   // Clear turn-limited temp rules when the agent finishes (user gets a turn).
   pi.on("agent_end", async (_event, ctx) => {
     storage.temp.clearTurnRules();
+    // Reset subagent usage and restore default footer
+    if (subagentUsage.input || subagentUsage.output || subagentUsage.cacheRead || subagentUsage.cacheWrite || subagentUsage.cost) {
+      subagentUsage = { ...ZERO_USAGE };
+      ctx.ui.setFooter(undefined);
+    }
   });
 
   // The context hook fires before every API call. We use it to swap the
