@@ -514,8 +514,7 @@ function buildPlanComponent(theme: Theme, content: string): Container {
 function renderPresentResult(result: { content: { type: string; text?: string }[]; details: unknown }, _options: unknown, theme: Theme) {
   const markdown = (result.details as { markdown?: unknown } | undefined)?.markdown;
   if (typeof markdown !== "string") {
-    const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text");
-    return new Text(theme.fg("warning", text?.text ?? "No plan content"), 1, 0);
+    return new Text("", 0, 0);
   }
   return buildPlanComponent(theme, markdown);
 }
