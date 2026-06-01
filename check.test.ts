@@ -285,4 +285,14 @@ describe("read-only tools (grep/find/ls) use read permission, not bash parsing",
     const result = checkFileTarget(CWD, "read", "build", RULES, CWD);
     assert.equal(result.action, "allow");
   });
+
+  it("checkFileTarget downgrades plan file read to ask (external path catch-all)", () => {
+    // The plan file lives in the extension directory, which is outside the
+    // project cwd. The external-path catch-all downgrades the baseline
+    // read: ** -> allow rule to "ask". This is why the auto-approval bypass
+    // for plan file reads lives in handleToolCall (index.ts) rather than here.
+    const planPath = "/home/user/.pi/agent/extensions/pi-safetynet/plans/test-session.md";
+    const result = checkFileTarget(planPath, "read", "build", RULES, CWD);
+    assert.equal(result.action, "ask");
+  });
 });

@@ -391,6 +391,9 @@ async function handleToolCall(
 
     if (event.toolName === "read") {
       const filePath = event.input.path as string;
+      // Auto-approve reads on the plan file (model may read its own plan)
+      const planPath = getPlanFilePath(ctx.sessionManager.getSessionId());
+      if (filePath === planPath) return undefined;
       const rules = storage.getAllRules();
       return resolvePermission(ctx, {
         permission: "read",
