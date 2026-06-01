@@ -9,7 +9,6 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   createEditTool,
   createWriteTool,
-  FooterComponent,
   getMarkdownTheme,
   isBashToolResult,
   type Theme,
@@ -33,6 +32,7 @@ import {
   EPHEMERAL_CUSTOM_TYPE,
   persistProfile,
   restoreProfile,
+  getLatestCustomEntry,
 } from "./profiles/index.ts";
 import {
   isPlanOnErrorEnabled,
@@ -56,68 +56,28 @@ let currentModelSupportsReasoning: boolean = false;
 /** Current thinking level, updated via thinking_level_select events. */
 let currentThinkingLevel: string = "off";
 
-/** Cumulative subagent usage for the current turn. Reset on agent_end. */
+/** Cumulative subagent usage for the current turn. Never cleared. */
 let subagentUsage: SubagentUsage = { ...ZERO_USAGE };
-/** Session reference captured during session_start for footer construction. */
-let footerSessionRef: any = null;
 
-/** Format subagent usage and refresh the footer to include it. */
-function refreshSubagentFooter(ctx: ExtensionContext) {
+const SUBAGENT_USAGE_TYPE = "safetynet:subagent-usage";
+
+function persistSubagentUsage(): void {
+	pi.appendEntry(SUBAGENT_USAGE_TYPE, { ...subagentUsage });
+}
+
+function restoreSubagentUsage(ctx: ExtensionContext): void {
+	const entry = getLatestCustomEntry<SubagentUsage>(ctx, SUBAGENT_USAGE_TYPE);
+	if (entry?.data) subagentUsage = { ...ZERO_USAGE, ...entry.data };
+}
+
+/** Update the subagent cost status indicator (same mechanism as plan/build mode). */
+function refreshSubagentStatus(ctx: ExtensionContext) {
 	const formatted = formatSubagentUsage(subagentUsage);
-	const hasUsage = formatted.length > 0;
-
-	if (!hasUsage) {
-		ctx.ui.setFooter(undefined);
-		return;
+	if (formatted.length > 0) {
+		// Key "_cost" sorts before "safetynet" so it appears first in the footer line,
+		// immediately beside the built-in cost data.
+		ctx.ui.setStatus("\x00", ctx.ui.theme.fg("dim", `subagents +${formatted}`));
 	}
-
-	ctx.ui.setFooter((_tui, theme, footerData) => {
-		const session = footerSessionRef;
-		const footer = session ? new FooterComponent(session, footerData) : null;
-
-		return {
-			render(width: number) {
-				if (!footer) return ["", formatted];
-				const lines = footer.render(width);
-
-				// Inject subagent segment into the stats line (index 1)
-				if (lines.length >= 2) {
-					const statsLine = lines[1]!;
-					const segment = `· subagents +${formatted}`;
-					// Find the padding between stats (left) and model info (right).
-					// The footer uses 2+ spaces as the separator between left and right sides.
-					const stripped = statsLine.replace(/\x1b\[[0-9;]*m/g, "");
-					const match = stripped.match(/ {2,}(?=\S)/);
-					if (match && match.index !== undefined) {
-						// Map text position back to raw string index
-						let rawIdx = 0;
-						let textIdx = 0;
-						while (textIdx < match.index && rawIdx < statsLine.length) {
-							if (statsLine[rawIdx] === "\x1b") {
-								while (rawIdx < statsLine.length && statsLine[rawIdx] !== "m") rawIdx++;
-								rawIdx++;
-							} else {
-								textIdx++;
-								rawIdx++;
-							}
-						}
-						lines[1] = statsLine.slice(0, rawIdx) + segment + "  " + statsLine.slice(rawIdx);
-					} else {
-						// No padding found — append at end
-						lines[1] = statsLine + "  " + segment;
-					}
-				}
-
-				return lines;
-			},
-			invalidate() {
-				footer?.invalidate();
-			},
-			dispose() {
-				footer?.dispose();
-			},
-		};
-	});
 }
 
 /** Extension directory — resolved at module load via import.meta.url */
@@ -873,7 +833,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 			});
 			if (result.details && typeof result.details === "object" && "usage" in result.details) {
 				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
-				refreshSubagentFooter(ctx);
+				refreshSubagentStatus(ctx);
 			}
 			return result;
 		},
@@ -907,7 +867,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 			});
 			if (result.details && typeof result.details === "object" && "usage" in result.details) {
 				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
-				refreshSubagentFooter(ctx);
+				refreshSubagentStatus(ctx);
 			}
 			return result;
 		},
@@ -949,6 +909,7 @@ async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): P
   if (opts?.init) await storage.init(ctx);
   restoreProfile(ctx);
   restorePlanOnError(ctx);
+  restoreSubagentUsage(ctx);
 
   const sessionRules = reconstructSessionRules(ctx);
   if (opts?.replaceSession) {
@@ -1009,7 +970,6 @@ export default function safetynetExtension(api: ExtensionAPI) {
   });
 
   pi.on("session_start", async (event, ctx) => {
-    footerSessionRef = (event as any).session ?? (ctx as any).session ?? null;
     if (ctx.model) {
       currentModelDisplay = `${ctx.model.provider}/${ctx.model.id}`;
       currentModelSupportsReasoning = ctx.model.reasoning ?? false;
@@ -1051,11 +1011,8 @@ export default function safetynetExtension(api: ExtensionAPI) {
   // Clear turn-limited temp rules when the agent finishes (user gets a turn).
   pi.on("agent_end", async (_event, ctx) => {
     storage.temp.clearTurnRules();
-    // Reset subagent usage and restore default footer
-    if (subagentUsage.input || subagentUsage.output || subagentUsage.cacheRead || subagentUsage.cacheWrite || subagentUsage.cost) {
-      subagentUsage = { ...ZERO_USAGE };
-      ctx.ui.setFooter(undefined);
-    }
+    persistSubagentUsage();
+    refreshSubagentStatus(ctx);
   });
 
   // The context hook fires before every API call. We use it to swap the
