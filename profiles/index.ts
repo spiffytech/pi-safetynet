@@ -41,6 +41,7 @@ const PLAN_MODE_TOOLS = [
 	"planWrite",
 	"planEdit",
 	"planPresent",
+	"answer",
 	"subagent_explore",
 ];
 
@@ -57,6 +58,7 @@ const BUILD_MODE_TOOLS = [
 	"planWrite",
 	"planEdit",
 	"planPresent",
+	"answer",
 	"subagent_explore",
 	"subagent_build",
 ];
@@ -92,6 +94,9 @@ When updating a plan, remove completed items — the plan shows only what's left
 ## Presenting the Plan
 When the plan is ready for the user to review, set presentToUser=true on your final planWrite or planEdit call. This displays the plan and ends your turn.
 If you need to present the plan without writing changes (e.g. after questionnaire responses), call planPresent instead.
+
+## Answering Questions
+When the user asks a clarifying question or you need to provide information without changing the plan, use the answer tool. This displays your response and ends your turn cleanly, without re-dumping the plan.
 
 ## Workflow
 1. Understand the request by reading/searching relevant files.
