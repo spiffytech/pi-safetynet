@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ProfileName } from "../types.ts";
+import { loadSubagentsConfig } from "../global-config.ts";
 
 let currentProfile: ProfileName = "plan";
 
@@ -32,36 +33,42 @@ export function restoreProfile(ctx: ExtensionContext): void {
 }
 
 /** Tools available in plan mode. */
-const PLAN_MODE_TOOLS = [
-	"read",
-	"grep",
-	"find",
-	"ls",
-	"questionnaire",
-	"planWrite",
-	"planEdit",
-	"planPresent",
-	"answer",
-	"subagent_explore",
-];
+function getPlanModeTools(): string[] {
+	const tools = [
+		"read",
+		"grep",
+		"find",
+		"ls",
+		"questionnaire",
+		"planWrite",
+		"planEdit",
+		"planPresent",
+	];
+	const subagents = loadSubagentsConfig();
+	if (subagents.includes("subagent_explore")) tools.push("subagent_explore");
+	return tools;
+}
 
 /** Tools available in build mode. */
-const BUILD_MODE_TOOLS = [
-	"read",
-	"grep",
-	"find",
-	"ls",
-	"bash",
-	"edit",
-	"write",
-	"questionnaire",
-	"planWrite",
-	"planEdit",
-	"planPresent",
-	"answer",
-	"subagent_explore",
-	"subagent_build",
-];
+function getBuildModeTools(): string[] {
+	const tools = [
+		"read",
+		"grep",
+		"find",
+		"ls",
+		"bash",
+		"edit",
+		"write",
+		"questionnaire",
+		"planWrite",
+		"planEdit",
+		"planPresent",
+	];
+	const subagents = loadSubagentsConfig();
+	if (subagents.includes("subagent_explore")) tools.push("subagent_explore");
+	if (subagents.includes("subagent_build")) tools.push("subagent_build");
+	return tools;
+}
 
 function toolList(tools: string[]): string {
 	return tools.join(", ");
@@ -77,6 +84,7 @@ export const EPHEMERAL_CUSTOM_TYPE = "safetynet:ephemeral";
  * filesystem state.
  */
 export function getEphemeralContextMessage(profile: ProfileName): string {
+	const subagents = loadSubagentsConfig();
 	if (profile === "plan") {
 		return `[SAFENET PLAN MODE]
 Plan mode is ACTIVE. You are in a READ-ONLY planning phase.
@@ -95,22 +103,19 @@ When updating a plan, remove completed items — the plan shows only what's left
 When the plan is ready for the user to review, set presentToUser=true on your final planWrite or planEdit call. This displays the plan and ends your turn.
 If you need to present the plan without writing changes (e.g. after questionnaire responses), call planPresent instead.
 
-## Answering Questions
-When the user asks a clarifying question or you need to provide information without changing the plan, use the answer tool. This displays your response and ends your turn cleanly, without re-dumping the plan.
-
 ## Workflow
 1. Understand the request by reading/searching relevant files.
 2. Ask clarifying questions when requirements or tradeoffs are unclear.
 3. Write a concise, actionable plan to the plan file.
 4. Set presentToUser=true on your final planWrite/planEdit to display the plan to the user.
 
-Do NOT start implementing in plan mode. After the plan is presented, the user will decide whether to request revisions or manually switch to build mode with /safetynet:build.
+Do NOT start implementing in plan mode. After the plan is presented, the user will decide whether to request revisions or manually switch to build mode with /safetynet:build.${subagents.includes("subagent_explore") ? `
 
 ## Subagents
-You may spawn a read-only subagent with subagent_explore to inspect the codebase in parallel. The subagent gets a clean session and cannot modify files. Provide a complete, self-sufficient prompt.
+You may spawn a read-only subagent with subagent_explore to inspect the codebase in parallel. The subagent gets a clean session and cannot modify files. Provide a complete, self-sufficient prompt.` : ""}
 
 ## Available tools
-${toolList(PLAN_MODE_TOOLS)}`;
+${toolList(getPlanModeTools())}`;
 	}
 
 	return `[SAFENET BUILD MODE]
@@ -122,15 +127,13 @@ Commands are evaluated against the permission ruleset:
 - Unknown commands prompt the user for approval
 - Dangerous commands are blocked
 
-To switch back to planning, the user can run /safetynet:plan.
+To switch back to planning, the user can run /safetynet:plan.${subagents.length > 0 ? `
 
 ## Subagents
-You may spawn subagents for parallel or delegated work:
-- subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands.
-- subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval.
+You may spawn subagents for parallel or delegated work:${subagents.includes("subagent_explore") ? "\n- subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands." : ""}${subagents.includes("subagent_build") ? "\n- subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval." : ""}
 
-Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.
+Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.` : ""}
 
 ## Available tools
-${toolList(BUILD_MODE_TOOLS)}`;
+${toolList(getBuildModeTools())}`;
 }

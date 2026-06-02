@@ -203,8 +203,25 @@ You can define rules that apply across all projects via the global config file a
     { "permission": "bash", "pattern": "npm test", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "cargo test", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "npm publish *", "action": "deny", "modes": ["build", "plan"] }
-  ]
+  ],
+  "subagents": ["subagent_explore", "subagent_build"]
 }
+```
+
+#### `subagents`
+
+Controls which subagent tools are available to the agent. The value is an array of tool names:
+
+- `"subagent_explore"` — read-only subagent for codebase inspection
+- `"subagent_build"` — full build-access subagent
+
+If the key is omitted or `null`, all subagent tools are enabled (the default). An empty array `[]` disables all subagent tools.
+
+Examples:
+
+```json
+{ "subagents": ["subagent_explore"] }
+{ "subagents": [] }
 ```
 
 Each rule has:

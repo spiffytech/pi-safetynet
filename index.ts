@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction } from "./types.ts";
 import questionnaire from "./questionnaire.ts";
+import { loadSubagentsConfig } from "./global-config.ts";
 import { runSubagent, addUsage, formatSubagentUsage, ZERO_USAGE, type SubagentUsage } from "./subagent.ts";
 import {
   getBaselineRules,
@@ -404,7 +405,7 @@ async function handleToolCall(
       });
     }
 
-    const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "questionnaire", "planWrite", "planEdit", "planPresent", "answer", "subagent_explore", "subagent_build"]);
+    const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "questionnaire", "planWrite", "planEdit", "planPresent", ...(loadSubagentsConfig())]);
     if (!knownTools.has(event.toolName) && profile === "plan") {
       return resolvePermission(ctx, {
         permission: "bash",
@@ -833,7 +834,7 @@ function registerCommands(pi: ExtensionAPI) {
   });
 }
 
-function registerSubagentTools(pi: ExtensionAPI) {
+function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 
 	// subagent_explore is also available in plan mode
 	// subagent_build is build-only
@@ -849,7 +850,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 		return ctx.modelRegistry.find(provider, modelId) ?? ctx.model;
 	}
 
-	pi.registerTool({
+	if (subagents.includes("subagent_explore")) pi.registerTool({
 		name: "subagent_explore",
 		label: "Explore",
 		description: "Spawn a read-only subagent to explore the codebase autonomously.\n\nWhen to use: searching the codebase, reading multiple files, tracing call chains, understanding architecture, answering questions about the code.\nWhen NOT to use: reading a single known file (use read), searching for a specific class (use find/grep), any task requiring file modification.\n\nKey properties:\n- Read-only: cannot modify files or run commands\n- Clean session: no conversation history — provide a complete, self-sufficient prompt\n- Runs in parallel: you can dispatch multiple explore agents simultaneously\n\nGuidance: Your prompt is the subagent's entire context. Be detailed and specific — tell it exactly what to find and how to report findings back.",
@@ -883,7 +884,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
+	if (subagents.includes("subagent_build")) pi.registerTool({
 		name: "subagent_build",
 		label: "Subagent Build",
 		description: "Spawn a subagent with full build access. Permission prompts are shown to you for approval.\n\nWhen to use: self-contained implementation tasks that can be delegated to a focused agent.\nWhen NOT to use: trivial edits (do them directly), tasks requiring ongoing user interaction, tasks you can complete in a single tool call.\n\nKey properties:\n- Full access: read, write, edit, bash with your permission rules\n- Permission prompts routed to you: you approve or deny commands and file writes\n- Clean session: no conversation history — provide a complete, self-sufficient prompt\n\nGuidance: Include complete requirements in your prompt — file paths, expected behavior, verification commands. The subagent cannot ask you questions.",
@@ -976,9 +977,10 @@ export default function safetynetExtension(api: ExtensionAPI) {
   storage = new PermissionStorage(pi, process.cwd());
 
   registerPlanTools(pi);
-  registerAnswerTool(pi);
+  // registerAnswerTool(pi); // temporarily disabled
   questionnaire(pi);
-	registerSubagentTools(pi);
+	const subagents = loadSubagentsConfig();
+	if (subagents.length > 0) registerSubagentTools(pi, subagents);
   registerCommands(pi);
   registerShortcuts(pi);
 

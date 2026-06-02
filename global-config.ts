@@ -16,6 +16,7 @@ export function getGlobalConfigPath(): string {
 
 interface GlobalConfig {
   rules?: Ruleset;
+  subagents?: string[] | null;
   [key: string]: unknown;
 }
 
@@ -57,6 +58,13 @@ export function saveGlobalRules(rules: Ruleset): void {
   const config = loadConfig();
   config.rules = rules;
   saveConfig(config);
+}
+
+/** Which subagent tools to enable. Defaults to all if key is omitted or null. Empty array disables all. */
+export function loadSubagentsConfig(): string[] {
+  const config = loadConfig();
+  if (config.subagents == null) return ["subagent_explore", "subagent_build"];
+  return config.subagents;
 }
 
 /** Append rules to the global config and save. Returns the full updated ruleset. */
