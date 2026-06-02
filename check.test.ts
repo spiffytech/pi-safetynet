@@ -155,6 +155,8 @@ describe("checkBashPermission plan-mode edit denial", () => {
     ["echo hello", "echo (no redirect)"],
     ["sed -n 5p file.txt", "sed -n (read-only)"],
     ["jq . file.json", "jq"],
+    ["read f", "read (builtin)"],
+    ["read -r line", "read -r (builtin)"],
   ];
 
   for (const [cmd, label] of ALLOW_IN_PLAN) {

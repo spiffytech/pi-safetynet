@@ -107,6 +107,7 @@
     { "permission": "bash", "pattern": "yarn why *", "action": "allow", "modes": ["build", "plan"] },
 
     { "permission": "bash", "pattern": "echo *", "action": "allow", "modes": ["build", "plan"] },
+    { "permission": "bash", "pattern": "read *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "printf *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "[ *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "[[ *", "action": "allow", "modes": ["build", "plan"] },
