@@ -244,8 +244,17 @@ async function resolvePermission(
     }
 
     // For non-once durations, create rules for approved items
+    //
+    // Redirect targets are file paths shown alongside bash subcommands
+    // in the permission prompt.  They should produce read/edit rules
+    // (not bash rules), and must use the user-edited text (not the
+    // original raw path).  Build a set of redirect originals so the
+    // main loop can skip them, then handle them separately below.
+    const redirectOriginals = new Set(opts.check.redirectTargets?.map((rt) => rt.path) ?? []);
+
     const patterns: string[] = [];
     for (const [original, edited] of approved) {
+      if (redirectOriginals.has(original)) continue; // handled below
       if (isFile) {
         const pattern = toRecursiveGlob(normalizePathForMatching(edited, opts.cwd));
         patterns.push(pattern);
@@ -254,14 +263,15 @@ async function resolvePermission(
       }
     }
 
-    // Handle redirect target patterns
+    // Handle redirect target patterns (using user-edited text)
     const redirectPatterns: Array<{ permission: "read" | "edit"; pattern: string }> = [];
     if (opts.check.redirectTargets?.length) {
       for (const rt of opts.check.redirectTargets) {
         if (approved.has(rt.path)) {
+          const editedPath = approved.get(rt.path)!;
           redirectPatterns.push({
             permission: rt.permission,
-            pattern: toRecursiveGlob(normalizePathForMatching(rt.path, opts.cwd)),
+            pattern: toRecursiveGlob(normalizePathForMatching(editedPath, opts.cwd)),
           });
         }
       }

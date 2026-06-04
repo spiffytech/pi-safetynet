@@ -619,6 +619,56 @@ describe("composition: bash permission end-to-end", () => {
       assert.ok(!result.redirectTargets?.some((rt) => rt.path === "/dev/null" || rt.path === "/dev/zero"));
     });
 
+    it("redirect approval with edited path creates edit rule from edited text", () => {
+      // Simulates the approval flow: user edits redirect path "data/out.json" → "data/*"
+      // The resulting rule should be an edit rule (not bash), using the edited pattern.
+      const editedPath = "data/*";
+      // Simulate what resolvePermission does for redirect patterns:
+      const pattern = toRecursiveGlob(normalizePathForMatching(editedPath, "/project"));
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "edit", pattern, action: "allow", modes: ALL_MODES },
+      ];
+      // Should match any file under data/ (not just data/out.json)
+      assert.equal(checkFileTarget("data/out.json", "edit", "build", rules, "/project").action, "allow");
+      assert.equal(checkFileTarget("data/other.json", "edit", "build", rules, "/project").action, "allow");
+    });
+
+    it("redirect approval does not create bash rules for redirect paths", () => {
+      // Bug: previously, approving a redirect alongside a bash subcommand
+      // created a bash rule for the redirect path (e.g. bash: data/* -> allow),
+      // which is useless. Only edit/read rules should be created.
+      //
+      // Verify: a bash rule matching a file path should NOT allow the command.
+      // Only an edit rule for the redirect path should work.
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "bash", pattern: "ls *", action: "allow", modes: ALL_MODES },
+        // WRONG (old bug): bash rule for file path — should not help
+        { permission: "bash", pattern: "data/*", action: "allow", modes: ALL_MODES },
+      ];
+      // The redirect target (data/out.json) is checked as edit permission, not bash.
+      // A bash rule for data/* should not auto-approve the redirect.
+      const result = checkBashPermission("ls > data/out.json", "build", rules);
+      assert.equal(result.action, "ask");
+      assert.ok(result.redirectTargets?.some((rt) => rt.permission === "edit" && rt.path === "data/out.json"));
+    });
+
+    it("edited redirect path with glob matches subsequent different files", () => {
+      // End-to-end simulation: after user approves "data/*" as edit pattern,
+      // a later command with a different output file should auto-approve.
+      const rules: Ruleset = [
+        ...BASELINE,
+        { permission: "bash", pattern: "stockbot *", action: "allow", modes: ALL_MODES },
+        { permission: "edit", pattern: "data/*", action: "allow", modes: ALL_MODES },
+      ];
+      // Different file from the one originally approved — should still pass
+      assert.equal(
+        checkBashPermission("stockbot bars NVDA --json > data/nvda_1min_202508.json", "build", rules).action,
+        "allow",
+      );
+    });
+
     it("checkFileTarget allows /dev/null directly", () => {
       assert.equal(checkFileTarget("/dev/null", "edit", "build", BASELINE).action, "allow");
       assert.equal(checkFileTarget("/dev/null", "read", "build", BASELINE).action, "allow");
