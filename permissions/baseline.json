@@ -63,6 +63,7 @@
     { "permission": "bash", "pattern": "uptime", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "cal", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "break", "action": "allow", "modes": ["build", "plan"] },
+    { "permission": "bash", "pattern": "for *", "action": "allow", "modes": ["build", "plan"] },
 
     { "permission": "bash", "pattern": "ps *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "top", "action": "allow", "modes": ["build", "plan"] },
