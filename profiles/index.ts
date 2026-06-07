@@ -101,7 +101,7 @@ When updating a plan, remove completed items — the plan shows only what's left
 
 ## Presenting the Plan
 When the plan is ready for the user to review, set presentToUser=true on your final planWrite or planEdit call. This displays the plan and ends your turn.
-If you need to present the plan without writing changes (e.g. after questionnaire responses), call planPresent instead.
+Only call planPresent if the user explicitly asks to see the plan without changes.
 
 ## Workflow
 1. Understand the request by reading/searching relevant files.
