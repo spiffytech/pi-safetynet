@@ -25,5 +25,8 @@
   },
   "devDependencies": {
     "@types/picomatch": "^4.0.3"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
   }
 }
