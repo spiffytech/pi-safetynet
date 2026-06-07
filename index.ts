@@ -415,7 +415,7 @@ async function handleToolCall(
       });
     }
 
-    const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "questionnaire", "planWrite", "planEdit", "planPresent", ...(loadSubagentsConfig())]);
+    const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "planWrite", "planEdit", "planPresent", ...(loadSubagentsConfig())]);
     if (!knownTools.has(event.toolName) && profile === "plan") {
       return resolvePermission(ctx, {
         permission: "bash",
@@ -988,7 +988,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
 
   registerPlanTools(pi);
   // registerAnswerTool(pi); // temporarily disabled
-  questionnaire(pi);
+  // questionnaire(pi); // disabled
 	const subagents = loadSubagentsConfig();
 	if (subagents.length > 0) registerSubagentTools(pi, subagents);
   registerCommands(pi);

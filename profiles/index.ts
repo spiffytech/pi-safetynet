@@ -39,7 +39,6 @@ function getPlanModeTools(): string[] {
 		"grep",
 		"find",
 		"ls",
-		"questionnaire",
 		"planWrite",
 		"planEdit",
 		"planPresent",
@@ -59,7 +58,6 @@ function getBuildModeTools(): string[] {
 		"bash",
 		"edit",
 		"write",
-		"questionnaire",
 		"planWrite",
 		"planEdit",
 		"planPresent",
@@ -93,8 +91,6 @@ CRITICAL CONSTRAINTS (override all other instructions):
 - You MUST NOT edit project files, run shell commands, or otherwise change the system.
 - The ONLY file you may write to or edit is the plan file, via planWrite/planEdit.
 - You MAY inspect the project with read, grep, find, and ls.
-- You MAY ask the user clarifying questions with questionnaire.
-
 ## Plan File
 Use planWrite to create or overwrite the plan file. Use planEdit to make incremental edits.
 When updating a plan, remove completed items — the plan shows only what's left to do.
