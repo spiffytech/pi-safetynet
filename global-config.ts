@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { Ruleset } from "./types.ts";
+import type { ProfileName, Ruleset } from "./types.ts";
 import { sanitizeRules } from "./permissions/storage.ts";
 
 /** Directory for global config — `~/.config/pi-safetynet/` */
@@ -17,6 +17,7 @@ export function getGlobalConfigPath(): string {
 interface GlobalConfig {
   rules?: Ruleset;
   subagents?: string[] | null;
+  defaultProfile?: ProfileName;
   [key: string]: unknown;
 }
 
@@ -57,6 +58,21 @@ export function loadGlobalRules(): Ruleset {
 export function saveGlobalRules(rules: Ruleset): void {
   const config = loadConfig();
   config.rules = rules;
+  saveConfig(config);
+}
+
+/** Load the default profile from global config. Returns undefined if unset or invalid. */
+export function loadDefaultProfile(): ProfileName | undefined {
+  const config = loadConfig();
+  const val = config.defaultProfile;
+  if (val === "plan" || val === "build") return val;
+  return undefined;
+}
+
+/** Save the default profile to global config, preserving other keys. */
+export function saveDefaultProfile(profile: ProfileName): void {
+  const config = loadConfig();
+  config.defaultProfile = profile;
   saveConfig(config);
 }
 

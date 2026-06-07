@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ProfileName } from "../types.ts";
-import { loadSubagentsConfig } from "../global-config.ts";
+import { loadDefaultProfile, loadSubagentsConfig } from "../global-config.ts";
 
-let currentProfile: ProfileName = "plan";
+let currentProfile: ProfileName = loadDefaultProfile() ?? "plan";
 
 export function getCurrentProfile(): ProfileName {
 	return currentProfile;

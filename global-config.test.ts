@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadGlobalRules, saveGlobalRules, addGlobalRules, getGlobalConfigPath, getGlobalConfigDir } from "./global-config.ts";
+import { loadGlobalRules, saveGlobalRules, addGlobalRules, getGlobalConfigPath, getGlobalConfigDir, loadDefaultProfile, saveDefaultProfile } from "./global-config.ts";
 import type { Ruleset } from "./types.ts";
 
 /** Temporary homedir override for testing. */
@@ -170,6 +170,70 @@ describe("global-config", () => {
       const parsed = JSON.parse(readFileSync(getGlobalConfigPath(), "utf-8"));
       assert.equal(parsed.otherConfig, true);
       assert.equal(parsed.rules.length, 2);
+    });
+  });
+
+  describe("loadDefaultProfile", () => {
+    it("returns undefined when config file does not exist", () => {
+      assert.equal(loadDefaultProfile(), undefined);
+    });
+
+    it("returns undefined when config file has no defaultProfile key", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ rules: [] }), "utf-8");
+
+      assert.equal(loadDefaultProfile(), undefined);
+    });
+
+    it("returns undefined for invalid defaultProfile value", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ defaultProfile: "invalid" }), "utf-8");
+
+      assert.equal(loadDefaultProfile(), undefined);
+    });
+
+    it("returns 'plan' when defaultProfile is 'plan'", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ defaultProfile: "plan" }), "utf-8");
+
+      assert.equal(loadDefaultProfile(), "plan");
+    });
+
+    it("returns 'build' when defaultProfile is 'build'", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ defaultProfile: "build" }), "utf-8");
+
+      assert.equal(loadDefaultProfile(), "build");
+    });
+  });
+
+  describe("saveDefaultProfile", () => {
+    it("creates config file with defaultProfile if it doesn't exist", () => {
+      saveDefaultProfile("build");
+
+      assert.ok(existsSync(getGlobalConfigPath()));
+      const parsed = JSON.parse(readFileSync(getGlobalConfigPath(), "utf-8"));
+      assert.equal(parsed.defaultProfile, "build");
+    });
+
+    it("preserves other keys when saving defaultProfile", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({
+        rules: [{ permission: "bash", pattern: "npm test", action: "allow", modes: ["build"] }],
+        subagents: ["subagent_explore"],
+      }), "utf-8");
+
+      saveDefaultProfile("plan");
+
+      const parsed = JSON.parse(readFileSync(getGlobalConfigPath(), "utf-8"));
+      assert.equal(parsed.defaultProfile, "plan");
+      assert.deepEqual(parsed.rules, [{ permission: "bash", pattern: "npm test", action: "allow", modes: ["build"] }]);
+      assert.deepEqual(parsed.subagents, ["subagent_explore"]);
     });
   });
 });
