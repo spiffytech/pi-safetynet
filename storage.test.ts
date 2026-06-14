@@ -60,4 +60,25 @@ describe("sanitizeRules", () => {
       { permission: "edit", pattern: "**", action: "ask", modes: ["build", "plan"] },
     ]);
   });
+
+  it("preserves optional string reason field", () => {
+    const input = [
+      { permission: "bash", pattern: "rm *", action: "deny", modes: ["build", "plan"], reason: "Destructive" },
+    ];
+    assert.deepEqual(sanitizeRules(input), input);
+  });
+
+  it("preserves rules without reason field", () => {
+    const input = [
+      { permission: "bash", pattern: "ls *", action: "allow", modes: ["build"] },
+    ];
+    assert.deepEqual(sanitizeRules(input), input);
+  });
+
+  it("filters out rules with non-string reason", () => {
+    const input = [
+      { permission: "bash", pattern: "rm *", action: "deny", modes: ["build"], reason: 42 },
+    ];
+    assert.deepEqual(sanitizeRules(input), []);
+  });
 });

@@ -43,10 +43,9 @@ export function checkFileTarget(
 
   const result = evaluatePermission(permission, normalized, profile, rules);
   if (result.action === "deny") {
-    const match = result.matchedRule;
     return {
       action: "deny",
-      reason: match ? `Denied by rule "${match.pattern}"` : "Denied by ruleset",
+      reason: result.matchedRule?.reason ?? "Automatically denied",
     };
   }
 
@@ -132,6 +131,7 @@ export function checkBashPermission(
 
   const unapproved: string[] = [];
   const redirectTargets: Array<{ permission: "read" | "edit"; path: string }> = [];
+  const denyReasons: string[] = [];
   let worstAction: PermissionAction = "allow";
 
   const absCwd = cwd ?? process.cwd();
@@ -150,6 +150,8 @@ export function checkBashPermission(
     if (result.action === "deny") {
       worstAction = "deny";
       if (!unapproved.includes(sub)) unapproved.push(sub);
+      const r = result.matchedRule?.reason ?? "Automatically denied";
+      if (!denyReasons.includes(r)) denyReasons.push(r);
     } else if (result.action === "ask") {
       if (worstAction !== "deny") worstAction = "ask";
       if (!unapproved.includes(sub)) unapproved.push(sub);
@@ -162,11 +164,18 @@ export function checkBashPermission(
     if (targetResult.action === "deny") {
       worstAction = "deny";
       redirectTargets.push({ permission: perm, path: target.path });
+      if (targetResult.reason && !denyReasons.includes(targetResult.reason)) {
+        denyReasons.push(targetResult.reason);
+      }
     } else if (targetResult.action === "ask") {
       if (worstAction !== "deny") worstAction = "ask";
       redirectTargets.push({ permission: perm, path: target.path });
     }
   }
 
-  return { action: worstAction, unapproved, redirectTargets };
+  const result: PermissionCheck = { action: worstAction, unapproved, redirectTargets };
+  if (worstAction === "deny" && denyReasons.length > 0) {
+    result.reason = denyReasons.join("; ");
+  }
+  return result;
 }

@@ -230,6 +230,7 @@ Each rule has:
 - **`pattern`** — For `bash`/`*`: a command pattern where `*` is a wildcard (e.g. `npm *`). For `edit`/`read`: a [picomatch](https://github.com/micromatch/picomatch) glob pattern (e.g. `src/**/*.ts`).
 - **`action`** — `allow`, `deny`, or `ask`
 - **`modes`** — Which profiles the rule applies to: `["build"]`, `["plan"]`, or `["build", "plan"]`
+- **`reason`** *(optional)* — A human-readable explanation included in the denial message when a `deny` rule blocks an action
 
 #### Denylist-style rules
 
@@ -241,8 +242,7 @@ For example, to allow all `npm` subcommands but deny `npm publish`:
 {
   "rules": [
     { "permission": "bash", "pattern": "npm *", "action": "allow", "modes": ["build", "plan"] },
-    { "permission": "bash", "pattern": "npm publish *", "action": "deny", "modes": ["build", "plan"] }
-  ]
+    { "permission": "bash", "pattern": "npm publish *", "action": "deny", "modes": ["build", "plan"], "reason": "Publishing to npm should be done intentionally" }
 }
 ```
 

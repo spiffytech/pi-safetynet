@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { checkBashPermission, checkFileTarget } from "./check.ts";
 import { parseCommand } from "./bash-parser.ts";
 import { getBaselineRules } from "./permissions/index.ts";
+import type { Ruleset } from "./types.ts";
 
 const RULES = getBaselineRules();
 const CWD = "/home/user/project";
@@ -295,6 +296,73 @@ describe("read-only tools (grep/find/ls) use read permission, not bash parsing",
     // for plan file reads lives in handleToolCall (index.ts) rather than here.
     const planPath = "/home/user/.pi/agent/extensions/pi-safetynet/plans/test-session.md";
     const result = checkFileTarget(planPath, "read", "build", RULES, CWD);
-    assert.equal(result.action, "ask");
+  });
+});
+
+describe("denial reason propagation", () => {
+  const ALL_MODES: ["build", "plan"] = ["build", "plan"];
+
+  describe("checkFileTarget", () => {
+    it("uses rule reason when deny rule has a reason", () => {
+      const rules: Ruleset = [
+        { permission: "edit", pattern: "**", action: "deny", modes: ALL_MODES, reason: "No edits allowed" },
+      ];
+      const result = checkFileTarget("src/foo.ts", "edit", "build", rules, CWD);
+      assert.equal(result.action, "deny");
+      assert.equal(result.reason, "No edits allowed");
+    });
+
+    it("falls back to Automatically denied when deny rule has no reason", () => {
+      const rules: Ruleset = [
+        { permission: "edit", pattern: "**", action: "deny", modes: ALL_MODES },
+      ];
+      const result = checkFileTarget("src/foo.ts", "edit", "build", rules, CWD);
+      assert.equal(result.action, "deny");
+      assert.equal(result.reason, "Automatically denied");
+    });
+  });
+
+  describe("checkBashPermission", () => {
+    it("uses rule reason when deny rule has a reason", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "*", action: "ask", modes: ALL_MODES },
+        { permission: "bash", pattern: "curl *", action: "deny", modes: ALL_MODES, reason: "No network" },
+      ];
+      const result = checkBashPermission("curl http://example.com", "build", rules, CWD);
+      assert.equal(result.action, "deny");
+      assert.equal(result.reason, "No network");
+    });
+
+    it("falls back to Automatically denied when deny rule has no reason", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "*", action: "ask", modes: ALL_MODES },
+        { permission: "bash", pattern: "curl *", action: "deny", modes: ALL_MODES },
+      ];
+      const result = checkBashPermission("curl http://example.com", "build", rules, CWD);
+      assert.equal(result.action, "deny");
+      assert.equal(result.reason, "Automatically denied");
+    });
+
+    it("joins multiple distinct deny reasons with semicolon", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "*", action: "ask", modes: ALL_MODES },
+        { permission: "bash", pattern: "curl *", action: "deny", modes: ALL_MODES, reason: "No network" },
+        { permission: "bash", pattern: "wget *", action: "deny", modes: ALL_MODES, reason: "Destructive" },
+      ];
+      const result = checkBashPermission("curl http://x | wget http://y", "build", rules, CWD);
+      assert.equal(result.action, "deny");
+      assert.equal(result.reason, "No network; Destructive");
+    });
+
+    it("deduplicates identical deny reasons", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "*", action: "ask", modes: ALL_MODES },
+        { permission: "bash", pattern: "curl *", action: "deny", modes: ALL_MODES, reason: "No network" },
+        { permission: "bash", pattern: "wget *", action: "deny", modes: ALL_MODES, reason: "No network" },
+      ];
+      const result = checkBashPermission("curl http://x | wget http://y", "build", rules, CWD);
+      assert.equal(result.action, "deny");
+      assert.equal(result.reason, "No network");
+    });
   });
 });

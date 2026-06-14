@@ -7,6 +7,7 @@ export interface Rule {
   pattern: string;
   action: PermissionAction;
   modes: ProfileName[];
+  reason?: string;
 }
 
 export type Ruleset = Rule[];

@@ -41,6 +41,7 @@ export function sanitizeRules(raw: unknown[]): Ruleset {
     if (!VALID_ACTIONS.has(rule.action as string)) return false;
     if (!Array.isArray(rule.modes) || rule.modes.length === 0) return false;
     if (!(rule.modes as string[]).every((m) => VALID_MODES.has(m))) return false;
+    if (rule.reason !== undefined && typeof rule.reason !== "string") return false;
     return true;
   });
 }
