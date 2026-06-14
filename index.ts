@@ -45,7 +45,7 @@ import {
 import {
   showPermissionPrompt,
 } from "./prompts.ts";
-import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./check.ts";
+import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./check.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
 
 let storage: PermissionStorage;
@@ -395,11 +395,12 @@ async function handleToolCall(
 
     const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "planWrite", "planEdit", "planPresent", ...(loadSubagentsConfig())]);
     if (!knownTools.has(event.toolName) && profile === "plan") {
+      const rules = storage.getAllRules();
       return resolvePermission(ctx, {
         permission: "bash",
         target: `tool:${event.toolName}`,
-        check: { action: "ask", reason: "Unknown tool in plan mode requires approval" },
-        recheck: () => ({ action: "ask", reason: "Unknown tool in plan mode requires approval" }),
+        check: checkToolPermission(event.toolName, profile, rules),
+        recheck: () => checkToolPermission(event.toolName, profile, storage.getAllRules()),
         cwd,
       });
     }

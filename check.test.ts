@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { checkBashPermission, checkFileTarget } from "./check.ts";
+import { checkBashPermission, checkFileTarget, checkToolPermission } from "./check.ts";
 import { parseCommand } from "./bash-parser.ts";
 import { getBaselineRules } from "./permissions/index.ts";
 import type { Ruleset } from "./types.ts";
@@ -364,5 +364,69 @@ describe("denial reason propagation", () => {
       assert.equal(result.action, "deny");
       assert.equal(result.reason, "No network");
     });
+  });
+});
+
+describe("checkToolPermission", () => {
+  const ALL_MODES: ["build", "plan"] = ["build", "plan"];
+
+  it("returns ask with no matching rules (baseline has no tool: rules)", () => {
+    const result = checkToolPermission("ask_user", "plan", RULES);
+    assert.equal(result.action, "ask");
+    assert.equal(result.reason, "Unknown tool in plan mode requires approval");
+  });
+
+  it("returns allow when a matching bash allow rule exists", () => {
+    const rules: Ruleset = [
+      { permission: "bash", pattern: "tool:ask_user", action: "allow", modes: ALL_MODES },
+    ];
+    const result = checkToolPermission("ask_user", "plan", rules);
+    assert.equal(result.action, "allow");
+    assert.equal(result.reason, undefined);
+  });
+
+  it("returns deny when a matching deny rule exists", () => {
+    const rules: Ruleset = [
+      { permission: "bash", pattern: "tool:*", action: "allow", modes: ALL_MODES },
+      { permission: "bash", pattern: "tool:dangerous_tool", action: "deny", modes: ALL_MODES, reason: "Blocked" },
+    ];
+    const result = checkToolPermission("dangerous_tool", "plan", rules);
+    assert.equal(result.action, "deny");
+    assert.equal(result.reason, "Blocked");
+  });
+
+  it("returns allow when wildcard tool:\* rule matches", () => {
+    const rules: Ruleset = [
+      { permission: "bash", pattern: "tool:*", action: "allow", modes: ALL_MODES },
+    ];
+    const result = checkToolPermission("any_extension_tool", "plan", rules);
+    assert.equal(result.action, "allow");
+  });
+
+  it("respects plan mode filtering on rules", () => {
+    const rules: Ruleset = [
+      { permission: "bash", pattern: "tool:ask_user", action: "allow", modes: ["build"] },
+    ];
+    const planResult = checkToolPermission("ask_user", "plan", rules);
+    assert.equal(planResult.action, "ask");
+
+    const buildResult = checkToolPermission("ask_user", "build", rules);
+    assert.equal(buildResult.action, "allow");
+  });
+
+  it("recheck scenario: returns allow after rule is added", () => {
+    // Simulates the bug fix: initially no rule, then one is added.
+    // Before the fix, the recheck closure was static and always returned 'ask'.
+    const rulesBefore: Ruleset = RULES;
+    const resultBefore = checkToolPermission("ask_user", "plan", rulesBefore);
+    assert.equal(resultBefore.action, "ask");
+
+    // After adding an allow rule (simulating what resolvePermission does)
+    const rulesAfter: Ruleset = [
+      ...rulesBefore,
+      { permission: "bash", pattern: "tool:ask_user", action: "allow", modes: ALL_MODES },
+    ];
+    const resultAfter = checkToolPermission("ask_user", "plan", rulesAfter);
+    assert.equal(resultAfter.action, "allow");
   });
 });

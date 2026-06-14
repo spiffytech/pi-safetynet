@@ -179,3 +179,17 @@ export function checkBashPermission(
   }
   return result;
 }
+export function checkToolPermission(
+  toolName: string,
+  profile: ProfileName,
+  rules: Ruleset,
+): PermissionCheck {
+  const result = evaluatePermission("bash", `tool:${toolName}`, profile, rules);
+  if (result.action === "deny") {
+    return { action: "deny", reason: result.matchedRule?.reason ?? "Unknown tool denied by ruleset" };
+  }
+  if (result.action === "ask") {
+    return { action: "ask", reason: "Unknown tool in plan mode requires approval" };
+  }
+  return { action: result.action };
+}
