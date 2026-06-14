@@ -385,12 +385,6 @@ function createMockStorage() {
 		temp: {
 			_rules: [] as TempRule[],
 			getRules(): Ruleset {
-				// Prune expired time rules, then map to plain Rule
-				const now = Date.now();
-				this._rules = this._rules.filter((r) => {
-					if (r.expiry.type === "time") return r.expiry.expiresAt > now;
-					return true;
-				});
 				return this._rules.map((r) => r.rule);
 			},
 			addRules(r: TempRule[]) { this._rules.push(...r); },

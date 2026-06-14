@@ -95,8 +95,7 @@ class PersistedRuleStore {
 }
 
 /**
- * Temporary rule store for time-limited and turn-limited approvals.
- * Rules are checked on each getAllRules() call and expired ones are pruned.
+ * Temporary rule store for turn-limited approvals.
  */
 export class TempRuleStore {
   private rules: TempRule[] = [];
@@ -110,13 +109,8 @@ export class TempRuleStore {
     this.rules = this.rules.filter((r) => r.expiry.type !== "turn");
   }
 
-  /** Prune expired time-limited rules and return the surviving regular rules. */
+  /** Return the surviving regular rules. */
   getRules(): Ruleset {
-    const now = Date.now();
-    this.rules = this.rules.filter((r) => {
-      if (r.expiry.type === "time") return r.expiry.expiresAt > now;
-      return true; // "turn" rules survive until explicitly cleared
-    });
     return this.rules.map((r) => r.rule);
   }
 

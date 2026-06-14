@@ -13,9 +13,8 @@ export interface Rule {
 export type Ruleset = Rule[];
 
 /** Expiry policy for a temporary approval rule. */
-export type TempExpiry =
-  | { type: "time"; expiresAt: number }   // Unix timestamp ms
-  | { type: "turn" };                      // Expires on next agent_end
+export type TempExpiry = { type: "turn" };
+
 
 /** A rule with a temporary lifespan. */
 export interface TempRule {

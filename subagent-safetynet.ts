@@ -33,7 +33,6 @@ export interface SubagentSafetynetOpts {
 }
 
 const SUBAGENT_EPHEMERAL_CUSTOM_TYPE = "safetynet:subagent-ephemeral";
-const DEFAULT_TIMED_APPROVAL_MINUTES = 15;
 
 const EXPLORE_TOOL_NAMES = ["read", "grep", "find", "ls"];
 const BUILD_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -80,8 +79,6 @@ function makeTempRules(
 	opts: {
 		permission: "bash" | "read" | "edit";
 		patterns: string[];
-		expiryType: "time" | "turn";
-		minutes?: number;
 	},
 ): TempRule[] {
 	const modes: ProfileName[] = ["build"];
@@ -92,9 +89,7 @@ function makeTempRules(
 			action: "allow" as const,
 			modes,
 		},
-		expiry: opts.expiryType === "time"
-			? { type: "time" as const, expiresAt: Date.now() + (opts.minutes ?? DEFAULT_TIMED_APPROVAL_MINUTES) * 60_000 }
-			: { type: "turn" as const },
+		expiry: { type: "turn" as const },
 	}));
 }
 
@@ -224,7 +219,6 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 			}
 
 			// action === "ask" — delegate to parent's permission prompt
-			const timedMinutes = DEFAULT_TIMED_APPROVAL_MINUTES;
 			const isFile = opts.permission === "read" || opts.permission === "edit";
 
 			let reprompt = false;
@@ -232,7 +226,6 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 				const promptOpts: PermissionPromptOptions = {
 					permission: opts.permission,
 					target: opts.target,
-					timedApprovalMinutes: timedMinutes,
 					reprompt,
 				};
 				if (opts.check.unapproved && opts.check.unapproved.length > 0) promptOpts.unapproved = opts.check.unapproved;
@@ -330,21 +323,15 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 						parentStorage.addSessionRules(newRules);
 					}
 				} else {
-					const expiryType = duration === "timed" ? "time" : "turn";
-
 					const tempRules = makeTempRules({
 						permission: opts.permission,
 						patterns,
-						expiryType,
-						minutes: timedMinutes,
 					});
 
 					for (const rp of redirectPatterns) {
 						tempRules.push(...makeTempRules({
 							permission: rp.permission,
 							patterns: [rp.pattern],
-							expiryType,
-							minutes: timedMinutes,
 						}));
 					}
 

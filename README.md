@@ -126,7 +126,6 @@ When pi-safetynet prompts for approval, you choose how long the permission lasts
 |---|---|---|
 | **Once** | This invocation only | Never saved — no rules created |
 | **Turn** | Until the agent finishes its current turn | In-memory, cleared on `agent_end` |
-| **15m** (timed) | 15 minutes (configurable) | In-memory, auto-expires |
 | **Session** | Rest of this session | In-memory, survives across turns |
 | **Project** | All future sessions in this project | Saved to `.pi/extensions/safetynet/approvals.json` |
 | **Global** | All future sessions across all projects | Saved to `~/.config/pi-safetynet/config.json` |
@@ -148,8 +147,6 @@ The approval UI shows exactly what needs approval — individual subcommands in 
 | `--build` | `false` | Start in build mode (full access) |
 | `--allow <rules>` | | Comma-separated allow rules (format: `permission: pattern`) |
 | `--plan-on-error` | `true` | Enable plan-on-error mode |
-| `--timed-approval-minutes` | `15` | Minutes for timed approval duration |
-
 **Example:** `pi --build --allow "edit: src/**, bash: npm *"`
 
 ## Commands
@@ -191,7 +188,7 @@ pi-safetynet uses a layered rule system (last match wins):
 3. **Persisted** — User-approved rules saved to `.pi/extensions/safetynet/approvals.json`
 4. **Flag** — Rules from the `--allow` CLI flag (session-scoped, not persisted)
 5. **Session** — Rules added interactively during this session
-5. **Temporary** — Time-limited or turn-limited rules
+5. **Temporary** — Turn-limited rules
 
 ### Global config
 

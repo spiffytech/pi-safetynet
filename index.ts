@@ -92,8 +92,6 @@ function getPlanFilePath(sessionId: string): string {
   return join(plansDir, `${sessionId}.md`);
 }
 
-/** Default number of minutes for timed approval. */
-const DEFAULT_TIMED_APPROVAL_MINUTES = 15;
 
 const VALID_PERMISSIONS = new Set(["bash", "edit", "read", "*"]);
 
@@ -120,15 +118,6 @@ export function parseAllowFlag(raw: string): Ruleset {
   });
 }
 
-function getTimedApprovalMinutes(): number {
-  const val = pi.getFlag("timed-approval-minutes");
-  if (typeof val === "string") {
-    const n = Number(val);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  if (typeof val === "number" && val > 0) return val;
-  return DEFAULT_TIMED_APPROVAL_MINUTES;
-}
 
 /**
  * Build a TempRule entry from the current permission check context.
@@ -138,8 +127,6 @@ function makeTempRules(
     permission: "bash" | "read" | "edit";
     patterns: string[];
     profile: ProfileName;
-    expiryType: "time" | "turn";
-    minutes?: number;
   },
 ): TempRule[] {
   const newModes: ProfileName[] = opts.profile === "plan" ? ["plan", "build"] : ["build"];
@@ -150,9 +137,7 @@ function makeTempRules(
       action: "allow" as const,
       modes: newModes,
     },
-    expiry: opts.expiryType === "time"
-      ? { type: "time" as const, expiresAt: Date.now() + (opts.minutes ?? DEFAULT_TIMED_APPROVAL_MINUTES) * 60_000 }
-      : { type: "turn" as const },
+    expiry: { type: "turn" as const },
   }));
 }
 
@@ -196,7 +181,6 @@ async function resolvePermission(
   }
 
   const profile = getCurrentProfile();
-  const timedMinutes = getTimedApprovalMinutes();
   const isFile = opts.permission === "read" || opts.permission === "edit";
 
   let reprompt = false;
@@ -204,7 +188,6 @@ async function resolvePermission(
     const promptOpts: Parameters<typeof showPermissionPrompt>[1] = {
       permission: opts.permission,
       target: opts.target,
-      timedApprovalMinutes: timedMinutes,
       reprompt,
     };
     if (opts.check.unapproved && opts.check.unapproved.length > 0) promptOpts.unapproved = opts.check.unapproved;
@@ -304,15 +287,12 @@ async function resolvePermission(
         pi.appendEntry("safetynet:session-rules", { rules: newRules });
       }
     } else {
-      // "turn" or "timed"
-      const expiryType = duration === "timed" ? "time" : "turn";
+      // "turn"
 
       const tempRules = makeTempRules({
         permission: opts.permission,
         patterns,
         profile,
-        expiryType,
-        minutes: timedMinutes,
       });
 
       for (const rp of redirectPatterns) {
@@ -320,8 +300,6 @@ async function resolvePermission(
           permission: rp.permission,
           patterns: [rp.pattern],
           profile,
-          expiryType,
-          minutes: timedMinutes,
         }));
       }
 
@@ -849,8 +827,6 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 	// subagent_explore is also available in plan mode
 	// subagent_build is build-only
 
-	// Get timed-approval-minutes flag for subagent build
-	// (subagent uses parent's storage for rule propagation)
 	function resolveModel(modelSpec: string | undefined, ctx: ExtensionContext) {
 		if (!modelSpec) return ctx.model;
 		const slashIdx = modelSpec.indexOf("/");
@@ -1006,11 +982,6 @@ export default function safetynetExtension(api: ExtensionAPI) {
     default: true,
   });
 
-  pi.registerFlag("timed-approval-minutes", {
-    description: `Minutes for timed approval (default: ${DEFAULT_TIMED_APPROVAL_MINUTES})`,
-    type: "string",
-    default: String(DEFAULT_TIMED_APPROVAL_MINUTES),
-  });
 
   pi.registerFlag("allow", {
     description: "Add temporary allow rules (comma-separated, format: \"permission: pattern\")",

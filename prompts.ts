@@ -15,7 +15,7 @@ import { toDisplayPath } from "./project.ts";
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
-export type PermissionDuration = "once" | "session" | "project" | "global" | "turn" | "timed";
+export type PermissionDuration = "once" | "session" | "project" | "global" | "turn";
 
 /**
  * Result from the permission prompt.
@@ -37,8 +37,6 @@ export interface PermissionPromptOptions {
   unapproved?: string[];
   redirectTargets?: Array<{ permission: "read" | "edit"; path: string }>;
   reason?: string | undefined;
-  /** Minutes for timed approval (default 15). */
-  timedApprovalMinutes?: number;
   /** True when re-prompting after rules were added but still insufficient. */
   reprompt?: boolean;
 }
@@ -88,13 +86,12 @@ function makeItem(text: string, isFile: boolean): CommandListItem {
   };
 }
 
-function getDurationOptions(timedMinutes: number): DurationOption[] {
+function getDurationOptions(): DurationOption[] {
   return [
     { value: "once", label: "Once" },
     { value: "session", label: "Session" },
     { value: "project", label: "Project" },
     { value: "turn", label: "Turn" },
-    { value: "timed", label: `${timedMinutes}m` },
     { value: "global", label: "Global" },
   ];
 }
@@ -420,7 +417,6 @@ export async function showPermissionPrompt(
   if (!ctx.hasUI) return null;
 
   const isFile = opts.permission === "read" || opts.permission === "edit";
-  const minutes = opts.timedApprovalMinutes ?? 15;
 
   // Build items
   const items: CommandListItem[] = [];
@@ -450,7 +446,7 @@ export async function showPermissionPrompt(
     ? `⚠️ ${opts.permission} approval required`
     : "⚠️ bash approval required";
 
-  const durationOptions = getDurationOptions(minutes);
+  const durationOptions = getDurationOptions();
 
   return withToolsExpanded(ctx, () =>
     ctx.ui.custom<PermissionPromptResult | null>((tui, theme, _keybindings, done) => {
