@@ -30,6 +30,8 @@ export interface SubagentSafetynetOpts {
 	initialRules?: Ruleset;
 	/** Build-only: callback to abort the entire subagent session on permission rejection */
 	onPermissionDenied?: () => void;
+	/** Inherited from parent: trust file paths outside the project root */
+	trustExternalPaths?: boolean;
 }
 
 const SUBAGENT_EPHEMERAL_CUSTOM_TYPE = "safetynet:subagent-ephemeral";
@@ -99,7 +101,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 	}
 	const parentCtx: ExtensionContext = opts.parentCtx;
 	const parentStorage: PermissionStorage = opts.parentStorage;
-	const { initialRules, cwd, onPermissionDenied } = opts;
+	const { initialRules, cwd, onPermissionDenied, trustExternalPaths = false } = opts;
 
 	return (pi: ExtensionAPI) => {
 		let subagentStorage: PermissionStorage;
@@ -121,7 +123,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 				if (event.toolName === "bash") {
 					const command = event.input.command as string;
 					const rules = subagentStorage.getAllRules();
-					const check = checkBashPermission(command, profile, rules, cwd);
+					const check = checkBashPermission(command, profile, rules, cwd, trustExternalPaths);
 
 					if (check.action === "deny") {
 						ctx.abort();
@@ -134,7 +136,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 						permission: "bash",
 						target: command,
 						check,
-						recheck: () => checkBashPermission(command, profile, subagentStorage.getAllRules(), cwd),
+						recheck: () => checkBashPermission(command, profile, subagentStorage.getAllRules(), cwd, trustExternalPaths),
 					});
 				}
 
@@ -144,8 +146,8 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					return resolvePermission(ctx, {
 						permission: "read",
 						target: filePath,
-						check: checkFileTarget(filePath, "read", profile, rules, cwd),
-						recheck: () => checkFileTarget(filePath, "read", profile, subagentStorage.getAllRules(), cwd),
+						check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternalPaths),
+						recheck: () => checkFileTarget(filePath, "read", profile, subagentStorage.getAllRules(), cwd, trustExternalPaths),
 					});
 				}
 
@@ -155,8 +157,8 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					return resolvePermission(ctx, {
 						permission: "edit",
 						target: filePath,
-						check: checkFileTarget(filePath, "edit", profile, rules, cwd),
-						recheck: () => checkFileTarget(filePath, "edit", profile, subagentStorage.getAllRules(), cwd),
+						check: checkFileTarget(filePath, "edit", profile, rules, cwd, trustExternalPaths),
+						recheck: () => checkFileTarget(filePath, "edit", profile, subagentStorage.getAllRules(), cwd, trustExternalPaths),
 					});
 				}
 
@@ -166,8 +168,8 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					return resolvePermission(ctx, {
 						permission: "read",
 						target: filePath,
-						check: checkFileTarget(filePath, "read", profile, rules, cwd),
-						recheck: () => checkFileTarget(filePath, "read", profile, subagentStorage.getAllRules(), cwd),
+						check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternalPaths),
+						recheck: () => checkFileTarget(filePath, "read", profile, subagentStorage.getAllRules(), cwd, trustExternalPaths),
 					});
 				}
 			} catch (err) {

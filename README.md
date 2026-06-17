@@ -118,6 +118,17 @@ pi-safetynet detects your project root (the nearest `.pi/` directory) and treats
 
 If you add a specific allow rule for an external path (e.g. `read: /etc/hosts`), that takes precedence and future accesses won't prompt.
 
+You can disable the outside-cwd enforcement entirely with the `trustExternalPaths` setting. This is an **enforcement-only** flag: when enabled, all file paths are trusted the same as in-cwd paths (the `read: **` catch-all applies to external paths and `cd` to external directories is auto-approved), but path display logic is unchanged. Opt in via either the global config file or the CLI flag:
+
+```json
+{ "trustExternalPaths": true }
+```
+
+**Example:** `pi --trust-external-paths`
+
+Hazardous-file protection (`.env`, `.ssh`, credentials, etc.) and catastrophic-command blocking are orthogonal and remain in effect.
+
+
 ## Approval durations
 
 When pi-safetynet prompts for approval, you choose how long the permission lasts:
@@ -147,6 +158,7 @@ The approval UI shows exactly what needs approval — individual subcommands in 
 | `--build` | `false` | Start in build mode (full access) |
 | `--allow <rules>` | | Comma-separated allow rules (format: `permission: pattern`) |
 | `--plan-on-error` | `true` | Enable plan-on-error mode |
+| `--trust-external-paths` | `false` | Trust file paths outside the project root (skip external-path approval) |
 **Example:** `pi --build --allow "edit: src/**, bash: npm *"`
 
 ## Commands

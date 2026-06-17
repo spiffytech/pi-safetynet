@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction } from "./types.ts";
 import questionnaire from "./questionnaire.ts";
-import { loadSubagentsConfig } from "./global-config.ts";
+import { loadSubagentsConfig, loadTrustExternalPaths } from "./global-config.ts";
 import { runSubagent, addUsage, formatSubagentUsage, ZERO_USAGE, type SubagentUsage } from "./subagent.ts";
 import {
   getBaselineRules,
@@ -320,6 +320,12 @@ async function resolvePermission(
   }
 }
 
+/** Whether to trust file paths outside the project root (skip external-path approval).
+ *  Opt-in via the global config key OR the `--trust-external-paths` CLI flag. */
+function trustExternalActive(): boolean {
+  return loadTrustExternalPaths() || pi.getFlag("trust-external-paths") === true;
+}
+
 async function handleToolCall(
   event: ToolCallEvent,
   ctx: ExtensionContext,
@@ -328,11 +334,12 @@ async function handleToolCall(
     const profile = getCurrentProfile();
 
     const cwd = ctx.cwd;
+    const trustExternal = trustExternalActive();
 
     if (event.toolName === "bash") {
       const command = event.input.command as string;
       const rules = storage.getAllRules();
-      const check = checkBashPermission(command, profile, rules, cwd);
+      const check = checkBashPermission(command, profile, rules, cwd, trustExternal);
 
       if (check.action === "deny") {
         ctx.abort();
@@ -345,7 +352,7 @@ async function handleToolCall(
         permission: "bash",
         target: command,
         check,
-        recheck: () => checkBashPermission(command, profile, storage.getAllRules(), cwd),
+        recheck: () => checkBashPermission(command, profile, storage.getAllRules(), cwd, trustExternal),
         cwd,
       });
     }
@@ -356,8 +363,8 @@ async function handleToolCall(
       return resolvePermission(ctx, {
         permission: "read",
         target: filePath,
-        check: checkFileTarget(filePath, "read", profile, rules, cwd),
-        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules(), cwd),
+        check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternal),
+        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules(), cwd, trustExternal),
         cwd,
       });
     }
@@ -372,8 +379,8 @@ async function handleToolCall(
       return resolvePermission(ctx, {
         permission: "edit",
         target: filePath,
-        check: checkFileTarget(filePath, "edit", profile, rules, cwd),
-        recheck: () => checkFileTarget(filePath, "edit", profile, storage.getAllRules(), cwd),
+        check: checkFileTarget(filePath, "edit", profile, rules, cwd, trustExternal),
+        recheck: () => checkFileTarget(filePath, "edit", profile, storage.getAllRules(), cwd, trustExternal),
         cwd,
       });
     }
@@ -387,8 +394,8 @@ async function handleToolCall(
       return resolvePermission(ctx, {
         permission: "read",
         target: filePath,
-        check: checkFileTarget(filePath, "read", profile, rules, cwd),
-        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules(), cwd),
+        check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternal),
+        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules(), cwd, trustExternal),
         cwd,
       });
     }
@@ -862,6 +869,7 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 				cwd: ctx.cwd,
 				model: resolveModel(params.model, ctx),
 				thinkingLevel: pi.getThinkingLevel(),
+				trustExternalPaths: trustExternalActive(),
 			});
 			if (result.details && typeof result.details === "object" && "usage" in result.details) {
 				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
@@ -896,6 +904,7 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 				cwd: ctx.cwd,
 				model: resolveModel(params.model, ctx),
 				thinkingLevel: pi.getThinkingLevel(),
+				trustExternalPaths: trustExternalActive(),
 			});
 			if (result.details && typeof result.details === "object" && "usage" in result.details) {
 				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
@@ -981,6 +990,12 @@ export default function safetynetExtension(api: ExtensionAPI) {
     description: "Enable plan-on-error mode",
     type: "boolean",
     default: true,
+  });
+
+  pi.registerFlag("trust-external-paths", {
+    description: "Trust file paths outside the project root (skip external-path approval)",
+    type: "boolean",
+    default: false,
   });
 
 

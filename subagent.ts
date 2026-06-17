@@ -175,6 +175,7 @@ export interface SubagentOptions {
 	cwd: string;
 	model?: Model<any> | undefined;
 	thinkingLevel?: string | undefined;
+	trustExternalPaths?: boolean;
 }
 
 /** Max agent turns before we abort the subagent. */
@@ -237,14 +238,15 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 		settingsManager,
 		noExtensions: true,
 		extensionFactories: [
-			createSubagentSafetynetExtension({
-				taskType,
-				parentCtx,
-				parentStorage,
-				initialRules,
-				cwd,
-				onPermissionDenied,
-			}),
+		createSubagentSafetynetExtension({
+			taskType,
+			parentCtx,
+			parentStorage,
+			initialRules,
+			cwd,
+			onPermissionDenied,
+			trustExternalPaths: opts.trustExternalPaths ?? false,
+		}),
 			createDiagnosticExtension(),
 		],
 	};

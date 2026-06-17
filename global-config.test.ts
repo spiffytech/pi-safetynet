@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadGlobalRules, saveGlobalRules, addGlobalRules, getGlobalConfigPath, getGlobalConfigDir, loadDefaultProfile, saveDefaultProfile } from "./global-config.ts";
+import { loadGlobalRules, saveGlobalRules, addGlobalRules, getGlobalConfigPath, getGlobalConfigDir, loadDefaultProfile, saveDefaultProfile, loadTrustExternalPaths } from "./global-config.ts";
 import type { Ruleset } from "./types.ts";
 
 /** Temporary homedir override for testing. */
@@ -208,6 +208,44 @@ describe("global-config", () => {
       writeFileSync(getGlobalConfigPath(), JSON.stringify({ defaultProfile: "build" }), "utf-8");
 
       assert.equal(loadDefaultProfile(), "build");
+    });
+  });
+
+  describe("loadTrustExternalPaths", () => {
+    it("returns false when config file does not exist", () => {
+      assert.equal(loadTrustExternalPaths(), false);
+    });
+
+    it("returns false when config file has no trustExternalPaths key", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ rules: [] }), "utf-8");
+
+      assert.equal(loadTrustExternalPaths(), false);
+    });
+
+    it("returns false for a non-boolean value", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ trustExternalPaths: "yes" }), "utf-8");
+
+      assert.equal(loadTrustExternalPaths(), false);
+    });
+
+    it("returns false when trustExternalPaths is false", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ trustExternalPaths: false }), "utf-8");
+
+      assert.equal(loadTrustExternalPaths(), false);
+    });
+
+    it("returns true when trustExternalPaths is true", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ trustExternalPaths: true }), "utf-8");
+
+      assert.equal(loadTrustExternalPaths(), true);
     });
   });
 

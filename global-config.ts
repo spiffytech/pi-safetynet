@@ -18,6 +18,7 @@ interface GlobalConfig {
   rules?: Ruleset;
   subagents?: string[] | null;
   defaultProfile?: ProfileName;
+  trustExternalPaths?: boolean;
   [key: string]: unknown;
 }
 
@@ -67,6 +68,12 @@ export function loadDefaultProfile(): ProfileName | undefined {
   const val = config.defaultProfile;
   if (val === "plan" || val === "build") return val;
   return undefined;
+}
+
+/** Load trustExternalPaths from global config. Returns false if unset or not a boolean. */
+export function loadTrustExternalPaths(): boolean {
+  const config = loadConfig();
+  return config.trustExternalPaths === true;
 }
 
 /** Save the default profile to global config, preserving other keys. */

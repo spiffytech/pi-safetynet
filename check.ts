@@ -29,6 +29,7 @@ export function checkFileTarget(
   profile: ProfileName,
   rules: Ruleset,
   cwd?: string,
+  trustExternalPaths = false,
 ): PermissionCheck {
   if (isHazardousFile(filePath)) {
     return { action: "deny", reason: "Hazardous file (e.g., .env, .ssh, credentials)" };
@@ -57,7 +58,7 @@ export function checkFileTarget(
   // External paths are identified by the normalized form: internal paths
   // are "." or relative (e.g. "src/foo.ts"), while external paths remain
   // absolute (e.g. "/etc/passwd") after normalization.
-  if (normalized.startsWith("/")) {
+  if (!trustExternalPaths && normalized.startsWith("/")) {
     if (result.action === "allow" && result.matchedRule?.pattern === "**") {
       return { action: "ask", reason: "Path is outside project root" };
     }
@@ -81,9 +82,10 @@ function isBareAssignment(subcommand: string): boolean {
 /**
  * Check whether a subcommand is `cd <path>` where <path> resolves to
  * cwd or a directory below it.  Such commands are always safe and
- * auto-approved.
+ * auto-approved. When `trustExternalPaths` is set, cd to ANY directory
+ * (including those outside cwd) is auto-approved.
  */
-function isCdWithinProject(subcommand: string, cwd: string): boolean {
+function isCdWithinProject(subcommand: string, cwd: string, trustExternalPaths = false): boolean {
   const trimmed = subcommand.trim();
   if (trimmed === "cd") return true; // bare cd → $HOME, harmless
 
@@ -105,8 +107,9 @@ function isCdWithinProject(subcommand: string, cwd: string): boolean {
   // Resolve relative paths against cwd.
   const resolved = target.startsWith("/") ? target : resolve(cwd, target);
 
-  // Target must be within or equal to cwd
-  return resolved.startsWith(cwd + "/") || resolved === cwd;
+  // Target must be within or equal to cwd. When external paths are
+  // trusted, auto-approve cd to any directory.
+  return trustExternalPaths || resolved.startsWith(cwd + "/") || resolved === cwd;
 }
 
 export function checkBashPermission(
@@ -114,6 +117,7 @@ export function checkBashPermission(
   profile: ProfileName,
   rules: Ruleset,
   cwd?: string,
+  trustExternalPaths = false,
 ): PermissionCheck {
   const parsed = parseCommand(command);
 
@@ -140,7 +144,7 @@ export function checkBashPermission(
     // Auto-approve cd when the target is within (or equal to) cwd.
     // cd to the project or a subdirectory is always safe and the LLM
     // frequently emits it as a preamble (e.g. "cd <cwd> && git diff").
-    if (isCdWithinProject(sub, absCwd)) continue;
+    if (isCdWithinProject(sub, absCwd, trustExternalPaths)) continue;
 
     // Bare variable assignments (e.g. ORDER_ID=abc) are always safe.
     // Command substitutions in values are extracted as separate subcommands.
@@ -160,7 +164,7 @@ export function checkBashPermission(
 
   for (const target of parsed.redirects) {
     const perm = target.direction === "input" ? "read" : "edit";
-    const targetResult = checkFileTarget(target.path, perm, profile, rules, cwd);
+    const targetResult = checkFileTarget(target.path, perm, profile, rules, cwd, trustExternalPaths);
     if (targetResult.action === "deny") {
       worstAction = "deny";
       redirectTargets.push({ permission: perm, path: target.path });

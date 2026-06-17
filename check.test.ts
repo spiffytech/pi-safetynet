@@ -299,6 +299,45 @@ describe("read-only tools (grep/find/ls) use read permission, not bash parsing",
   });
 });
 
+describe("trustExternalPaths enforcement", () => {
+  it("checkFileTarget honors baseline read: ** allow for external path when trusted", () => {
+    // Without trust, /etc/passwd would be downgraded to "ask" by the
+    // external-path catch-all. With trust, the baseline allow applies.
+    const result = checkFileTarget("/etc/passwd", "read", "build", RULES, CWD, true);
+    assert.equal(result.action, "allow");
+  });
+
+  it("checkFileTarget still denies hazardous external files when trusted", () => {
+    // Hazardous-file protection is orthogonal to the cwd boundary.
+    const result = checkFileTarget("/tmp/.env", "read", "build", RULES, CWD, true);
+    assert.equal(result.action, "deny");
+  });
+
+  it("checkBashPermission auto-approves cd to external dir when trusted", () => {
+    const result = checkBashPermission("cd /tmp", "build", RULES, CWD, true);
+    assert.equal(result.action, "allow");
+    assert.ok(!(result.unapproved ?? []).includes("cd /tmp"));
+  });
+
+  it("checkBashPermission still evaluated non-cd subcommands when trusted", () => {
+    // Non-cd subcommands go through normal rule evaluation; curl isn't
+    // in the baseline allowlist so it should be asked about.
+    const result = checkBashPermission("curl http://example.com", "build", RULES, CWD, true);
+    assert.equal(result.action, "ask");
+  });
+
+  it("checkFileTarget still downgrades external path when trust is off (default)", () => {
+    // Default param (no 6th arg) — backward compatibility.
+    const result = checkFileTarget("/etc/passwd", "read", "build", RULES, CWD);
+    assert.equal(result.action, "ask");
+  });
+
+  it("checkBashPermission still requires approval for cd outside cwd when trust is off (default)", () => {
+    const result = checkBashPermission("cd /tmp", "build", RULES, CWD);
+    assert.equal(result.action, "ask");
+  });
+});
+
 describe("denial reason propagation", () => {
   const ALL_MODES: ["build", "plan"] = ["build", "plan"];
 
