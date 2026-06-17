@@ -457,6 +457,20 @@ describe("composition: bash permission end-to-end", () => {
     });
   });
 
+  describe("empty-quoted arguments match allow rules", () => {
+    it("allows echo with empty double-quoted arg", () => {
+      assert.equal(checkBashPermission('echo ""', "build", BASELINE).action, "allow");
+    });
+
+    it("allows echo with empty single-quoted arg", () => {
+      assert.equal(checkBashPermission("echo ''", "build", BASELINE).action, "allow");
+    });
+
+    it("allows multi-subcommand chain containing echo \"\"", () => {
+      assert.equal(checkBashPermission('echo "" && grep foo bar', "build", BASELINE).action, "allow");
+    });
+  });
+
   describe("find -exec/-delete composition", () => {
     it("returns ask for find -delete in build mode", () => {
       assert.equal(checkBashPermission("find . -delete", "build", BASELINE).action, "ask");

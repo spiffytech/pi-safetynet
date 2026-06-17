@@ -35,12 +35,14 @@ function wordToString(w: Word): string | null {
       if (p.type === "Literal") return p.value ?? "";
       if (p.type === "SglQuoted") {
         const v = p.value ?? "";
+        if (v === "") return "''";
         return isOpaqueString(v) ? "'...'" : v;
       }
       if (p.type === "DblQuoted") {
         const literal = dblQuotedToString(p);
-        if (literal !== null) return isOpaqueString(literal) ? '"..."' : literal;
-        return '"..."';
+        if (literal === null) return '"..."';
+        if (literal === "") return '""';
+        return isOpaqueString(literal) ? '"..."' : literal;
       }
       if (p.type === "ParamExp") return "${...}";
       if (p.type === "CmdSubst") return "$(...)";
