@@ -21,6 +21,7 @@ import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction } from "./t
 import questionnaire from "./questionnaire.ts";
 import { loadSubagentsConfig, loadTrustExternalPaths } from "./global-config.ts";
 import { runSubagent, addUsage, formatSubagentUsage, ZERO_USAGE, type SubagentUsage } from "./subagent.ts";
+import { registerGrepBannerTool } from "./grep-banner.ts";
 import {
   getBaselineRules,
   PermissionStorage,
@@ -973,6 +974,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
   storage = new PermissionStorage(pi, process.cwd());
 
   registerPlanTools(pi);
+  registerGrepBannerTool(pi);
   // registerAnswerTool(pi); // temporarily disabled
   // questionnaire(pi); // disabled
 	const subagents = loadSubagentsConfig();
