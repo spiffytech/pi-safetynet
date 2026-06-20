@@ -34,6 +34,7 @@ Every `bash` tool call is parsed and decomposed into its constituent parts:
 | **Output redirects** | `cmd > out.txt` → `edit: out.txt` | Redirects to real files are treated as edits — writing to a file is writing to a file |
 | **Input redirects** | `sort < .env` → `read: .env` | Input redirects go through read-permission checks, catching secret file access |
 | **xargs inner commands** | `xargs -0 rm` → `rm` | The *actual* command inside xargs is what gets evaluated, not `xargs` itself |
+| **timeout inner command** | `timeout 10 rm` → `[timeout 10, rm]` | The wrapper (`timeout <dur>`) is preapproved; the inner command is evaluated normally |
 | **sudo + underlying command** | `sudo rm file` → `sudo rm file` | sudo is always kept as a prefix; the inner command is still evaluated |
 | **find -exec/-delete** | `find . -exec rm {} \;` → `find:exec` | `find` with destructive actions gets a dedicated classification |
 | **Command substitutions** | `echo "$(whoami)"` → `[echo ..., whoami]` | Subcommands inside `$()` are recursively extracted |
@@ -184,7 +185,7 @@ This table reflects the gaps that motivated building pi-safetynet. I haven't rig
 | `sed -i` vs `sed -n` distinction | ✅ In-place flags detected | Both may match `sed` |
 | Interpreter one-liner detection | ✅ `python -c`, `node -e`, etc. | May see only the interpreter name |
 | Plan mode bash write prevention | ✅ All edit-equivalent techniques blocked | Typically only edit/write tools disabled |
-| Catastrophic command detection | ✅ AST-level: peels sudo flags, xargs, quotes | Often substring matching |
+| Catastrophic command detection | ✅ AST-level: peels sudo flags, timeout, xargs, quotes | Often substring matching |
 | `[ -f /etc/passwd ]` as file read | ✅ Test operators tracked as reads | Often not tracked as file access |
 | Hazardous file protection | ✅ `.env`, `.ssh`, credentials, etc. | ⚠️ Varies — sometimes config-driven |
 | External path approval | ✅ Auto-detects paths outside project root | Project root awareness varies |

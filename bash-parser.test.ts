@@ -178,6 +178,31 @@ describe("parseCommand", () => {
       assert.deepEqual(parseCommand("xargs --max-args=2 echo hello").subcommands, ["echo hello"]);
     });
 
+    // timeout <duration> cmd: wrapper is preapproved (baseline timeout *),
+    // and we also push the inner command so it gets evaluated normally.
+    it("strips timeout and returns inner command", () => {
+      const r = parseCommand("timeout 10 echo hi").subcommands;
+      assert.ok(r.includes("timeout 10"));
+      assert.ok(r.includes("echo hi"));
+    });
+
+    it("strips timeout with suffixed duration", () => {
+      const r = parseCommand("timeout 5s rm file").subcommands;
+      assert.ok(r.includes("timeout 5s"));
+      assert.ok(r.includes("rm file"));
+    });
+
+    it("handles timeout 0 duration", () => {
+      const r = parseCommand("timeout 0 cat foo").subcommands;
+      assert.ok(r.includes("timeout 0"));
+      assert.ok(r.includes("cat foo"));
+    });
+
+    it("timeout with no inner command only pushes the wrapper", () => {
+      const r = parseCommand("timeout 10").subcommands;
+      assert.deepEqual(r, ["timeout 10"]);
+    });
+
     it("keeps sudo prefix with xargs inside", () => {
       // sudo xargs: sudo is kept, xargs is stripped
       assert.ok(parseCommand("sudo xargs rm file").subcommands.some((c) => c === "sudo rm file"));
@@ -400,6 +425,9 @@ describe("parseCommand", () => {
       ["xargs -n 2 chmod 777 /usr", "xargs chmod protected"],
       ["xargs -I {} chown root /etc", "xargs chown protected"],
       ["sudo xargs rm -rf /etc", "sudo xargs rm protected"],
+      ["timeout 10 rm -rf /etc", "timeout rm protected"],
+      ["timeout 5 mkfs.ext4 /dev/sda1", "timeout mkfs"],
+      ["sudo timeout 10 rm -rf /etc", "sudo timeout rm protected"],
     ] as const;
 
     const ALLOWED = [

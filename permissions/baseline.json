@@ -79,6 +79,7 @@
     { "permission": "bash", "pattern": "expr *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "factor *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "sleep *", "action": "allow", "modes": ["build", "plan"] },
+    { "permission": "bash", "pattern": "timeout *", "action": "allow", "modes": ["build", "plan"] },
 
     { "permission": "bash", "pattern": "basename *", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "dirname *", "action": "allow", "modes": ["build", "plan"] },

@@ -318,6 +318,32 @@ function skipXargsFlags(words: Word[], start: number): number {
   return i;
 }
 
+/** Walks past a sudo + sudo-flags prefix in `words` (starting at index 0)
+ *  and returns the index of the first non-sudo word (the effective command).
+ *  Mirrors the sudo-peel logic in getBaseWord/getNonFlagArgsFromNode so
+ *  the timeout/xargs detection in walkCommands shares one implementation. */
+function findEffectiveCommandIdx(words: Word[]): number {
+  if (wordToString(words[0] as Word) !== "sudo") return 0;
+  let skipNext = false;
+  for (let i = 1; i < words.length; i++) {
+    const w = wordToString(words[i]!);
+    if (!w) continue;
+    if (skipNext) { skipNext = false; continue; }
+    if (w.startsWith("-")) {
+      if (SUDO_FLAGS_WITH_ARGS.has(w)) skipNext = true;
+      continue;
+    }
+    return i;
+  }
+  return words.length;
+}
+
+/** Returns true iff `s` looks like a `timeout` DURATION operand
+ *  (GNU coreutils: NUMBER[SUFFIX], always digit-led). */
+function isTimeoutDuration(s: string | null): boolean {
+  return s !== null && /^\d/.test(s);
+}
+
 /** Convert an array of Words to a space-joined string. */
 function wordsToString(words: Word[]): string {
   const parts: string[] = [];
@@ -381,6 +407,12 @@ function getBaseWord(cmd: SimpleCommand): string | null {
     }
   }
 
+  // Peel off `timeout DURATION` (simple form: timeout <duration> cmd)
+  if (i < words.length && wordToString(words[i] as Word) === "timeout" &&
+      isTimeoutDuration(wordToString(words[i + 1] as Word))) {
+    i += 2;
+  }
+
   // Peel off xargs (and its flags)
   if (i < words.length && wordToString(words[i] as Word) === "xargs") {
     i = skipXargsFlags(words, i + 1);
@@ -407,6 +439,12 @@ function getNonFlagArgsFromNode(cmd: SimpleCommand): string[] {
       }
       break;
     }
+  }
+
+  // Peel off `timeout DURATION` (simple form: timeout <duration> cmd)
+  if (i < words.length && wordToString(words[i] as Word) === "timeout" &&
+      isTimeoutDuration(wordToString(words[i + 1] as Word))) {
+    i += 2;
   }
 
   // Peel off xargs
@@ -586,34 +624,29 @@ export function parseCommand(command: string): ParsedCommand {
 
         if (isNodeCatastrophic(cmd)) catastrophic = true;
 
-        // Strip xargs (and its flags) from the subcommand so that
-        // permissions are checked against the inner command.
+        // Strip wrappers (timeout DURATION, xargs + flags) from the
+        // subcommand so permissions are checked against the inner command.
         // Keep sudo prefix since sudo commands should always require approval.
         const words = cmd.words ?? [];
-        const firstEffective = wordToString(words[0] as Word);
+        const effectiveIdx = findEffectiveCommandIdx(words);
+        const effective = wordToString(words[effectiveIdx] as Word);
 
-        // Determine where xargs starts (position 0, or after sudo flags)
-        let xargsIdx = -1;
-        if (firstEffective === "xargs") {
-          xargsIdx = 0;
-        } else if (firstEffective === "sudo") {
-          let skipNext = false;
-          for (let si = 1; si < words.length; si++) {
-            const sw = wordToString(words[si] as Word);
-            if (!sw) continue;
-            if (skipNext) { skipNext = false; continue; }
-            if (sw.startsWith("-")) {
-              if (SUDO_FLAGS_WITH_ARGS.has(sw)) skipNext = true;
-              continue;
-            }
-            if (sw === "xargs") xargsIdx = si;
-            break;
+        // `timeout <duration> cmd`: push the wrapper (preapproved via
+        // baseline `timeout *`) AND the inner command so the real
+        // command is what gets asked about.
+        if (effective === "timeout" &&
+            isTimeoutDuration(wordToString(words[effectiveIdx + 1] as Word))) {
+          const prefixWords = words.slice(0, effectiveIdx); // e.g. [sudo ...]
+          const wrapperWords = [...prefixWords, words[effectiveIdx]!, words[effectiveIdx + 1]!];
+          subcommands.push(appendRedirectSuffix(wordsToString(wrapperWords), cmd.redirects, false));
+          const innerWords = words.slice(effectiveIdx + 2);
+          if (innerWords.length) {
+            subcommands.push(appendRedirectSuffix(wordsToString([...prefixWords, ...innerWords]), cmd.redirects, false));
           }
-        }
-
-        if (xargsIdx >= 0) {
-          const innerStart = skipXargsFlags(words, xargsIdx + 1);
-          const prefixWords = words.slice(0, xargsIdx); // e.g. [sudo ...]
+        } else if (effective === "xargs") {
+          // findEffectiveCommandIdx already skipped any sudo prefix
+          const innerStart = skipXargsFlags(words, effectiveIdx + 1);
+          const prefixWords = words.slice(0, effectiveIdx); // e.g. [sudo ...]
           const innerWords = words.slice(innerStart);
           const allWords = [...prefixWords, ...innerWords];
           if (allWords.length) {
@@ -695,30 +728,24 @@ export function parseCommand(command: string): ParsedCommand {
 
           if (isNodeCatastrophic(cmd)) catastrophic = true;
 
+          // Strip wrappers (timeout DURATION, xargs + flags) so permissions
+          // are checked against the inner command. sudo prefix is kept.
           const words = cmd.words ?? [];
-          const firstEffective = wordToString(words[0] as Word);
+          const effectiveIdx = findEffectiveCommandIdx(words);
+          const effective = wordToString(words[effectiveIdx] as Word);
 
-          let xargsIdx = -1;
-          if (firstEffective === "xargs") {
-            xargsIdx = 0;
-          } else if (firstEffective === "sudo") {
-            let skipNext = false;
-            for (let si = 1; si < words.length; si++) {
-              const sw = wordToString(words[si] as Word);
-              if (!sw) continue;
-              if (skipNext) { skipNext = false; continue; }
-              if (sw.startsWith("-")) {
-                if (SUDO_FLAGS_WITH_ARGS.has(sw)) skipNext = true;
-                continue;
-              }
-              if (sw === "xargs") xargsIdx = si;
-              break;
+          if (effective === "timeout" &&
+              isTimeoutDuration(wordToString(words[effectiveIdx + 1] as Word))) {
+            const prefixWords = words.slice(0, effectiveIdx);
+            const wrapperWords = [...prefixWords, words[effectiveIdx]!, words[effectiveIdx + 1]!];
+            subcommands.push(appendRedirectSuffix(wordsToString(wrapperWords), cmd.redirects, true));
+            const innerWords = words.slice(effectiveIdx + 2);
+            if (innerWords.length) {
+              subcommands.push(appendRedirectSuffix(wordsToString([...prefixWords, ...innerWords]), cmd.redirects, true));
             }
-          }
-
-          if (xargsIdx >= 0) {
-            const innerStart = skipXargsFlags(words, xargsIdx + 1);
-            const prefixWords = words.slice(0, xargsIdx);
+          } else if (effective === "xargs") {
+            const innerStart = skipXargsFlags(words, effectiveIdx + 1);
+            const prefixWords = words.slice(0, effectiveIdx);
             const innerWords = words.slice(innerStart);
             const allWords = [...prefixWords, ...innerWords];
             if (allWords.length) {

@@ -455,6 +455,26 @@ describe("composition: bash permission end-to-end", () => {
     it("denies sudo -E chown on protected dir", () => {
       assert.equal(checkBashPermission("sudo -E chown root /usr", "build", BASELINE).action, "deny");
     });
+
+    // timeout <duration> cmd: the wrapper (timeout <dur>) is preapproved via
+    // baseline, and the inner command is evaluated separately.
+    it("allows timeout 10 echo hi (wrapper + echo both allow)", () => {
+      assert.equal(checkBashPermission("timeout 10 echo hi", "build", BASELINE).action, "allow");
+    });
+
+    it("returns ask for timeout 10 rm file.txt (asks about inner cmd)", () => {
+      const result = checkBashPermission("timeout 10 rm file.txt", "build", BASELINE);
+      assert.equal(result.action, "ask");
+      assert.ok(result.unapproved?.includes("rm file.txt"));
+    });
+
+    it("denies timeout 5 rm -rf /etc (catastrophic peels timeout)", () => {
+      assert.equal(checkBashPermission("timeout 5 rm -rf /etc", "build", BASELINE).action, "deny");
+    });
+
+    it("allows timeout 10 cat file.txt (wrapper + cat both allow)", () => {
+      assert.equal(checkBashPermission("timeout 10 cat file.txt", "build", BASELINE).action, "allow");
+    });
   });
 
   describe("empty-quoted arguments match allow rules", () => {
