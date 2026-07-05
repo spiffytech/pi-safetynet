@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction } from "./types.ts";
 import questionnaire from "./questionnaire.ts";
-import { loadSubagentsConfig, loadTrustExternalPaths } from "./global-config.ts";
+import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile } from "./global-config.ts";
 import { runSubagent, addUsage, formatSubagentUsage, ZERO_USAGE, type SubagentUsage } from "./subagent.ts";
 import {
   getBaselineRules,
@@ -1020,6 +1020,18 @@ export default function safetynetExtension(api: ExtensionAPI) {
     }
     currentThinkingLevel = pi.getThinkingLevel();
     await restoreSessionState(ctx, { init: true, notify: true, replaceSession: event.reason === "fork" });
+
+    // Brand-new sessions always start in the configured default profile (plan by default).
+    // Forks/resume/reload inherit the persisted profile via restoreSessionState above.
+    if (event.reason === "new" || event.reason === "startup") {
+      const defaultProfile = loadDefaultProfile() ?? "plan";
+      setCurrentProfile(defaultProfile);
+      persistProfile(pi);
+      updateStatus(ctx);
+      if (ctx.hasUI) {
+        ctx.ui.notify(`New session: starting in ${defaultProfile} mode`, "info");
+      }
+    }
 
     // Ensure plans directory exists
     mkdirSync(plansDir, { recursive: true });
