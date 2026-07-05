@@ -2,6 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
+  Editor,
   type Focusable,
   Input,
   Key,
@@ -10,6 +11,19 @@ import {
   type TUI,
   visibleWidth,
 } from "@earendil-works/pi-tui";
+
+/**
+ * Minimal editor interface the prompt component needs. The real UI uses
+ * pi-tui's `Editor`; tests inject a lightweight fake (the real `Editor`
+ * requires a TUI instance and reads terminal rows on every input).
+ */
+export interface DenyEditor {
+  handleInput(data: string): void;
+  render(width: number): string[];
+  getText(): string;
+  setText(text: string): void;
+  invalidate(): void;
+}
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { toDisplayPath } from "./project.ts";
 
@@ -25,11 +39,19 @@ export type PermissionDuration = "once" | "session" | "project" | "global" | "tu
  * (possibly edited) text as the pattern, keyed by the original text
  * to know which check.unapproved entries are covered.
  */
-export interface PermissionPromptResult {
-  approved: Map<string, string>; // original → possibly-edited
-  skipped: string[];
-  duration: PermissionDuration;
-}
+/**
+ * Result from the permission prompt.
+ *
+ * - `approve`: the user accepted one or more items, mapping each original item
+ *   text → possibly-edited approved text. The caller should create rules for the
+ *   approved items using the (possibly edited) text as the pattern, keyed by
+ *   the original text to know which check.unapproved entries are covered.
+ * - `deny`: the user rejected this call with a typed explanation. The caller
+ *   should surface the explanation to the model WITHOUT aborting the turn.
+ */
+export type PermissionPromptResult =
+  | { kind: "approve"; approved: Map<string, string>; skipped: string[]; duration: PermissionDuration }
+  | { kind: "deny"; explanation: string };
 
 export interface PermissionPromptOptions {
   permission: "bash" | "edit" | "read";
@@ -63,7 +85,7 @@ interface DurationOption {
   label: string;
 }
 
-type FocusZone = "commands" | "duration";
+type FocusZone = "commands" | "duration" | "deny";
 
 const MAX_DISPLAY_CHARS = 280;
 
@@ -76,7 +98,27 @@ function displayText(item: CommandListItem): string {
   return firstLine.slice(0, MAX_DISPLAY_CHARS - 1) + "…";
 }
 
-function makeItem(text: string, isFile: boolean): CommandListItem {
+// Regexes for stripping pi-tui Editor's own top/bottom border lines
+// (ported from pi-ask's getEditorContentLines) so the widget inlines cleanly.
+const EDITOR_BORDER_PATTERN = /^[┌┐└┘─]+$/;
+const EDITOR_SCROLL_BORDER_PATTERN = /^─── [↑↓] \d+ more ─*$/;
+
+function isEditorBorderLine(line: string): boolean {
+  // Strip ANSI escape sequences before matching border glyphs.
+  const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+  return EDITOR_BORDER_PATTERN.test(stripped) || EDITOR_SCROLL_BORDER_PATTERN.test(stripped);
+}
+
+function getEditorContentLines(editorLines: string[]): string[] {
+  if (editorLines.length <= 2) return editorLines;
+  // Drop the first line and the first trailing border line.
+  const contentLines = editorLines.slice(1);
+  const trailingBorderIndex = contentLines.findIndex(isEditorBorderLine);
+  if (trailingBorderIndex === -1) return contentLines;
+  return contentLines.filter((_, i) => i !== trailingBorderIndex);
+}
+
+export function makeItem(text: string, isFile: boolean): CommandListItem {
   return {
     original: text,
     text,
@@ -86,7 +128,7 @@ function makeItem(text: string, isFile: boolean): CommandListItem {
   };
 }
 
-function getDurationOptions(): DurationOption[] {
+export function getDurationOptions(): DurationOption[] {
   return [
     { value: "once", label: "Once" },
     { value: "session", label: "Session" },
@@ -98,7 +140,7 @@ function getDurationOptions(): DurationOption[] {
 
 // ─── Internal: PermissionPromptComponent ──────────────────────────────────
 
-class PermissionPromptComponent implements Component, Focusable {
+export class PermissionPromptComponent implements Component, Focusable {
   focused: boolean = false;
 
   private items: CommandListItem[];
@@ -112,7 +154,7 @@ class PermissionPromptComponent implements Component, Focusable {
   private theme: Theme;
   private cachedWidth: number | undefined = undefined;
   private cachedLines: string[] | undefined = undefined;
-
+  private denyEditor: DenyEditor;
   onConfirm?: (result: PermissionPromptResult) => void;
   onCancel?: () => void;
 
@@ -123,6 +165,7 @@ class PermissionPromptComponent implements Component, Focusable {
     extraHeaderLines: string[],
     reason: string | undefined,
     theme: Theme,
+    denyEditor: DenyEditor,
   ) {
     this.items = items;
     this.durationOptions = durationOptions;
@@ -130,6 +173,7 @@ class PermissionPromptComponent implements Component, Focusable {
     this.extraHeaderLines = extraHeaderLines;
     this.reason = reason;
     this.theme = theme;
+    this.denyEditor = denyEditor;
   }
 
   render(width: number): string[] {
@@ -194,11 +238,34 @@ class PermissionPromptComponent implements Component, Focusable {
       lines.push(" " + parts.join("  "));
     }
 
+    // Deny affordance: a tab-reachable [Deny…] row. When focused, drops
+    // into an expanding editor (pi-ask-style). Empty submit = plain deny;
+    // submit with text = deny-with-explanation.
+    {
+      lines.push("");
+      if (this.focusZone === "deny") {
+        const text = this.denyEditor.getText();
+        const isEmpty = text.length === 0;
+        lines.push(this.theme.fg("accent", " ▸ deny:"));
+        const editorLines = this.denyEditor.render(innerW - 4);
+        const content = getEditorContentLines(editorLines);
+        if (isEmpty) {
+          lines.push(this.theme.fg("muted", "   type a reason, or Enter to deny"));
+        } else {
+          for (const el of content) lines.push("   " + el);
+        }
+      } else {
+        lines.push("  [Deny…]");
+      }
+    }
+
     // Help text
     {
-      const help = this.focusZone === "commands"
-        ? "↑↓ navigate · space toggle · enter edit · tab duration · esc deny"
-        : "←→ switch · enter confirm · shift+tab commands · esc deny";
+      const help = this.focusZone === "deny"
+        ? "enter deny (empty = no reason) · esc back · shift+tab duration"
+        : this.focusZone === "commands"
+          ? "↑↓ navigate · space toggle · enter edit · tab duration · esc deny"
+          : "←→ switch · enter confirm · tab deny · shift+tab commands · esc deny";
       lines.push(this.theme.fg("dim", " " + truncateToWidth(help, innerW - 1)));
     }
 
@@ -213,10 +280,11 @@ class PermissionPromptComponent implements Component, Focusable {
     for (const item of this.items) {
       if (item.input) item.input.invalidate();
     }
+    this.denyEditor.invalidate();
   }
 
   handleInput(data: string): void {
-    // If editing, route to Input first
+    // If editing a command, route to its inline Input first.
     if (this.focusZone === "commands" && this.selectedIndex < this.items.length) {
       const item = this.items[this.selectedIndex]!;
       if (item.editing && item.input) {
@@ -225,15 +293,24 @@ class PermissionPromptComponent implements Component, Focusable {
       }
     }
 
+    // Esc: in the deny editor zone, back out to duration (no abort).
+    // Everywhere else, Esc aborts the turn.
     if (matchesKey(data, Key.escape)) {
-      this.onCancel?.();
+      if (this.focusZone === "deny") {
+        this.focusZone = "duration";
+        this.invalidate();
+      } else {
+        this.onCancel?.();
+      }
       return;
     }
 
     if (this.focusZone === "commands") {
       this.handleCommandsInput(data);
-    } else {
+    } else if (this.focusZone === "duration") {
       this.handleDurationInput(data);
+    } else {
+      this.handleDenyEditorInput(data);
     }
   }
 
@@ -277,6 +354,11 @@ class PermissionPromptComponent implements Component, Focusable {
       }
     } else if (matchesKey(data, Key.enter)) {
       this.confirm();
+    } else if (matchesKey(data, Key.tab)) {
+      // Drop into the deny editor row.
+      this.focusZone = "deny";
+      this.denyEditor.setText("");
+      this.invalidate();
     } else if (matchesKey(data, "shift+tab")) {
       this.focusZone = "commands";
       this.invalidate();
@@ -285,6 +367,35 @@ class PermissionPromptComponent implements Component, Focusable {
       this.selectedIndex = this.items.length - 1;
       this.invalidate();
     }
+  }
+
+  // Deny editor zone: an expanding textbox (pi-ask-style).
+  //  - Empty editor: Tab/Shift+Tab/arrows navigate away; Enter submits plain deny.
+  //  - Non-empty: Tab/arrows delegated to the editor; Enter submits deny-with-explanation.
+  //  - Whitespace-only trims to empty and submits as plain deny.
+  private handleDenyEditorInput(data: string): void {
+    const isEmpty = this.denyEditor.getText().length === 0;
+    if (matchesKey(data, Key.enter)) {
+      const explanation = this.denyEditor.getText().trim();
+      this.onConfirm?.({ kind: "deny", explanation });
+      return;
+    }
+    if (isEmpty) {
+      if (matchesKey(data, "shift+tab") || matchesKey(data, Key.up)) {
+        this.focusZone = "duration";
+        this.invalidate();
+        return;
+      }
+      if (matchesKey(data, Key.tab) || matchesKey(data, Key.down)) {
+        this.focusZone = "commands";
+        this.selectedIndex = 0;
+        this.invalidate();
+        return;
+      }
+    }
+    // Delegate to the editor (typing, cursor movement, etc).
+    this.denyEditor.handleInput(data);
+    this.invalidate();
   }
 
   private startEdit(index: number): void {
@@ -336,6 +447,7 @@ class PermissionPromptComponent implements Component, Focusable {
     }
   }
 
+
   private confirm(): void {
     const approved = new Map<string, string>();
     const skipped: string[] = [];
@@ -349,7 +461,7 @@ class PermissionPromptComponent implements Component, Focusable {
     }
 
     const duration = this.durationOptions[this.selectedDuration]!.value;
-    this.onConfirm?.({ approved, skipped, duration });
+    this.onConfirm?.({ kind: "approve", approved, skipped, duration });
   }
 }
 
@@ -450,6 +562,19 @@ export async function showPermissionPrompt(
 
   return withToolsExpanded(ctx, () =>
     ctx.ui.custom<PermissionPromptResult | null>((tui, theme, _keybindings, done) => {
+      const denyEditor = new Editor(tui, {
+        borderColor: (s: string) => theme.fg("accent", s),
+        selectList: {
+          description: (s: string) => theme.fg("muted", s),
+          noMatch: (s: string) => theme.fg("warning", s),
+          scrollInfo: (s: string) => theme.fg("dim", s),
+          selectedPrefix: (s: string) => theme.fg("accent", s),
+          selectedText: (s: string) => theme.fg("accent", s),
+        },
+      });
+      // We bind submission ourselves (Enter on the editor row submits the
+      // whole buffer); the editor's native Enter behaviour is disabled.
+      denyEditor.disableSubmit = true;
       const inner = new PermissionPromptComponent(
         items,
         durationOptions,
@@ -457,6 +582,7 @@ export async function showPermissionPrompt(
         extraHeader,
         opts.reason,
         theme,
+        denyEditor,
       );
 
       inner.onConfirm = (result) => done(result);

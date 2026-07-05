@@ -242,6 +242,16 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					return { block: true, reason: `User denied ${opts.permission}` };
 				}
 
+				// Non-aborting deny (from the [Deny…] row). Empty explanation falls back
+				// to the same reason the Esc path produces; the typed explanation is
+				// surfaced otherwise. The subagent's turn ends via block:true (no
+				// ctx.abort()); the parent agent (us) sees the propagated reason.
+				if (result.kind === "deny") {
+					onPermissionDenied?.();
+					const reason = result.explanation || `User denied ${opts.permission}`;
+					return { block: true, reason };
+				}
+
 				const { approved, skipped, duration } = result;
 
 				if (duration === "once") {

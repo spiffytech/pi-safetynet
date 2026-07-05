@@ -196,10 +196,19 @@ async function resolvePermission(
 
     const result = await showPermissionPrompt(ctx, promptOpts);
 
-    // User pressed escape / denied
+    // User pressed escape / aborted the turn
     if (result === null) {
       ctx.abort();
       return { block: true, reason: `User denied ${opts.permission}` };
+    }
+
+    // Non-aborting deny (from the [Deny…] row). When the explanation is
+    // empty, fall back to the same reason the Esc path produces; otherwise
+    // surface the typed explanation. Either way, do NOT call ctx.abort():
+    // the model keeps its turn and sees the reason as the tool's error result.
+    if (result.kind === "deny") {
+      const reason = result.explanation || `User denied ${opts.permission}`;
+      return { block: true, reason };
     }
 
     const { approved, skipped, duration } = result;
