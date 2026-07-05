@@ -641,3 +641,83 @@ describe("isHazardousFile", () => {
     });
   }
 });
+
+describe("displaySubcommands (quote preservation)", () => {
+  const CASES: [string, string][] = [
+    // The reported bug — quoted -g argument must keep its quotes in the UI.
+    ['bun run test:e2e -- linkOperations.spec.ts -g "Can save a link with the UI"',
+      'bun run test:e2e -- linkOperations.spec.ts -g "Can save a link with the UI"'],
+    ['echo "hello world"', 'echo "hello world"'],
+    ["echo 'hello world'", "echo 'hello world'"],
+    ['cat "README.md"', 'cat "README.md"'],
+    // empty quotes and inline-empty-quote shapes are preserved exactly
+    ['echo ""', 'echo ""'],
+    ["echo ''", "echo ''"],
+    ['echo "" hello', 'echo "" hello'],
+  ];
+  for (const [input, expectedDisplay] of CASES) {
+    it(`${input} → display ${JSON.stringify(expectedDisplay)}`, () => {
+      const r = parseCommand(input);
+      assert.equal(r.displaySubcommands.length, r.subcommands.length);
+      assert.equal(r.displaySubcommands[0], expectedDisplay);
+    });
+  }
+
+  it("opaque/long quoted content still collapses to '...' / \"...\" in display", () => {
+    const longStr = "a".repeat(41);
+    assert.equal(parseCommand(`echo '${longStr}'`).displaySubcommands[0], "echo '...'");
+    assert.equal(parseCommand(`echo "${longStr}"`).displaySubcommands[0], 'echo "..."');
+  });
+
+  it("display parallels subcommands in length/order for pipelines", () => {
+    const r = parseCommand('cat "a b" | grep "x y"');
+    assert.equal(r.subcommands.length, 2);
+    assert.equal(r.displaySubcommands.length, 2);
+    assert.deepEqual(r.displaySubcommands, ['cat "a b"', 'grep "x y"']);
+    // canonical form is still de-quoted (matching artifact)
+    assert.deepEqual(r.subcommands, ['cat a b', 'grep x y']);
+  });
+
+  it("subcommandWords stays parallel to subcommands/displaySubcommands", () => {
+    const r = parseCommand('echo "hello world"');
+    assert.equal(r.subcommandWords.length, 1);
+    assert.equal(r.subcommandWords[0]!.length, 2); // [echo, "hello world"]
+  });
+});
+
+describe("isEditLikeBashCommand (token-aware)", () => {
+  // Real flags as separate tokens are still edit-like.
+  it("sed -i is edit-like", () => {
+    assert.equal(isEditLikeBashCommand("sed -i file", parseCommand("sed -i file")), true);
+  });
+  it("sed -i.bak is edit-like", () => {
+    assert.equal(isEditLikeBashCommand("sed -i.bak file", parseCommand("sed -i.bak file")), true);
+  });
+  it("sed --in-place is edit-like", () => {
+    assert.equal(isEditLikeBashCommand("sed --in-place file", parseCommand("sed --in-place file")), true);
+  });
+  it("perl -pi is edit-like", () => {
+    assert.equal(isEditLikeBashCommand("perl -pi -e 's/a/b/' file", parseCommand("perl -pi -e 's/a/b/' file")), true);
+  });
+  it("python3 -c is edit-like", () => {
+    assert.equal(isEditLikeBashCommand('python3 -c "print(1)"', parseCommand('python3 -c "print(1)"')), true);
+  });
+  it("sh -c is edit-like", () => {
+    assert.equal(isEditLikeBashCommand('sh -c "echo hi"', parseCommand('sh -c "echo hi"')), true);
+  });
+  it("tee is edit-like", () => {
+    assert.equal(isEditLikeBashCommand("tee file", parseCommand("tee file")), true);
+  });
+
+  // The false-positive class: a quoted literal whose interior contains a
+  // flag-like substring must NOT be edit-like (it is a single token).
+  it("sed with a quoted literal containing '-i' is NOT edit-like", () => {
+    assert.equal(isEditLikeBashCommand('sed "we are -i today" file', parseCommand('sed "we are -i today" file')), false);
+  });
+  it("python with a quoted literal containing '-c' is NOT edit-like", () => {
+    assert.equal(isEditLikeBashCommand('python "running -c tests" f', parseCommand('python "running -c tests" f')), false);
+  });
+  it("sed -n (no -i) is NOT edit-like", () => {
+    assert.equal(isEditLikeBashCommand("sed -n 's/a/b/p' file", parseCommand("sed -n 's/a/b/p' file")), false);
+  });
+});

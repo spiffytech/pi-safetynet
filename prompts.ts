@@ -50,13 +50,18 @@ export type PermissionDuration = "once" | "session" | "project" | "global" | "tu
  *   should surface the explanation to the model WITHOUT aborting the turn.
  */
 export type PermissionPromptResult =
-  | { kind: "approve"; approved: Map<string, string>; skipped: string[]; duration: PermissionDuration }
+  | { kind: "approve"; approved: Map<string, string>; skipped: string[]; skippedDisplay: string[]; duration: PermissionDuration }
   | { kind: "deny"; explanation: string };
 
 export interface PermissionPromptOptions {
   permission: "bash" | "edit" | "read";
   target: string;
   unapproved?: string[];
+  /** Display form of each unapproved subcommand, preserving original quoting.
+   *  Parallel to `unapproved` (same length/order).  When present, the
+   *  prompt shows the display form and uses the canonical `unapproved`
+   *  entry as the rule-pattern key (unless the user edits the item). */
+  unapprovedDisplay?: string[];
   redirectTargets?: Array<{ permission: "read" | "edit"; path: string }>;
   reason?: string | undefined;
   /** True when re-prompting after rules were added but still insufficient. */
@@ -66,8 +71,13 @@ export interface PermissionPromptOptions {
 // ─── Internal types ────────────────────────────────────────────────────────
 
 interface CommandListItem {
-  /** Original text from the check result. */
+  /** Canonical text — the de-quoted form used for rule pattern generation
+   *  and as the stable identity of this item (keying). */
   original: string;
+  /** Pristine display text (immutable).  When the user has not edited
+   *  `text`, the approved rule pattern is `original` (canonical), preserving
+   *  approve-once-reuse semantics. */
+  display: string;
   /** Current (possibly edited) text. */
   text: string;
   /** Whether this item is checked (default true). */
@@ -118,10 +128,12 @@ function getEditorContentLines(editorLines: string[]): string[] {
   return contentLines.filter((_, i) => i !== trailingBorderIndex);
 }
 
-export function makeItem(text: string, isFile: boolean): CommandListItem {
+export function makeItem(text: string, isFile: boolean, display?: string): CommandListItem {
+  const displayText = display ?? text;
   return {
     original: text,
-    text,
+    display: displayText,
+    text: displayText,
     checked: true,
     editing: false,
     isFile,
@@ -437,8 +449,8 @@ export class PermissionPromptComponent implements Component, Focusable {
     if (matchesKey(data, Key.enter)) {
       this.finishEdit(this.selectedIndex, true);
     } else if (matchesKey(data, Key.escape)) {
-      // Cancel edit, restore original text
-      item.text = item.original;
+      // Cancel edit, restore display text (what we show by default)
+      item.text = item.display;
       item.editing = false;
       this.invalidate();
     } else {
@@ -451,17 +463,23 @@ export class PermissionPromptComponent implements Component, Focusable {
   private confirm(): void {
     const approved = new Map<string, string>();
     const skipped: string[] = [];
+    const skippedDisplay: string[] = [];
 
     for (const item of this.items) {
       if (item.checked) {
-        approved.set(item.original, item.text);
+        // Unedited approval → use the canonical original as the rule
+        // pattern (preserves approve-once-reuse across quote styles).
+        // Edited approval → use the user's text.
+        const pattern = item.text === item.display ? item.original : item.text;
+        approved.set(item.original, pattern);
       } else {
         skipped.push(item.original);
+        skippedDisplay.push(item.display);
       }
     }
 
     const duration = this.durationOptions[this.selectedDuration]!.value;
-    this.onConfirm?.({ kind: "approve", approved, skipped, duration });
+    this.onConfirm?.({ kind: "approve", approved, skipped, skippedDisplay, duration });
   }
 }
 
@@ -537,8 +555,11 @@ export async function showPermissionPrompt(
     items.push(makeItem(opts.target, true));
   } else {
     const unapproved = opts.unapproved?.length ? opts.unapproved : [opts.target];
-    for (const sub of unapproved) {
-      items.push(makeItem(sub, false));
+    const unapprovedDisplay = opts.unapprovedDisplay?.length ? opts.unapprovedDisplay : [];
+    for (let i = 0; i < unapproved.length; i++) {
+      const sub = unapproved[i]!;
+      const display = unapprovedDisplay[i];
+      items.push(makeItem(sub, false, display));
     }
   }
 

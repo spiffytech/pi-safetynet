@@ -53,10 +53,65 @@ function wordToString(w: Word): string | null {
     .join("");
 }
 
+/** Display form of a word — like wordToString, but wraps non-opaque
+ *  SglQuoted/DblQuoted content in the originating quote chars so the UI
+ *  shows the user's original quoting (e.g. `-g "can save a link"`).
+ *  Opaque/expansion placeholders ('...' / "...") and empty quotes ('' / "")
+ *  are preserved exactly as wordToString produces them.  Mixed words
+ *  (e.g. pre"mid"post) wrap each quoted part independently. */
+function wordToDisplayString(w: Word): string | null {
+  if (!w?.parts?.length) return null;
+  return w.parts
+    .map((p: WordPart) => {
+      if (p.type === "Literal") return p.value ?? "";
+      if (p.type === "SglQuoted") {
+        const v = p.value ?? "";
+        if (v === "") return "''";
+        return isOpaqueString(v) ? "'...'" : `'${v}'`;
+      }
+      if (p.type === "DblQuoted") {
+        const literal = dblQuotedToString(p);
+        if (literal === null) return '"..."';
+        if (literal === "") return '""';
+        return isOpaqueString(literal) ? '"..."' : `"${literal}"`;
+      }
+      if (p.type === "ParamExp") return "${...}";
+      if (p.type === "CmdSubst") return "$(...)";
+      if (p.type === "ArithExp") return "$((...))";
+      if (p.type === "ProcSubst") return p.op === "<" ? "<(...)" : ">(...)";
+      return "";
+    })
+    .join("");
+}
+
+/** Test whether a single word token acts as `flag`.  A token matches if it
+ *  equals the flag, or is the flag followed by a non-word suffix (so
+ *  `-i.bak` matches `-i`, but `-in` does not).  This is the token-boundary
+ *  equivalent of the old `\s-i\b` substring regex — a quoted literal like
+ *  `"we are -i today"` is a single token whose literal value is the whole
+ *  sentence, so it never matches. */
+function tokenHasFlag(token: string, flag: string): boolean {
+  if (token === flag) return true;
+  if (!token.startsWith(flag)) return false;
+  const next = token[flag.length];
+  return next !== undefined && !/[A-Za-z0-9_]/.test(next);
+}
+
 function commandToString(cmd: SimpleCommand): string {
   const parts: string[] = [];
   for (const w of cmd.words ?? []) {
     const s = wordToString(w);
+    if (s !== null) parts.push(s);
+  }
+  return parts.join(" ");
+}
+
+/** Display form of a SimpleCommand — joins wordToDisplayString per word,
+ *  preserving the user's original quoting for UI display. */
+function commandToDisplayString(cmd: SimpleCommand): string {
+  const parts: string[] = [];
+  for (const w of cmd.words ?? []) {
+    const s = wordToDisplayString(w);
     if (s !== null) parts.push(s);
   }
   return parts.join(" ");
@@ -344,11 +399,22 @@ function isTimeoutDuration(s: string | null): boolean {
   return s !== null && /^\d/.test(s);
 }
 
-/** Convert an array of Words to a space-joined string. */
+/** Convert an array of Words to a space-joined canonical string. */
 function wordsToString(words: Word[]): string {
   const parts: string[] = [];
   for (const w of words) {
     const s = wordToString(w);
+    if (s !== null) parts.push(s);
+  }
+  return parts.join(" ");
+}
+
+/** Display form of a Word array — joins wordToDisplayString, preserving
+ *  the user's original quoting for UI display. */
+function wordsToDisplayString(words: Word[]): string {
+  const parts: string[] = [];
+  for (const w of words) {
+    const s = wordToDisplayString(w);
     if (s !== null) parts.push(s);
   }
   return parts.join(" ");
@@ -487,6 +553,14 @@ export interface RedirectTarget {
 
 export interface ParsedCommand {
   subcommands: string[];
+  /** Per-subcommand structured token lists.  Parallel to `subcommands`
+   *  (same length/order).  Used by token-aware consumers that must not
+   *  re-derive intent from the canonical string (e.g. edit-like flag
+   *  detection). */
+  subcommandWords: Word[][];
+  /** Display form — preserves the user's original quoting for UI.  Parallel
+   *  to `subcommands` (same length/order). */
+  displaySubcommands: string[];
   redirects: RedirectTarget[];
   catastrophic: boolean;
   /** True when the command uses heredoc (<<) or here-string (<<<). */
@@ -568,6 +642,51 @@ function stripHeredocBodies(command: string): string {
   return result.join("\n");
 }
 
+/** Mutable accumulator for the three parallel per-subcommand arrays. */
+interface SubcommandAccum {
+  canonical: string[];
+  display: string[];
+  words: Word[][];
+}
+
+/** Push one subcommand to all three parallel arrays, applying the heredoc
+ *  / here-string suffix consistently to the canonical + display strings
+ *  (the suffix is the same in both forms — it is our own placeholder, not
+ *  a quoted token).  `wordList` may be empty for synthetic subcommands
+ *  (find:exec / find:delete / bare echo) that carry no quoting. */
+function pushSubcommand(
+  acc: SubcommandAccum,
+  canonical: string,
+  display: string,
+  wordList: Word[],
+  redirects: Array<{ op: string; target: Word }> | undefined,
+  hasHeredoc: boolean,
+): void {
+  acc.canonical.push(appendRedirectSuffix(canonical, redirects, hasHeredoc));
+  acc.display.push(appendRedirectSuffix(display, redirects, hasHeredoc));
+  acc.words.push(wordList);
+}
+
+/** Deduplicate the three parallel arrays together, keying on the canonical
+ *  form (so identical canonical subcommands collapse, keeping their first
+ *  display/words).  Returns fresh arrays. */
+function dedupParallel(acc: SubcommandAccum): void {
+  const seen = new Set<string>();
+  const canonical: string[] = [];
+  const display: string[] = [];
+  const words: Word[][] = [];
+  for (let i = 0; i < acc.canonical.length; i++) {
+    const key = acc.canonical[i]!;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    canonical.push(key);
+    display.push(acc.display[i]!);
+    words.push(acc.words[i]!);
+  }
+  acc.canonical = canonical;
+  acc.display = display;
+  acc.words = words;
+}
 export function parseCommand(command: string): ParsedCommand {
   try {
     // @aliou/sh misparses \( and \) as subshell boundaries, but in bash these
@@ -588,7 +707,7 @@ export function parseCommand(command: string): ParsedCommand {
     command = quoteBraces(command);
 
     const { ast } = parse(command);
-    const subcommands: string[] = [];
+    const acc: SubcommandAccum = { canonical: [], display: [], words: [] };
     const redirects: RedirectTarget[] = [];
     let catastrophic = false;
 
@@ -613,11 +732,11 @@ export function parseCommand(command: string): ParsedCommand {
         if (name === "find") {
           const dangerous = hasFindDangerousFlag(cmd);
           if (dangerous === "exec") {
-            subcommands.push(appendRedirectSuffix("find:exec", cmd.redirects, false));
+            pushSubcommand(acc, "find:exec", "find:exec", [], cmd.redirects, false);
             return true;
           }
           if (dangerous === "delete") {
-            subcommands.push(appendRedirectSuffix("find:delete", cmd.redirects, false));
+            pushSubcommand(acc, "find:delete", "find:delete", [], cmd.redirects, false);
             return false;
           }
         }
@@ -638,10 +757,11 @@ export function parseCommand(command: string): ParsedCommand {
             isTimeoutDuration(wordToString(words[effectiveIdx + 1] as Word))) {
           const prefixWords = words.slice(0, effectiveIdx); // e.g. [sudo ...]
           const wrapperWords = [...prefixWords, words[effectiveIdx]!, words[effectiveIdx + 1]!];
-          subcommands.push(appendRedirectSuffix(wordsToString(wrapperWords), cmd.redirects, false));
+          pushSubcommand(acc, wordsToString(wrapperWords), wordsToDisplayString(wrapperWords), wrapperWords, cmd.redirects, false);
           const innerWords = words.slice(effectiveIdx + 2);
           if (innerWords.length) {
-            subcommands.push(appendRedirectSuffix(wordsToString([...prefixWords, ...innerWords]), cmd.redirects, false));
+            const allInner = [...prefixWords, ...innerWords];
+            pushSubcommand(acc, wordsToString(allInner), wordsToDisplayString(allInner), allInner, cmd.redirects, false);
           }
         } else if (effective === "xargs") {
           // findEffectiveCommandIdx already skipped any sudo prefix
@@ -650,13 +770,13 @@ export function parseCommand(command: string): ParsedCommand {
           const innerWords = words.slice(innerStart);
           const allWords = [...prefixWords, ...innerWords];
           if (allWords.length) {
-            subcommands.push(appendRedirectSuffix(wordsToString(allWords), cmd.redirects, false));
+            pushSubcommand(acc, wordsToString(allWords), wordsToDisplayString(allWords), allWords, cmd.redirects, false);
           } else {
             // xargs with no command defaults to echo
-            subcommands.push("echo");
+            pushSubcommand(acc, "echo", "echo", [], cmd.redirects, false);
           }
         } else {
-          subcommands.push(appendRedirectSuffix(commandToString(cmd), cmd.redirects, false));
+          pushSubcommand(acc, commandToString(cmd), commandToDisplayString(cmd), words, cmd.redirects, false);
         }
 
         // [ (test) and [[ check file existence/properties, which
@@ -671,7 +791,10 @@ export function parseCommand(command: string): ParsedCommand {
 
         return true;
       }, (expr, words) => {
-        subcommands.push(expr);
+        // Reconstruct the display form of the [[ ... ]] expression from
+        // the raw words so quoted operands keep their quotes.
+        const displayExpr = `[[ ${wordsToDisplayString(words)} ]]`;
+        pushSubcommand(acc, expr, displayExpr, words, undefined, false);
         // Same file-read extraction for [[ TestClause nodes
         const wordStrs = words.map((w) => wordToString(w)).filter((s: string | null): s is string => s !== null);
         for (const p of extractTestFilePaths(wordStrs)) {
@@ -680,8 +803,11 @@ export function parseCommand(command: string): ParsedCommand {
       });
     }
 
+    dedupParallel(acc);
     return {
-      subcommands: [...new Set(subcommands)],
+      subcommands: acc.canonical,
+      subcommandWords: acc.words,
+      displaySubcommands: acc.display,
       redirects,
       catastrophic,
       hasHeredoc: false,
@@ -692,7 +818,7 @@ export function parseCommand(command: string): ParsedCommand {
     const stripped = stripHeredocBodies(command);
     try {
       const { ast } = parse(stripped);
-      const subcommands: string[] = [];
+      const acc: SubcommandAccum = { canonical: [], display: [], words: [] };
       const redirects: RedirectTarget[] = [];
       let catastrophic = false;
 
@@ -717,11 +843,11 @@ export function parseCommand(command: string): ParsedCommand {
           if (name === "find") {
             const dangerous = hasFindDangerousFlag(cmd);
             if (dangerous === "exec") {
-              subcommands.push(appendRedirectSuffix("find:exec", cmd.redirects, true));
+              pushSubcommand(acc, "find:exec", "find:exec", [], cmd.redirects, true);
               return true;
             }
             if (dangerous === "delete") {
-              subcommands.push(appendRedirectSuffix("find:delete", cmd.redirects, true));
+              pushSubcommand(acc, "find:delete", "find:delete", [], cmd.redirects, true);
               return false;
             }
           }
@@ -738,10 +864,11 @@ export function parseCommand(command: string): ParsedCommand {
               isTimeoutDuration(wordToString(words[effectiveIdx + 1] as Word))) {
             const prefixWords = words.slice(0, effectiveIdx);
             const wrapperWords = [...prefixWords, words[effectiveIdx]!, words[effectiveIdx + 1]!];
-            subcommands.push(appendRedirectSuffix(wordsToString(wrapperWords), cmd.redirects, true));
+            pushSubcommand(acc, wordsToString(wrapperWords), wordsToDisplayString(wrapperWords), wrapperWords, cmd.redirects, true);
             const innerWords = words.slice(effectiveIdx + 2);
             if (innerWords.length) {
-              subcommands.push(appendRedirectSuffix(wordsToString([...prefixWords, ...innerWords]), cmd.redirects, true));
+              const allInner = [...prefixWords, ...innerWords];
+              pushSubcommand(acc, wordsToString(allInner), wordsToDisplayString(allInner), allInner, cmd.redirects, true);
             }
           } else if (effective === "xargs") {
             const innerStart = skipXargsFlags(words, effectiveIdx + 1);
@@ -749,12 +876,12 @@ export function parseCommand(command: string): ParsedCommand {
             const innerWords = words.slice(innerStart);
             const allWords = [...prefixWords, ...innerWords];
             if (allWords.length) {
-              subcommands.push(appendRedirectSuffix(wordsToString(allWords), cmd.redirects, true));
+              pushSubcommand(acc, wordsToString(allWords), wordsToDisplayString(allWords), allWords, cmd.redirects, true);
             } else {
-              subcommands.push("echo");
+              pushSubcommand(acc, "echo", "echo", [], cmd.redirects, true);
             }
           } else {
-            subcommands.push(appendRedirectSuffix(commandToString(cmd), cmd.redirects, true));
+            pushSubcommand(acc, commandToString(cmd), commandToDisplayString(cmd), words, cmd.redirects, true);
           }
 
           if (name === "[" || name === "[[") {
@@ -766,7 +893,8 @@ export function parseCommand(command: string): ParsedCommand {
 
           return true;
         }, (expr, words) => {
-          subcommands.push(appendRedirectSuffix(expr, undefined, true));
+          const displayExpr = `[[ ${wordsToDisplayString(words)} ]]`;
+          pushSubcommand(acc, expr, displayExpr, words, undefined, true);
           const wordStrs = words.map((w) => wordToString(w)).filter((s: string | null): s is string => s !== null);
           for (const p of extractTestFilePaths(wordStrs)) {
             redirects.push({ path: p, direction: "input" });
@@ -774,8 +902,11 @@ export function parseCommand(command: string): ParsedCommand {
         });
       }
 
+      dedupParallel(acc);
       return {
-        subcommands: [...new Set(subcommands)],
+        subcommands: acc.canonical,
+        subcommandWords: acc.words,
+        displaySubcommands: acc.display,
         redirects,
         catastrophic,
         hasHeredoc: true,
@@ -784,6 +915,8 @@ export function parseCommand(command: string): ParsedCommand {
       const first = command.trim().split(/\s+/)[0] ?? "";
       return {
         subcommands: first ? [first] : [],
+        subcommandWords: [],
+        displaySubcommands: first ? [first] : [],
         redirects: [],
         catastrophic: first ? SYSTEM_HALT_COMMANDS.has(first) : false,
         hasHeredoc: true,
@@ -849,34 +982,48 @@ export function isEditLikeBashCommand(
   //    parsed.redirects and parsed.subcommands — checked by #1 and #4 above)
   //    No separate regex scan needed here.
 
-  // 3. In-place edit flags
-  for (const sub of parsed.subcommands) {
-    // sed -i, sed -i.bak, sed --in-place
-    if (/^sed\s/.test(sub) && /\s-i\b|\s-i\.|\s--in-place/.test(sub)) return true;
-    // perl -pi, perl -pe  (in-place edit flags)
-    if (/^perl\s/.test(sub) && /\s-p[ie]\b|\s-p[ie]\s/.test(sub)) return true;
-  }
+  // 3–5. Token-aware checks over the structured word lists.  Operating on
+  //    tokens (not the joined canonical string) means a quoted literal like
+  //    `sed "we are -i today" file` is one token whose literal value is the
+  //    whole sentence — it can never be mistaken for the `-i` flag.
+  for (const words of parsed.subcommandWords) {
+    if (!words.length) continue;
+    const base = wordToString(words[0] as Word);
+    if (!base) continue;
 
-  // 4. Write-purpose commands
-  for (const sub of parsed.subcommands) {
-    const baseCmd = sub.trim().split(/\s+/)[0]!;
-    if (baseCmd === "tee") return true;
-    if (baseCmd === "truncate") return true;
-    if (baseCmd === "install") return true;
-    if (baseCmd === "dd") return true;
-  }
+    // 3. In-place edit flags
+    if (base === "sed") {
+      for (let i = 1; i < words.length; i++) {
+        const t = wordToString(words[i]!);
+        if (t === null) continue;
+        if (t === "-i" || t.startsWith("-i.") || t === "--in-place") return true;
+      }
+    }
+    if (base === "perl") {
+      for (let i = 1; i < words.length; i++) {
+        const t = wordToString(words[i]!);
+        if (t === null) continue;
+        if (tokenHasFlag(t, "-pi") || tokenHasFlag(t, "-pe")) return true;
+      }
+    }
 
-  // 5. Interpreter one-liner invocations that can embed arbitrary file I/O
-  for (const sub of parsed.subcommands) {
-    const parts = sub.trim().split(/\s+/);
-    const base = parts[0]!;
-    // python[3] -c, node -e, ruby -e, perl -e, php -r
+    // 4. Write-purpose commands
+    if (base === "tee" || base === "truncate" || base === "install" || base === "dd") return true;
+
+    // 5. Interpreter one-liner invocations that can embed arbitrary file I/O
+    //    python[3] -c, node -e, ruby -e, perl -e, php -r
     if (/^(python3?|node|ruby|perl|php)$/.test(base)) {
-      if (parts.some((p) => p === "-c" || p === "-e" || p === "-r")) return true;
+      for (let i = 1; i < words.length; i++) {
+        const t = wordToString(words[i]!);
+        if (t === "-c" || t === "-e" || t === "-r") return true;
+      }
     }
     // sh/bash/dash/zsh -c  (subshell execution with code string)
     if (/^(sh|bash|dash|zsh)$/.test(base)) {
-      if (parts.some((p) => p === "-c")) return true;
+      for (let i = 1; i < words.length; i++) {
+        const t = wordToString(words[i]!);
+        if (t === "-c") return true;
+      }
     }
   }
 

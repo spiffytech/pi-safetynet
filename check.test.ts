@@ -469,3 +469,18 @@ describe("checkToolPermission", () => {
     assert.equal(resultAfter.action, "allow");
   });
 });
+
+describe("unapprovedDisplay parallel array", () => {
+  it("carries quote-preserving display strings alongside canonical unapproved", () => {
+    const result = checkBashPermission('echo "hello world"', "build", RULES, CWD);
+    // baseline has `echo *`, so this is allowed and unapproved is empty.
+    // Use a command that falls through to the `*` catch-all (ask) to get an
+    // unapproved entry.
+    const r2 = checkBashPermission('bun run test:e2e -- f.spec.ts -g "can save"', "build", RULES, CWD);
+    assert.ok(r2.unapproved!.length >= 1);
+    assert.equal(r2.unapprovedDisplay!.length, r2.unapproved!.length);
+    // canonical is de-quoted; display preserves the quotes.
+    assert.ok(r2.unapproved![0]!.includes('-g can save'));
+    assert.ok(r2.unapprovedDisplay![0]!.includes('-g "can save"'));
+  });
+});

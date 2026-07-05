@@ -98,10 +98,40 @@ describe("PermissionPromptComponent: approval path", () => {
     assert.equal(spy.results.length, 1);
     assert.equal(spy.results[0]!.kind, "approve");
     if (spy.results[0]!.kind === "approve") {
-      const { approved, skipped, duration } = spy.results[0]!;
+      const { approved, skipped, skippedDisplay, duration } = spy.results[0]!;
       assert.equal(duration, "once"); // default selectedDuration
       assert.deepEqual(skipped, []);
+      assert.deepEqual(skippedDisplay, []);
       assert.equal(approved.get("rm -rf /tmp/foo"), "rm -rf /tmp/foo");
+    }
+  });
+
+  it("display form is shown but unedited approval yields the canonical pattern", () => {
+    // Simulate a quoted command: canonical (keying) is de-quoted, display
+    // (what the user sees) preserves the quotes.  An unedited approval must
+    // produce the CANONICAL pattern so the generated rule matches future
+    // invocations regardless of quote style.
+    const canonical = 'bun run test:e2e -- f.spec.ts -g can save';
+    const display = 'bun run test:e2e -- f.spec.ts -g "can save"';
+    const items = [makeItem(canonical, false, display)];
+    const editor = new FakeEditor();
+    const c = new PermissionPromptComponent(
+      items,
+      getDurationOptions(),
+      "⚠️ bash approval required",
+      [],
+      undefined,
+      theme,
+      editor,
+    );
+    const spy = collect(c);
+    c.handleInput(ENTER); // unedited confirm
+    assert.equal(spy.results.length, 1);
+    if (spy.results[0]!.kind === "approve") {
+      const { approved, skipped } = spy.results[0]!;
+      assert.deepEqual(skipped, []);
+      // Unedited → rule pattern is the CANONICAL original (de-quoted).
+      assert.equal(approved.get(canonical), canonical);
     }
   });
 });

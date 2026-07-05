@@ -20,6 +20,10 @@ export interface PermissionCheck {
   action: PermissionAction;
   reason?: string;
   unapproved?: string[];
+  /** Display form of each unapproved subcommand — preserves the user's
+   *  original quoting for UI display.  Parallel to `unapproved` (same
+   *  length/order). */
+  unapprovedDisplay?: string[];
   redirectTargets?: Array<{ permission: "read" | "edit"; path: string }>;
 }
 
@@ -134,13 +138,15 @@ export function checkBashPermission(
   }
 
   const unapproved: string[] = [];
+  const unapprovedDisplay: string[] = [];
   const redirectTargets: Array<{ permission: "read" | "edit"; path: string }> = [];
   const denyReasons: string[] = [];
   let worstAction: PermissionAction = "allow";
 
   const absCwd = cwd ?? process.cwd();
 
-  for (const sub of parsed.subcommands) {
+  for (let i = 0; i < parsed.subcommands.length; i++) {
+    const sub = parsed.subcommands[i]!;
     // Auto-approve cd when the target is within (or equal to) cwd.
     // cd to the project or a subdirectory is always safe and the LLM
     // frequently emits it as a preamble (e.g. "cd <cwd> && git diff").
@@ -153,12 +159,18 @@ export function checkBashPermission(
     const result = evaluatePermission("bash", sub, profile, rules);
     if (result.action === "deny") {
       worstAction = "deny";
-      if (!unapproved.includes(sub)) unapproved.push(sub);
+      if (!unapproved.includes(sub)) {
+        unapproved.push(sub);
+        unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
+      }
       const r = result.matchedRule?.reason ?? "Automatically denied";
       if (!denyReasons.includes(r)) denyReasons.push(r);
     } else if (result.action === "ask") {
       if (worstAction !== "deny") worstAction = "ask";
-      if (!unapproved.includes(sub)) unapproved.push(sub);
+      if (!unapproved.includes(sub)) {
+        unapproved.push(sub);
+        unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
+      }
     }
   }
 
@@ -177,7 +189,7 @@ export function checkBashPermission(
     }
   }
 
-  const result: PermissionCheck = { action: worstAction, unapproved, redirectTargets };
+  const result: PermissionCheck = { action: worstAction, unapproved, unapprovedDisplay, redirectTargets };
   if (worstAction === "deny" && denyReasons.length > 0) {
     result.reason = denyReasons.join("; ");
   }

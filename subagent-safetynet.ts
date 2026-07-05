@@ -231,6 +231,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					reprompt,
 				};
 				if (opts.check.unapproved && opts.check.unapproved.length > 0) promptOpts.unapproved = opts.check.unapproved;
+				if (opts.check.unapprovedDisplay && opts.check.unapprovedDisplay.length > 0) promptOpts.unapprovedDisplay = opts.check.unapprovedDisplay;
 				if (opts.check.redirectTargets?.length) promptOpts.redirectTargets = opts.check.redirectTargets;
 				if (opts.check.reason) promptOpts.reason = opts.check.reason;
 
@@ -252,7 +253,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					return { block: true, reason };
 				}
 
-				const { approved, skipped, duration } = result;
+				const { approved, skipped, skippedDisplay, duration } = result;
 
 				if (duration === "once") {
 					if (skipped.length > 0) {
@@ -262,6 +263,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 						const newCheck: PermissionCheck = {
 							...opts.check,
 							unapproved: skipped,
+							unapprovedDisplay: skippedDisplay,
 							action: "ask",
 						};
 						if (remainingRedirects && remainingRedirects.length > 0) {
