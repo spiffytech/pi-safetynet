@@ -146,11 +146,10 @@ When pi-safetynet prompts for approval, you choose how long the permission lasts
 
 The approval UI shows exactly what needs approval — individual subcommands in a pipeline, file redirects, or both. Each item can be toggled on/off, and items can be inline-edited before approval (e.g., narrow a `*` pattern to a specific path).
 
-From the prompt you can either approve (with a chosen duration) or reject the call. Three ways to reject:
+From the prompt you can either approve (with a chosen duration) or reject the call. Two ways to reject:
 
 - **`Esc`** — aborts the entire turn. The model stops and you get the prompt back.
-- **`[Deny]` button** — deny *this call only* with no explanation (non-aborting). Tab to the `[Deny]` cell and press Enter. The model sees `User denied <permission>` as the tool's error result and can keep reacting without losing its in-progress turn.
-- **`d`** — deny *this call only* with a typed explanation (non-aborting). The explanation is surfaced to the model as the tool's error result, so it knows *why* the call was rejected and can react (try a different approach, ask for clarification, etc.) without losing its in-progress turn. This mirrors the `reason` field that deny rules carry, but for one-off interactive denials. Press `Esc` from the deny input to cancel and return to the approval prompt.
+- **`[Deny…]`** — non-aborting deny. Arrow down to the `[Deny…]` row to drop into an expanding textbox. Submit empty (Enter) = deny with no reason (`User denied <permission>`); submit with text = deny with that reason. The reason is surfaced to the model as the tool's error result, so it knows *why* the call was rejected and can keep reacting without losing its in-progress turn. Press `Esc` from the textbox to return to the approval prompt (does not abort).
 
 ## Keyboard shortcuts
 

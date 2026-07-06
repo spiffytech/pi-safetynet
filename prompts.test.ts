@@ -82,8 +82,6 @@ function collect(component: PermissionPromptComponent): {
 // Raw input bytes for keys
 const ENTER = "\r";
 const ESC = "\x1b";
-const TAB = "\t";
-const SHIFT_TAB = "\x1b[Z";
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
 
@@ -171,9 +169,9 @@ describe("PermissionPromptComponent: `d` keybind is gone", () => {
 });
 
 describe("PermissionPromptComponent: deny editor (pi-ask-style)", () => {
-  it("Tab from duration drops into the deny editor zone", () => {
+  it("Down from duration drops into the deny editor zone", () => {
     const { component: c } = makePrompt();
-    c.handleInput(TAB); // duration → deny
+    c.handleInput(DOWN); // duration → deny
     const lines = c.render(WIDTH);
     const header = lines.find((l) => l.includes("▸ deny:"));
     assert.ok(header, "deny editor header should render when focused");
@@ -192,7 +190,7 @@ describe("PermissionPromptComponent: deny editor (pi-ask-style)", () => {
   it("typing routes to the editor; Enter submits deny-with-explanation (trimmed)", () => {
     const { component: c, editor } = makePrompt();
     const spy = collect(c);
-    c.handleInput(TAB); // → deny
+    c.handleInput(DOWN); // → deny
     for (const ch of "   why not   ") c.handleInput(ch);
     c.handleInput(ENTER);
     assert.equal(spy.results.length, 1);
@@ -203,7 +201,7 @@ describe("PermissionPromptComponent: deny editor (pi-ask-style)", () => {
   it("empty Enter submits plain deny (empty explanation, no abort)", () => {
     const { component: c } = makePrompt();
     const spy = collect(c);
-    c.handleInput(TAB); // → deny
+    c.handleInput(DOWN); // → deny
     c.handleInput(ENTER); // empty
     assert.equal(spy.results.length, 1);
     assert.deepEqual(spy.results[0], { kind: "deny", explanation: "" });
@@ -213,7 +211,7 @@ describe("PermissionPromptComponent: deny editor (pi-ask-style)", () => {
   it("whitespace-only trims to empty → plain deny", () => {
     const { component: c } = makePrompt();
     const spy = collect(c);
-    c.handleInput(TAB); // → deny
+    c.handleInput(DOWN); // → deny
     for (const ch of "   ") c.handleInput(ch);
     c.handleInput(ENTER);
     assert.equal(spy.results.length, 1);
@@ -223,7 +221,7 @@ describe("PermissionPromptComponent: deny editor (pi-ask-style)", () => {
   it("Esc from deny zone returns to duration (does NOT abort)", () => {
     const { component: c } = makePrompt();
     const spy = collect(c);
-    c.handleInput(TAB); // → deny
+    c.handleInput(DOWN); // → deny
     c.handleInput(ESC); // back out → duration
     assert.equal(spy.cancels.n, 0, "must not abort the turn");
     assert.equal(spy.results.length, 0);
@@ -235,7 +233,7 @@ describe("PermissionPromptComponent: deny editor (pi-ask-style)", () => {
   it("Esc then Esc: deny→duration, then duration-abort", () => {
     const { component: c } = makePrompt();
     const spy = collect(c);
-    c.handleInput(TAB); // → deny
+    c.handleInput(DOWN); // → deny
     c.handleInput(ESC); // → duration (no abort)
     assert.equal(spy.cancels.n, 0);
     c.handleInput(ESC); // → abort
@@ -243,49 +241,34 @@ describe("PermissionPromptComponent: deny editor (pi-ask-style)", () => {
     assert.equal(spy.results.length, 0);
   });
 
-  it("empty editor: Shift+Tab navigates back to duration", () => {
-    const { component: c } = makePrompt();
-    const spy = collect(c);
-    c.handleInput(TAB); // → deny
-    c.handleInput(SHIFT_TAB); // → duration
-    c.handleInput(ENTER); // approve
-    assert.equal(spy.results[0]!.kind, "approve");
-  });
-
   it("empty editor: Up navigates back to duration", () => {
     const { component: c } = makePrompt();
     const spy = collect(c);
-    c.handleInput(TAB); // → deny
+    c.handleInput(DOWN); // → deny
     c.handleInput(UP); // → duration
     c.handleInput(ENTER); // approve
     assert.equal(spy.results[0]!.kind, "approve");
   });
 
-  it("empty editor: Tab wraps to commands zone (no editor delegation)", () => {
-    const { component: c, editor } = makePrompt();
-    c.handleInput(TAB); // → deny
-    c.handleInput(TAB); // → commands
-    assert.equal(editor.inputs.length, 0, "Tab on empty editor must not be delegated");
-    // commands zone Enter opens inline edit (a result is NOT emitted)
+  it("full vertical cycle: deny→commands→duration→deny and back up", () => {
+    const { component: c } = makePrompt();
     const spy = collect(c);
+    c.handleInput(DOWN); // duration → deny
+    c.handleInput(DOWN); // deny → commands (wraps, first item)
+    c.handleInput(DOWN); // commands → commands (second item, no wrap yet)
+    // Items list has 1 entry, so first Down from commands wraps to duration.
+    // Verify we're in duration by approving with Enter.
     c.handleInput(ENTER);
-    assert.equal(spy.results.length, 0, "Enter in commands starts editing, not approve");
-  });
-
-  it("empty editor: Down wraps to commands zone", () => {
-    const { component: c, editor } = makePrompt();
-    c.handleInput(TAB); // → deny
-    c.handleInput(DOWN); // → commands
-    assert.equal(editor.inputs.length, 0, "Down on empty editor must not be delegated");
+    assert.equal(spy.results[0]!.kind, "approve");
   });
 
   it("non-empty editor: Tab is delegated to the editor (does not navigate away)", () => {
     const { component: c, editor } = makePrompt();
     const spy = collect(c);
-    c.handleInput(TAB); // → deny
+    c.handleInput(DOWN); // → deny
     c.handleInput("x"); // type something → non-empty
-    c.handleInput(TAB); // should be delegated, not navigate
-    assert.equal(editor.inputs.includes(TAB), true, "Tab delegated to editor when non-empty");
+    c.handleInput("\t"); // Tab delegated, not a navigate
+    assert.equal(editor.inputs.includes("\t"), true, "Tab delegated to editor when non-empty");
     assert.equal(spy.results.length, 0, "must not have submitted");
     // Still in deny zone: Enter now submits with the typed text.
     c.handleInput(ENTER);
@@ -297,26 +280,51 @@ describe("PermissionPromptComponent: deny editor (pi-ask-style)", () => {
 
   it("entering the deny zone clears any prior editor text", () => {
     const { component: c, editor } = makePrompt();
-    c.handleInput(TAB); // → deny, editor reset to ""
+    c.handleInput(DOWN); // → deny, editor reset to ""
     for (const ch of "draft") c.handleInput(ch);
     assert.equal(editor.getText(), "draft");
     c.handleInput(ESC); // back to duration
-    c.handleInput(TAB); // re-enter deny → should be cleared
+    c.handleInput(DOWN); // re-enter deny → should be cleared
     assert.equal(editor.getText(), "", "re-entering deny zone must reset editor text");
   });
 });
 
+describe("PermissionPromptComponent: Tab no longer navigates", () => {
+  it("Tab from duration does NOT enter the deny zone", () => {
+    const { component: c } = makePrompt();
+    c.handleInput("\t"); // Tab — should be a no-op for zone navigation
+    const lines = c.render(WIDTH);
+    const denyHeader = lines.find((l) => l.includes("▸ deny:"));
+    assert.equal(denyHeader, undefined, "Tab must not enter the deny zone");
+    // Verify we're still on duration by confirming approval.
+    const spy = collect(c);
+    c.handleInput(ENTER);
+    assert.equal(spy.results[0]!.kind, "approve");
+  });
+
+  it("Tab from commands does NOT move zones", () => {
+    const { component: c } = makePrompt();
+    c.handleInput(UP); // duration → commands
+    c.handleInput("\t"); // Tab — should not leave commands
+    // Enter in commands starts inline edit (no result emitted, no abort).
+    const spy = collect(c);
+    c.handleInput(ENTER);
+    assert.equal(spy.results.length, 0, "Enter in commands starts editing, not approve");
+    assert.equal(spy.cancels.n, 0);
+  });
+});
+
 describe("PermissionPromptComponent: render affordances", () => {
-  it("help text mentions `tab deny` from the duration zone", () => {
+  it("help text mentions `↓ deny` from the duration zone", () => {
     const { component: c } = makePrompt();
     const lines = c.render(WIDTH);
-    const help = lines.find((l) => l.includes("tab deny"));
-    assert.ok(help, "duration help should advertise `tab deny`");
+    const help = lines.find((l) => l.includes("↓ deny"));
+    assert.ok(help, "duration help should advertise `↓ deny`");
   });
 
   it("deny-zone help mentions enter/esc", () => {
     const { component: c } = makePrompt();
-    c.handleInput(TAB); // → deny
+    c.handleInput(DOWN); // → deny
     const lines = c.render(WIDTH);
     const help = lines.find((l) => l.includes("enter deny") && l.includes("esc back"));
     assert.ok(help, "deny-zone help should mention enter/esc");

@@ -250,7 +250,7 @@ export class PermissionPromptComponent implements Component, Focusable {
       lines.push(" " + parts.join("  "));
     }
 
-    // Deny affordance: a tab-reachable [Deny…] row. When focused, drops
+    // Deny affordance: an arrow-reachable [Deny…] row. When focused, drops
     // into an expanding editor (pi-ask-style). Empty submit = plain deny;
     // submit with text = deny-with-explanation.
     {
@@ -274,10 +274,10 @@ export class PermissionPromptComponent implements Component, Focusable {
     // Help text
     {
       const help = this.focusZone === "deny"
-        ? "enter deny (empty = no reason) · esc back · shift+tab duration"
+        ? "enter deny (empty = no reason) · esc back · ↑ duration · ↓ commands"
         : this.focusZone === "commands"
-          ? "↑↓ navigate · space toggle · enter edit · tab duration · esc deny"
-          : "←→ switch · enter confirm · tab deny · shift+tab commands · esc deny";
+          ? "↑↓ navigate · space toggle · enter edit · esc deny"
+          : "←→ switch · enter confirm · ↓ deny · ↑ commands · esc deny";
       lines.push(this.theme.fg("dim", " " + truncateToWidth(help, innerW - 1)));
     }
 
@@ -337,7 +337,7 @@ export class PermissionPromptComponent implements Component, Focusable {
         this.selectedIndex++;
         this.invalidate();
       } else {
-        // Tab into duration
+        // Down into duration
         this.focusZone = "duration";
         this.invalidate();
       }
@@ -347,9 +347,6 @@ export class PermissionPromptComponent implements Component, Focusable {
       this.invalidate();
     } else if (matchesKey(data, Key.enter)) {
       this.startEdit(this.selectedIndex);
-    } else if (matchesKey(data, Key.tab)) {
-      this.focusZone = "duration";
-      this.invalidate();
     }
   }
 
@@ -366,13 +363,10 @@ export class PermissionPromptComponent implements Component, Focusable {
       }
     } else if (matchesKey(data, Key.enter)) {
       this.confirm();
-    } else if (matchesKey(data, Key.tab)) {
-      // Drop into the deny editor row.
+    } else if (matchesKey(data, Key.down)) {
+      // Drop into the deny editor row (arrow-only navigation).
       this.focusZone = "deny";
       this.denyEditor.setText("");
-      this.invalidate();
-    } else if (matchesKey(data, "shift+tab")) {
-      this.focusZone = "commands";
       this.invalidate();
     } else if (matchesKey(data, Key.up)) {
       this.focusZone = "commands";
@@ -382,8 +376,8 @@ export class PermissionPromptComponent implements Component, Focusable {
   }
 
   // Deny editor zone: an expanding textbox (pi-ask-style).
-  //  - Empty editor: Tab/Shift+Tab/arrows navigate away; Enter submits plain deny.
-  //  - Non-empty: Tab/arrows delegated to the editor; Enter submits deny-with-explanation.
+  //  - Empty editor: arrows navigate away; Enter submits plain deny.
+  //  - Non-empty: arrows delegated to the editor; Enter submits deny-with-explanation.
   //  - Whitespace-only trims to empty and submits as plain deny.
   private handleDenyEditorInput(data: string): void {
     const isEmpty = this.denyEditor.getText().length === 0;
@@ -393,12 +387,12 @@ export class PermissionPromptComponent implements Component, Focusable {
       return;
     }
     if (isEmpty) {
-      if (matchesKey(data, "shift+tab") || matchesKey(data, Key.up)) {
+      if (matchesKey(data, Key.up)) {
         this.focusZone = "duration";
         this.invalidate();
         return;
       }
-      if (matchesKey(data, Key.tab) || matchesKey(data, Key.down)) {
+      if (matchesKey(data, Key.down)) {
         this.focusZone = "commands";
         this.selectedIndex = 0;
         this.invalidate();
