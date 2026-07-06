@@ -212,11 +212,7 @@ export class PermissionPromptComponent implements Component, Focusable {
         const inputLines = item.input.render(innerW - 4);
         for (let j = 0; j < inputLines.length; j++) {
           const il = inputLines[j]!;
-          if (j === 0) {
-            lines.push(" > " + il);
-          } else {
-            lines.push("   " + il);
-          }
+          lines.push("   " + il);
         }
       } else {
         const checkbox = item.checked ? "[X]" : "[ ]";
@@ -267,7 +263,7 @@ export class PermissionPromptComponent implements Component, Focusable {
           for (const el of content) lines.push("   " + el);
         }
       } else {
-        lines.push("  [Deny…]");
+        lines.push(" [Deny…]");
       }
     }
 
