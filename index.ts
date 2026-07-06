@@ -1034,13 +1034,25 @@ export default function safetynetExtension(api: ExtensionAPI) {
 
     // Brand-new sessions always start in the configured default profile (plan by default).
     // Forks/resume/reload inherit the persisted profile via restoreSessionState above.
-    if (event.reason === "new" || event.reason === "startup") {
+    // `pi --session`/`--resume`/`--continue` emit reason "startup" just like a plain `pi` launch,
+    // so we use getEntries() to tell a true brand-new session (empty on disk) from a resume.
+    const isBrandNew =
+      event.reason === "new" ||
+      (event.reason === "startup" && ctx.sessionManager.getEntries().length === 0);
+    if (isBrandNew) {
       const defaultProfile = loadDefaultProfile() ?? "plan";
       setCurrentProfile(defaultProfile);
       persistProfile(pi);
       updateStatus(ctx);
       if (ctx.hasUI) {
         ctx.ui.notify(`New session: starting in ${defaultProfile} mode`, "info");
+      }
+    } else if (event.reason === "startup") {
+      // Resumed session (pi --session/--resume/--continue): keep the profile restored by
+      // restoreSessionState rather than clobbering it with the default.
+      updateStatus(ctx);
+      if (ctx.hasUI) {
+        ctx.ui.notify(`Resumed session in ${getCurrentProfile()} mode`, "info");
       }
     }
 
