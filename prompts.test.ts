@@ -64,6 +64,7 @@ function makePrompt(target = "rm -rf /tmp/foo"): {
     undefined,
     theme,
     editor,
+    { denyAbort: "escape" },
   );
   return { component, editor };
 }
@@ -121,6 +122,7 @@ describe("PermissionPromptComponent: approval path", () => {
       undefined,
       theme,
       editor,
+      { denyAbort: "escape" },
     );
     const spy = collect(c);
     c.handleInput(ENTER); // unedited confirm
@@ -328,5 +330,124 @@ describe("PermissionPromptComponent: render affordances", () => {
     const lines = c.render(WIDTH);
     const help = lines.find((l) => l.includes("enter deny") && l.includes("esc back"));
     assert.ok(help, "deny-zone help should mention enter/esc");
+  });
+});
+
+describe("PermissionPromptComponent: configurable keybindings", () => {
+  function makePromptWith(kb: { denyContinue?: string; denyAbort: string }) {
+    const items = [makeItem("rm -rf /tmp/foo", false)];
+    const editor = new FakeEditor();
+    const component = new PermissionPromptComponent(
+      items, getDurationOptions(), "⚠️ bash approval required", [], undefined, theme, editor, kb,
+    );
+    return { component, editor };
+  }
+
+  it("denyContinue key emits a non-aborting deny (empty explanation)", () => {
+    const { component: c } = makePromptWith({ denyContinue: "n", denyAbort: "escape" });
+    const spy = collect(c);
+    c.handleInput("n");
+    assert.equal(spy.cancels.n, 0, "must not abort");
+    assert.equal(spy.results.length, 1);
+    assert.deepEqual(spy.results[0], { kind: "deny", explanation: "" });
+  });
+
+  it("denyAbort key calls onCancel (abort)", () => {
+    const { component: c } = makePromptWith({ denyAbort: "q" });
+    const spy = collect(c);
+    c.handleInput("q");
+    assert.equal(spy.cancels.n, 1);
+    assert.equal(spy.results.length, 0);
+  });
+
+  it("rebinding denyAbort away from escape makes Escape a no-op", () => {
+    const { component: c } = makePromptWith({ denyAbort: "q" });
+    const spy = collect(c);
+    c.handleInput(ESC);
+    assert.equal(spy.cancels.n, 0, "Esc must not abort when bound elsewhere");
+    assert.equal(spy.results.length, 0);
+    // Still on duration: Enter approves.
+    c.handleInput(ENTER);
+    assert.equal(spy.results[0]!.kind, "approve");
+  });
+
+  it("shift+n (uppercase N) works as denyAbort", () => {
+    const { component: c } = makePromptWith({ denyAbort: "shift+n" });
+    const spy = collect(c);
+    c.handleInput("N");
+    assert.equal(spy.cancels.n, 1);
+  });
+
+  it("deny keys do NOT fire while editing a command inline", () => {
+    const { component: c } = makePromptWith({ denyContinue: "n", denyAbort: "q" });
+    const spy = collect(c);
+    c.handleInput(UP); // → commands
+    c.handleInput(ENTER); // start editing
+    // 'n' while editing should insert into the Input, not trigger deny.
+    c.handleInput("n");
+    assert.equal(spy.results.length, 0, "denyContinue must not fire mid-edit");
+    assert.equal(spy.cancels.n, 0);
+  });
+
+  it("deny keys do NOT fire while in the deny editor zone (typing a reason)", () => {
+    const { component: c, editor } = makePromptWith({ denyContinue: "n", denyAbort: "q" });
+    const spy = collect(c);
+    c.handleInput(DOWN); // → deny
+    c.handleInput("n"); // should insert 'n' into the editor, not deny
+    assert.equal(spy.results.length, 0, "denyContinue must not fire in deny zone");
+    assert.equal(editor.getText(), "n");
+  });
+
+  it("Esc in the deny editor still backs out to duration (not abort)", () => {
+    const { component: c } = makePromptWith({ denyAbort: "q" });
+    const spy = collect(c);
+    c.handleInput(DOWN); // → deny
+    c.handleInput(ESC); // back out
+    assert.equal(spy.cancels.n, 0, "Esc backs out of deny editor without abort");
+    // Now on duration: Enter approves.
+    c.handleInput(ENTER);
+    assert.equal(spy.results[0]!.kind, "approve");
+  });
+});
+
+describe("PermissionPromptComponent: number shortcuts", () => {
+  it("pressing 1 selects Once and approves", () => {
+    const { component: c } = makePrompt();
+    const spy = collect(c);
+    c.handleInput("1");
+    assert.equal(spy.results.length, 1);
+    if (spy.results[0]!.kind === "approve") {
+      assert.equal(spy.results[0]!.duration, "once");
+    }
+  });
+
+  it("pressing 3 selects Project and approves", () => {
+    const { component: c } = makePrompt();
+    const spy = collect(c);
+    c.handleInput("3");
+    assert.equal(spy.results.length, 1);
+    if (spy.results[0]!.kind === "approve") {
+      assert.equal(spy.results[0]!.duration, "project");
+    }
+  });
+
+  it("pressing 5 selects Global and approves", () => {
+    const { component: c } = makePrompt();
+    const spy = collect(c);
+    c.handleInput("5");
+    assert.equal(spy.results.length, 1);
+    if (spy.results[0]!.kind === "approve") {
+      assert.equal(spy.results[0]!.duration, "global");
+    }
+  });
+
+  it("other digits (6-9) are ignored from the duration zone", () => {
+    const { component: c } = makePrompt();
+    const spy = collect(c);
+    c.handleInput("7");
+    assert.equal(spy.results.length, 0);
+    const lines = c.render(WIDTH);
+    // Still on duration (number badges visible).
+    assert.ok(lines.find((l) => l.includes("1:Once")), "number badges should render on duration options");
   });
 });

@@ -21,3 +21,26 @@ export interface TempRule {
   rule: Rule;
   expiry: TempExpiry;
 }
+
+/** Configurable prompt keybindings (key identifiers as understood by
+ * pi-tui's `matchesKey`, e.g. "n", "shift+n", "escape", "ctrl+c").
+ * Uppercase letters cannot be expressed as a bare capital (pi-tui lowercases
+ * single-char ids); use the shifted form, e.g. "shift+n" for N. */
+export interface KeybindingsConfig {
+  /** Single-key deny-and-continue: block the call, surface the reason to
+   *  the model, but keep its turn. No default (opt-in). */
+  denyContinue?: string;
+  /** Single-key deny-and-abort: block the call and end the turn. Default
+   *  "escape". To make Escape a no-op, bind this to something else. */
+  denyAbort?: string;
+}
+
+/** Auto-deny behaviour for rule-denies and headless (no-TUI) denials. */
+export interface AutoDenyConfig {
+  /** When true, auto-deny blocks the call WITHOUT aborting the turn (the model
+   *  sees the reason and may keep reacting). Default false (abort). */
+  continue?: boolean;
+  /** Reason surfaced to the model on auto-deny. Per-rule `reason` still takes
+   *  precedence when present (more specific). */
+  reason?: string;
+}

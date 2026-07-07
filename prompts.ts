@@ -6,6 +6,7 @@ import {
   type Focusable,
   Input,
   Key,
+  type KeyId,
   matchesKey,
   truncateToWidth,
   type TUI,
@@ -66,6 +67,8 @@ export interface PermissionPromptOptions {
   reason?: string | undefined;
   /** True when re-prompting after rules were added but still insufficient. */
   reprompt?: boolean;
+  /** Configurable prompt keybindings (deny/deny-abort). Required. */
+  keybindings: PromptKeybindings;
 }
 
 // ─── Internal types ────────────────────────────────────────────────────────
@@ -97,6 +100,14 @@ interface DurationOption {
 
 type FocusZone = "commands" | "duration" | "deny";
 
+export interface PromptKeybindings {
+  /** Key id (pi-tui matchesKey form) for deny-and-continue, or undefined to
+   *  disable the single-key shortcut. */
+  denyContinue?: string;
+  /** Key id for deny-and-abort. Always set (defaults to "escape"). */
+  denyAbort: string;
+}
+
 const MAX_DISPLAY_CHARS = 280;
 
 function displayText(item: CommandListItem): string {
@@ -126,6 +137,16 @@ function getEditorContentLines(editorLines: string[]): string[] {
   const trailingBorderIndex = contentLines.findIndex(isEditorBorderLine);
   if (trailingBorderIndex === -1) return contentLines;
   return contentLines.filter((_, i) => i !== trailingBorderIndex);
+}
+
+/** Human-readable label for a keybind id, used in help text.
+ * "escape" → "esc"; "shift+n" → "N"; "ctrl+c" → "ctrl+c". */
+function keybindLabel(keyId: string): string {
+  if (keyId === "escape" || keyId === "esc") return "esc";
+  // shift+letter → uppercase single char (the visible glyph).
+  const shiftLetter = /^shift\+([a-z])$/.exec(keyId);
+  if (shiftLetter) return shiftLetter[1]!.toUpperCase();
+  return keyId;
 }
 
 export function makeItem(text: string, isFile: boolean, display?: string): CommandListItem {
@@ -167,6 +188,7 @@ export class PermissionPromptComponent implements Component, Focusable {
   private cachedWidth: number | undefined = undefined;
   private cachedLines: string[] | undefined = undefined;
   private denyEditor: DenyEditor;
+  private keybindings: PromptKeybindings;
   onConfirm?: (result: PermissionPromptResult) => void;
   onCancel?: () => void;
 
@@ -178,6 +200,7 @@ export class PermissionPromptComponent implements Component, Focusable {
     reason: string | undefined,
     theme: Theme,
     denyEditor: DenyEditor,
+    keybindings: PromptKeybindings,
   ) {
     this.items = items;
     this.durationOptions = durationOptions;
@@ -186,6 +209,7 @@ export class PermissionPromptComponent implements Component, Focusable {
     this.reason = reason;
     this.theme = theme;
     this.denyEditor = denyEditor;
+    this.keybindings = keybindings;
   }
 
   render(width: number): string[] {
@@ -237,10 +261,14 @@ export class PermissionPromptComponent implements Component, Focusable {
       for (let i = 0; i < this.durationOptions.length; i++) {
         const opt = this.durationOptions[i]!;
         const isActive = this.focusZone === "duration" && i === this.selectedDuration;
+        // Show the 1-based index as a number shortcut hint on each option
+        // when in the duration zone (press 1–5 to select+approve).
+        const badge = this.theme.fg("dim", `${i + 1}:`);
+        const label = `${badge}${opt.label}`;
         if (isActive) {
-          parts.push(this.theme.fg("accent", this.theme.bold(`[${opt.label}]`)));
+          parts.push(this.theme.fg("accent", this.theme.bold(`[${label}]`)));
         } else {
-          parts.push(` ${opt.label} `);
+          parts.push(` ${label} `);
         }
       }
       lines.push(" " + parts.join("  "));
@@ -269,11 +297,18 @@ export class PermissionPromptComponent implements Component, Focusable {
 
     // Help text
     {
+      // Build a description of the configured deny keys for the help line.
+      // e.g. denyAbort="escape" → "esc"; "shift+n" → "N"; "q" → "q".
+      const denyAbortLabel = keybindLabel(this.keybindings.denyAbort);
+      const denyContinueLabel = this.keybindings.denyContinue
+        ? keybindLabel(this.keybindings.denyContinue)
+        : null;
+      const denyContinueHint = denyContinueLabel ? ` · ${denyContinueLabel} deny` : "";
       const help = this.focusZone === "deny"
         ? "enter deny (empty = no reason) · esc back · ↑ duration · ↓ commands"
         : this.focusZone === "commands"
-          ? "↑↓ navigate · space toggle · enter edit · esc deny"
-          : "←→ switch · enter confirm · ↓ deny · ↑ commands · esc deny";
+          ? `↑↓ navigate · space toggle · enter edit · ${denyAbortLabel} abort${denyContinueHint}`
+          : `←→ switch · enter confirm · 1-5 quick-approve · ↓ deny · ↑ commands · ${denyAbortLabel} abort${denyContinueHint}`;
       lines.push(this.theme.fg("dim", " " + truncateToWidth(help, innerW - 1)));
     }
 
@@ -292,7 +327,8 @@ export class PermissionPromptComponent implements Component, Focusable {
   }
 
   handleInput(data: string): void {
-    // If editing a command, route to its inline Input first.
+    // If editing a command inline, route to its Input first. The configured
+    // deny keys do NOT fire while editing (would be surprising).
     if (this.focusZone === "commands" && this.selectedIndex < this.items.length) {
       const item = this.items[this.selectedIndex]!;
       if (item.editing && item.input) {
@@ -301,15 +337,23 @@ export class PermissionPromptComponent implements Component, Focusable {
       }
     }
 
-    // Esc: in the deny editor zone, back out to duration (no abort).
-    // Everywhere else, Esc aborts the turn.
-    if (matchesKey(data, Key.escape)) {
-      if (this.focusZone === "deny") {
-        this.focusZone = "duration";
-        this.invalidate();
-      } else {
-        this.onCancel?.();
-      }
+    // Deny editor zone: routes everything to the editor, Escape backs out
+    // to duration (does NOT abort, preserved historically). The configured
+    // denyContinue/denyAbort single-key actions do not fire here either —
+    // the user is typing a reason and letter keys should insert text.
+    if (this.focusZone === "deny") {
+      this.handleDenyEditorInput(data);
+      return;
+    }
+
+    // Commands (not editing) or duration zone: configurable single-key deny
+    // actions fire here.
+    if (this.keybindings.denyContinue && matchesKey(data, this.keybindings.denyContinue as KeyId)) {
+      this.onConfirm?.({ kind: "deny", explanation: "" });
+      return;
+    }
+    if (matchesKey(data, this.keybindings.denyAbort as KeyId)) {
+      this.onCancel?.();
       return;
     }
 
@@ -317,8 +361,6 @@ export class PermissionPromptComponent implements Component, Focusable {
       this.handleCommandsInput(data);
     } else if (this.focusZone === "duration") {
       this.handleDurationInput(data);
-    } else {
-      this.handleDenyEditorInput(data);
     }
   }
 
@@ -347,6 +389,15 @@ export class PermissionPromptComponent implements Component, Focusable {
   }
 
   private handleDurationInput(data: string): void {
+    // Number shortcuts 1–5 select a duration and immediately approve with the
+    // currently checked items (mirrors "press 3 to approve for the project").
+    const digitIndex = this.durationOptions.findIndex((_, i) => matchesKey(data, String(i + 1) as KeyId));
+    if (digitIndex >= 0) {
+      this.selectedDuration = digitIndex;
+      this.invalidate();
+      this.confirm();
+      return;
+    }
     if (matchesKey(data, Key.left)) {
       if (this.selectedDuration > 0) {
         this.selectedDuration--;
@@ -376,6 +427,14 @@ export class PermissionPromptComponent implements Component, Focusable {
   //  - Non-empty: arrows delegated to the editor; Enter submits deny-with-explanation.
   //  - Whitespace-only trims to empty and submits as plain deny.
   private handleDenyEditorInput(data: string): void {
+    // Escape backs out of the deny editor to the duration zone (does NOT
+    // abort the turn, no matter what denyAbort is bound to — this is the
+    // "exit this text field" gesture while typing a reason).
+    if (matchesKey(data, Key.escape)) {
+      this.focusZone = "duration";
+      this.invalidate();
+      return;
+    }
     const isEmpty = this.denyEditor.getText().length === 0;
     if (matchesKey(data, Key.enter)) {
       const explanation = this.denyEditor.getText().trim();
@@ -594,6 +653,7 @@ export async function showPermissionPrompt(
         opts.reason,
         theme,
         denyEditor,
+        opts.keybindings,
       );
 
       inner.onConfirm = (result) => done(result);

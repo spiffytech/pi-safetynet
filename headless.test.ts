@@ -38,3 +38,20 @@ describe("headlessDeny", () => {
     assert.equal(result, undefined);
   });
 });
+
+describe("headlessDeny with autoDenyReason", () => {
+  it("uses the provided reason when given", () => {
+    const result = headlessDeny(false, "ask", "bash", "project policy: no network");
+    assert.deepEqual(result, { block: true, reason: "project policy: no network" });
+  });
+
+  it("falls back to the default banner when reason is undefined", () => {
+    const result = headlessDeny(false, "ask", "bash", undefined);
+    assert.deepEqual(result, { block: true, reason: "Bash requires approval (headless mode)" });
+  });
+
+  it("falls back to the default banner when reason is empty string", () => {
+    const result = headlessDeny(false, "ask", "edit", "");
+    assert.deepEqual(result, { block: true, reason: "Edit requires approval (headless mode)" });
+  });
+});

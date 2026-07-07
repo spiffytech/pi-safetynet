@@ -12,7 +12,8 @@ import {
 	type CreateAgentSessionResult,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
-import type { Ruleset } from "./types.ts";
+import type { AutoDenyConfig, Ruleset } from "./types.ts";
+import type { PromptKeybindings } from "./prompts.ts";
 import type { PermissionStorage } from "./permissions/index.ts";
 import { toDisplayPath } from "./project.ts";
 import { createSubagentSafetynetExtension } from "./subagent-safetynet.ts";
@@ -176,6 +177,10 @@ export interface SubagentOptions {
 	model?: Model<any> | undefined;
 	thinkingLevel?: string | undefined;
 	trustExternalPaths?: boolean;
+	/** Inherited from parent: prompt keybindings for the bridged permission prompt. */
+	promptKeybindings: PromptKeybindings;
+	/** Inherited from parent: auto-deny behaviour for rule-denies. */
+	autoDenyConfig: AutoDenyConfig;
 }
 
 /** Max agent turns before we abort the subagent. */
@@ -238,15 +243,17 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 		settingsManager,
 		noExtensions: true,
 		extensionFactories: [
-		createSubagentSafetynetExtension({
-			taskType,
-			parentCtx,
-			parentStorage,
-			initialRules,
-			cwd,
-			onPermissionDenied,
-			trustExternalPaths: opts.trustExternalPaths ?? false,
-		}),
+	createSubagentSafetynetExtension({
+		taskType,
+		parentCtx,
+		parentStorage,
+		initialRules,
+		cwd,
+		onPermissionDenied,
+		trustExternalPaths: opts.trustExternalPaths ?? false,
+		promptKeybindings: opts.promptKeybindings,
+		autoDenyConfig: opts.autoDenyConfig,
+	}),
 			createDiagnosticExtension(),
 		],
 	};

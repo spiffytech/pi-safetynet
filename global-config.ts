@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { ProfileName, Ruleset } from "./types.ts";
+import type { AutoDenyConfig, KeybindingsConfig, ProfileName, Ruleset } from "./types.ts";
+import type { PromptKeybindings } from "./prompts.ts";
 import { sanitizeRules } from "./permissions/storage.ts";
 
 /** Directory for global config — `~/.config/pi-safetynet/` */
@@ -19,6 +20,10 @@ interface GlobalConfig {
   subagents?: string[] | null;
   defaultProfile?: ProfileName;
   trustExternalPaths?: boolean;
+  keybindings?: KeybindingsConfig;
+  autoDeny?: AutoDenyConfig;
+  /** Remappable key for the plan/build toggle global shortcut. Default "ctrl+\\". */
+  toggleModeKey?: string;
   [key: string]: unknown;
 }
 
@@ -74,6 +79,44 @@ export function loadDefaultProfile(): ProfileName | undefined {
 export function loadTrustExternalPaths(): boolean {
   const config = loadConfig();
   return config.trustExternalPaths === true;
+}
+
+/** Load configurable prompt keybindings. Returns sanitized defaults when unset. */
+export function loadKeybindings(): PromptKeybindings {
+  const config = loadConfig();
+  const raw: KeybindingsConfig = config.keybindings ?? {};
+  const out: PromptKeybindings = { denyAbort: "escape" };
+  // Normalise to lowercase key ids (pi-tui matches lowercase single chars).
+  // Reject empty strings (a bound key must be non-empty to be meaningful).
+  if (typeof raw.denyContinue === "string" && raw.denyContinue.trim().length > 0) {
+    out.denyContinue = raw.denyContinue.trim().toLowerCase();
+  }
+  if (typeof raw.denyAbort === "string" && raw.denyAbort.trim().length > 0) {
+    out.denyAbort = raw.denyAbort.trim().toLowerCase();
+  } else {
+    // Default: Esc aborts the turn (preserves historical behaviour).
+    out.denyAbort = "escape";
+  }
+  return out;
+}
+
+/** Load auto-deny behaviour for rule/headless denials. */
+export function loadAutoDeny(): AutoDenyConfig {
+  const config = loadConfig();
+  const raw = config.autoDeny ?? {};
+  const out: AutoDenyConfig = { continue: raw.continue === true };
+  const reason = typeof raw.reason === "string" && raw.reason.trim().length > 0
+    ? raw.reason.trim()
+    : undefined;
+  if (reason !== undefined) out.reason = reason;
+  return out;
+}
+
+/** Load the toggle-plan/build shortcut key. Default "ctrl+\\". */
+export function loadToggleModeKey(): string {
+  const config = loadConfig();
+  const raw = config.toggleModeKey;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : "ctrl+\\";
 }
 
 /** Save the default profile to global config, preserving other keys. */

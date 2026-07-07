@@ -146,17 +146,40 @@ When pi-safetynet prompts for approval, you choose how long the permission lasts
 
 The approval UI shows exactly what needs approval — individual subcommands in a pipeline, file redirects, or both. Each item can be toggled on/off, and items can be inline-edited before approval (e.g., narrow a `*` pattern to a specific path).
 
-From the prompt you can either approve (with a chosen duration) or reject the call. Two ways to reject:
+From the prompt you can either approve (with a chosen duration) or reject the call. There are two deny actions, each with its own shortcut:
 
-- **`Esc`** — aborts the entire turn. The model stops and you get the prompt back.
-- **`[Deny…]`** — non-aborting deny. Arrow down to the `[Deny…]` row to drop into an expanding textbox. Submit empty (Enter) = deny with no reason (`User denied <permission>`); submit with text = deny with that reason. The reason is surfaced to the model as the tool's error result, so it knows *why* the call was rejected and can keep reacting without losing its in-progress turn. Press `Esc` from the textbox to return to the approval prompt (does not abort).
+- **Deny and abort** — ends the turn. The model stops and you get the prompt back. Bound to `denyAbort` (default: `Esc`).
+- **Deny and continue** — non-aborting. The model keeps its turn and sees the deny reason as the tool's error result, so it can react (e.g. try a different command) without losing in-progress work. Bound to `denyContinue` (no default — see [Prompt keybindings](#prompt-keybindings) to enable). By default, use the `[Deny…]` row instead: arrow down to it, type a reason, and Enter to submit (empty Enter = deny with no reason).
+
+When the deny editor is focused, `Esc` backs out to the duration selector without aborting (no matter how `denyAbort` is bound).
+
+### Number shortcuts
+
+From the duration selector, press `1`–`5` to pick a duration and approve immediately with the currently-checked items:
+
+1. Once  ·  2. Session  ·  3. Project  ·  4. Turn  ·  5. Global
 
 ## Keyboard shortcuts
 
-| Shortcut | Action |
-|---|---|
-| `Ctrl+\` | Toggle between plan and build mode |
+### Global shortcuts
 
+These are pi global shortcuts (work outside the prompt too):
+
+| Shortcut | Action | Configurable |
+|---|---|---|
+| `Ctrl+\` | Toggle between plan and build mode | yes — `toggleModeKey` |
+| `Ctrl+Shift+\` | Show the current plan | no |
+
+### Prompt keybindings
+
+| Action | Default | Config field |
+|---|---|---|
+| Deny and abort | `escape` | `keybindings.denyAbort` |
+| Deny and continue | *(unbound)* | `keybindings.denyContinue` |
+
+Key identifiers use pi-tui's key-id form (the same form pi uses for its own keybindings): single chars like `"n"`, special keys like `"escape"`/`"enter"`, and modified keys like `"ctrl+c"` or `"shift+n"`. Note that pi-tui lowercases single-char ids, so a bare `"N"` won't match the uppercase key — use `"shift+n"` for `N`. See the worked example below.
+
+To make `Escape` a no-op in the prompt, simply bind `denyAbort` to something else (e.g. `"shift+n"` for `N`). Escape then does nothing — abort is reached only via your chosen key.
 ## Configuration flags
 
 | Flag | Default | Description |
@@ -238,6 +261,51 @@ Examples:
 { "subagents": ["subagent_explore"] }
 { "subagents": [] }
 ```
+
+#### `keybindings`
+
+Customizes the prompt's single-key deny actions. Both fields are optional.
+
+- **`denyAbort`** — key to deny-and-abort (ends the turn). Default `"escape"`.
+- **`denyContinue`** — key to deny-and-continue (non-aborting; model keeps its turn and sees the reason). No default (opt-in).
+
+See [Prompt keybindings](#prompt-keybindings) for the key-id format. A common ask is to make `Escape` a no-op and use `n`/`N` instead — here's the exact config for that:
+
+```json
+{
+  "keybindings": {
+    "denyContinue": "n",
+    "denyAbort": "shift+n"
+  }
+}
+```
+
+With this, `n` denies and continues, `N` (shift+n) denies and aborts, and `Escape` does nothing in the prompt.
+
+#### `autoDeny`
+
+Controls what happens when a call is denied automatically — either by a `deny` rule, or in headless mode when a `ask` rule can't show a prompt:
+
+- **`continue`** — when `true`, the deny blocks the call WITHOUT aborting the turn: the model sees the reason as the tool's error result and may keep reacting. Default `false` (abort the turn, matching historical behaviour).
+- **`reason`** — a reason string surfaced to the model on auto-deny (e.g. `"Project policy: no network access"`). A per-rule `reason` field still takes precedence when present (more specific).
+
+```json
+{
+  "autoDeny": {
+    "continue": true,
+    "reason": "Denied by project policy"
+  }
+}
+```
+
+#### `toggleModeKey`
+
+Remaps the global plan↔build toggle shortcut. Default `"ctrl+\\"`.
+
+```json
+{ "toggleModeKey": "ctrl+b" }
+```
+
 
 Each rule has:
 

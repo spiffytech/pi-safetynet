@@ -17,9 +17,9 @@ import { Type } from "typebox";
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction } from "./types.ts";
+import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction, KeybindingsConfig, AutoDenyConfig } from "./types.ts";
 import questionnaire from "./questionnaire.ts";
-import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile } from "./global-config.ts";
+import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./global-config.ts";
 import { runSubagent, addUsage, formatSubagentUsage, ZERO_USAGE, type SubagentUsage } from "./subagent.ts";
 import {
   getBaselineRules,
@@ -44,11 +44,18 @@ import {
 } from "./profiles/plan-on-error.ts";
 import {
   showPermissionPrompt,
+  type PromptKeybindings,
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./check.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
 
 let storage: PermissionStorage;
+
+/** Loaded prompt keybindings (denyContinue/denyAbort). Initialized at extension init. */
+let promptKeybindings: PromptKeybindings = { denyAbort: "escape" };
+
+/** Loaded auto-deny behaviour (continue/reason). Initialized at extension init. */
+let autoDenyConfig: AutoDenyConfig = { continue: false };
 
 /** Current model display string (provider/model-id), updated via model_select events. */
 let currentModelDisplay: string = "";
@@ -141,15 +148,18 @@ function makeTempRules(
   }));
 }
 
-/** Check headless-mode deny behavior. Pure function for testability. */
+/** Check headless-mode deny behavior. Pure function for testability.
+ *  When `autoDenyReason` is provided it overrides the default banner text. */
 export function headlessDeny(
   hasUI: boolean,
   action: PermissionAction,
   permission: "bash" | "read" | "edit",
+  autoDenyReason?: string,
 ): { block: boolean; reason: string } | undefined {
   if (hasUI || action !== "ask") return undefined;
   const label = permission[0]!.toUpperCase() + permission.slice(1);
-  return { block: true, reason: `${label} requires approval (headless mode)` };
+  const reason = autoDenyReason || `${label} requires approval (headless mode)`;
+  return { block: true, reason };
 }
 
 async function resolvePermission(
@@ -167,16 +177,22 @@ async function resolvePermission(
   if (action === "allow") return undefined;
 
   if (action === "deny") {
-    ctx.abort();
+    // Rule-based deny. Per-rule reason (most specific) wins over the
+    // configured auto-deny reason; the default banner is the fallback.
     const label = opts.permission[0]!.toUpperCase() + opts.permission.slice(1);
-    return { block: true, reason: `${label} denied: ${opts.check.reason ?? "no matching allow rule"}` };
+    const reason = opts.check.reason
+      ?? autoDenyConfig.reason
+      ?? `${label} denied: no matching allow rule`;
+    // `continue: true` keeps the model's turn (non-aborting).
+    if (!autoDenyConfig.continue) ctx.abort();
+    return { block: true, reason };
   }
 
-  // Headless: no TUI available to show permission prompt, deny by default
-  const denied = headlessDeny(ctx.hasUI, action, opts.permission);
+  // Headless: no TUI available to show permission prompt, deny by default.
+  const denied = headlessDeny(ctx.hasUI, action, opts.permission, autoDenyConfig.reason);
   if (denied) {
     if (!ctx.hasUI) console.error(`safetynet: ${denied.reason}`);
-    ctx.abort();
+    if (!autoDenyConfig.continue) ctx.abort();
     return denied;
   }
 
@@ -189,6 +205,7 @@ async function resolvePermission(
       permission: opts.permission,
       target: opts.target,
       reprompt,
+      keybindings: promptKeybindings,
     };
     if (opts.check.unapproved && opts.check.unapproved.length > 0) promptOpts.unapproved = opts.check.unapproved;
     if (opts.check.unapprovedDisplay && opts.check.unapprovedDisplay.length > 0) promptOpts.unapprovedDisplay = opts.check.unapprovedDisplay;
@@ -353,9 +370,13 @@ async function handleToolCall(
       const check = checkBashPermission(command, profile, rules, cwd, trustExternal);
 
       if (check.action === "deny") {
-        ctx.abort();
-        const detail = check.reason ?? `Denied by ruleset: ${(check.unapproved ?? []).join(", ")}`;
+        // Per-rule reason wins over configured auto-deny reason; default
+        // banner is the fallback. `continue: true` keeps the model's turn.
+        const detail = check.reason
+          ?? autoDenyConfig.reason
+          ?? `Denied by ruleset: ${(check.unapproved ?? []).join(", ")}`;
         ctx.ui.notify(`Command denied: ${command} (${detail})`, "error");
+        if (!autoDenyConfig.continue) ctx.abort();
         return { block: true, reason: `Command denied: ${detail}` };
       }
 
@@ -881,6 +902,8 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 				model: resolveModel(params.model, ctx),
 				thinkingLevel: pi.getThinkingLevel(),
 				trustExternalPaths: trustExternalActive(),
+				promptKeybindings,
+				autoDenyConfig,
 			});
 			if (result.details && typeof result.details === "object" && "usage" in result.details) {
 				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
@@ -916,6 +939,8 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 				model: resolveModel(params.model, ctx),
 				thinkingLevel: pi.getThinkingLevel(),
 				trustExternalPaths: trustExternalActive(),
+				promptKeybindings,
+				autoDenyConfig,
 			});
 			if (result.details && typeof result.details === "object" && "usage" in result.details) {
 				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
@@ -927,7 +952,7 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 }
 
 function registerShortcuts(pi: ExtensionAPI) {
-  pi.registerShortcut("ctrl+\\", {
+  pi.registerShortcut(loadToggleModeKey() as "ctrl+\\", {
     description: "Toggle between plan and build profile",
     handler: async (ctx) => {
       const next: ProfileName = getCurrentProfile() === "plan" ? "build" : "plan";
@@ -982,6 +1007,10 @@ async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): P
 export default function safetynetExtension(api: ExtensionAPI) {
   pi = api;
   storage = new PermissionStorage(pi, process.cwd());
+
+  // Load configurable prompt keybindings + auto-deny behaviour from global config.
+  promptKeybindings = loadKeybindings();
+  autoDenyConfig = loadAutoDeny();
 
   registerPlanTools(pi);
   // registerAnswerTool(pi); // temporarily disabled

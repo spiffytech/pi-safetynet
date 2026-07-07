@@ -484,3 +484,24 @@ describe("unapprovedDisplay parallel array", () => {
     assert.ok(r2.unapprovedDisplay![0]!.includes('-g "can save"'));
   });
 });
+
+describe("regression: fully-allowlisted commands allow with empty unapproved", () => {
+  // Guards the resolvePermission allow-path early-return: when a command is
+  // entirely allowlisted, checkBashPermission must return action:"allow" and
+  // NO unapproved entries. If this contract breaks, resolvePermission would
+  // fall through to the prompt loop and show the whole command (a prior bug).
+  const cases: Array<[string, string]> = [
+    ["cat README.md | head -40", "pipeline of allowlisted readers"],
+    ["echo ---DEV---", "allowlisted echo"],
+    ["sed -n 1,60p file.ts 2>/dev/null", "allowlisted sed -n with fd-redirect"],
+    ["cat /home/user/project/pkg.json 2>/dev/null | head -40; echo x; sed -n 1,60p /home/user/project/dev.ts 2>/dev/null", "the exact reported compound command"],
+  ];
+  for (const [cmd, label] of cases) {
+    it(`allowlists: ${label}`, () => {
+      const result = checkBashPermission(cmd, "build", RULES, CWD);
+      assert.equal(result.action, "allow", `expected allow for: ${cmd}`);
+      assert.equal((result.unapproved ?? []).length, 0, `expected no unapproved for: ${cmd}`);
+      assert.equal((result.redirectTargets ?? []).length, 0, `expected no redirect targets for: ${cmd}`);
+    });
+  }
+});

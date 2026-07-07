@@ -10,8 +10,8 @@
 
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Rule, Ruleset, TempRule, ProfileName } from "./types.ts";
-import type { PermissionPromptOptions } from "./prompts.ts";
+import type { Rule, Ruleset, TempRule, ProfileName, AutoDenyConfig } from "./types.ts";
+import type { PermissionPromptOptions, PromptKeybindings } from "./prompts.ts";
 import { showPermissionPrompt } from "./prompts.ts";
 import {
 	PermissionStorage,
@@ -32,6 +32,10 @@ export interface SubagentSafetynetOpts {
 	onPermissionDenied?: () => void;
 	/** Inherited from parent: trust file paths outside the project root */
 	trustExternalPaths?: boolean;
+	/** Inherited from parent: prompt keybindings for the bridged permission prompt. */
+	promptKeybindings?: PromptKeybindings;
+	/** Inherited from parent: auto-deny behaviour for rule-denies. */
+	autoDenyConfig?: AutoDenyConfig;
 }
 
 const SUBAGENT_EPHEMERAL_CUSTOM_TYPE = "safetynet:subagent-ephemeral";
@@ -101,7 +105,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 	}
 	const parentCtx: ExtensionContext = opts.parentCtx;
 	const parentStorage: PermissionStorage = opts.parentStorage;
-	const { initialRules, cwd, onPermissionDenied, trustExternalPaths = false } = opts;
+	const { initialRules, cwd, onPermissionDenied, trustExternalPaths = false, promptKeybindings = { denyAbort: "escape" }, autoDenyConfig = { continue: false } } = opts;
 
 	return (pi: ExtensionAPI) => {
 		let subagentStorage: PermissionStorage;
@@ -215,9 +219,17 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 			if (action === "allow") return undefined;
 
 			if (action === "deny") {
-				ctx.abort();
+				// Per-rule reason wins over configured auto-deny reason.
 				const label = opts.permission[0]!.toUpperCase() + opts.permission.slice(1);
-				return { block: true, reason: `${label} denied: ${opts.check.reason ?? "no matching allow rule"}` };
+				const reason = opts.check.reason
+					?? autoDenyConfig.reason
+					?? `${label} denied: no matching allow rule`;
+				// `continue: true` keeps the subagent's turn (non-aborting).
+				if (!autoDenyConfig.continue) {
+					ctx.abort();
+					onPermissionDenied?.();
+				}
+				return { block: true, reason };
 			}
 
 			// action === "ask" — delegate to parent's permission prompt
@@ -229,6 +241,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					permission: opts.permission,
 					target: opts.target,
 					reprompt,
+					keybindings: promptKeybindings,
 				};
 				if (opts.check.unapproved && opts.check.unapproved.length > 0) promptOpts.unapproved = opts.check.unapproved;
 				if (opts.check.unapprovedDisplay && opts.check.unapprovedDisplay.length > 0) promptOpts.unapprovedDisplay = opts.check.unapprovedDisplay;
