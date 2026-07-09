@@ -312,7 +312,7 @@ async function resolvePermission(
         await storage.addGlobalRules(newRules);
       } else {
         storage.addSessionRules(newRules);
-        pi.appendEntry("safetynet:session-rules", { rules: newRules });
+        pi.appendEntry("safetynet:session-rules", { rules: newRules, cwd: opts.cwd });
       }
     } else {
       // "turn"
@@ -361,7 +361,7 @@ async function handleToolCall(
   try {
     const profile = getCurrentProfile();
 
-    const cwd = ctx.cwd;
+    const cwd = process.cwd();
     const trustExternal = trustExternalActive();
 
     if (event.toolName === "bash") {
@@ -988,13 +988,17 @@ async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): P
   restorePlanOnError(ctx);
   restoreSubagentUsage(ctx);
 
-  const sessionRules = reconstructSessionRules(ctx);
+  const { rules: sessionRules, skippedCount } = reconstructSessionRules(ctx, process.cwd());
   if (opts?.replaceSession) {
     const s = storage.session;
     s.clear();
     if (sessionRules.length > 0) s.addRules(sessionRules);
   } else {
     if (sessionRules.length > 0) storage.addSessionRules(sessionRules);
+  }
+
+  if (skippedCount > 0 && ctx.hasUI) {
+    ctx.ui.notify(`${skippedCount} session rule group(s) skipped — cwd changed since they were created.`, "warning");
   }
 
   updateStatus(ctx);

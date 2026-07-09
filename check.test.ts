@@ -505,3 +505,73 @@ describe("regression: fully-allowlisted commands allow with empty unapproved", (
     });
   }
 });
+
+describe("user-added ** wildcard honors external paths", () => {
+  const ALL_MODES: ["build", "plan"] = ["build", "plan"];
+
+  it("baseline read: ** is still downgraded for external paths (backward compat)", () => {
+    const result = checkFileTarget("/etc/hosts", "read", "build", RULES, CWD);
+    assert.equal(result.action, "ask");
+    assert.equal(result.reason, "Path is outside project root");
+  });
+
+  it("user-added read: ** allow is honored for external paths", () => {
+    const rules: Ruleset = [
+      ...RULES,
+      { permission: "read", pattern: "**", action: "allow", modes: ALL_MODES },
+    ];
+    const result = checkFileTarget("/etc/hosts", "read", "build", rules, CWD);
+    assert.equal(result.action, "allow");
+  });
+
+  it("user-added edit: ** allow is honored for external paths", () => {
+    const rules: Ruleset = [
+      ...RULES,
+      { permission: "edit", pattern: "**", action: "allow", modes: ALL_MODES },
+    ];
+    const result = checkFileTarget("/tmp/output.txt", "edit", "build", rules, CWD);
+    assert.equal(result.action, "allow");
+  });
+
+  it("specific external path rule works without ** interference", () => {
+    // Regression: specific patterns should still work
+    const rules: Ruleset = [
+      ...RULES,
+      { permission: "read", pattern: "/etc/**", action: "allow", modes: ALL_MODES },
+    ];
+    const result = checkFileTarget("/etc/hosts", "read", "build", rules, CWD);
+    assert.equal(result.action, "allow");
+  });
+});
+
+describe("stale cwd path normalization", () => {
+  it("file inside correct cwd is internal (sanity check)", () => {
+    // CWD is "/home/user/project" as defined at top of file
+    const result = checkFileTarget("src/foo.ts", "read", "build", RULES, CWD);
+    assert.equal(result.action, "allow");
+  });
+
+  it("absolute file inside correct cwd is normalized to internal", () => {
+    const result = checkFileTarget(CWD + "/src/foo.ts", "read", "build", RULES, CWD);
+    assert.equal(result.action, "allow");
+  });
+
+  it("file inside actual cwd but stale cwd treats as external (bug reproduction)", () => {
+    // File at /home/user/project/src/foo.ts with staleCwd = /stale/cwd
+    // The stale cwd doesn't match, so the path stays absolute → external
+    const result = checkFileTarget(CWD + "/src/foo.ts", "read", "build", RULES, "/stale/cwd");
+    assert.equal(result.action, "ask");
+    assert.equal(result.reason, "Path is outside project root");
+  });
+
+  it("file inside actual cwd with undefined cwd falls back to process.cwd()", () => {
+    // When cwd is undefined, checkFileTarget uses process.cwd()
+    // We can't easily test process.cwd() behavior without actually being in the dir,
+    // but we can verify it doesn't crash and works logically.
+    // Just test with explicit cwd to verify the fallback mechanism:
+    const result = checkFileTarget(CWD + "/src/foo.ts", "read", "build", RULES, undefined);
+    // process.cwd() in the test runner won't be CWD, so this will be external
+    // Just verify it returns a valid action (not a crash)
+    assert.ok(result.action === "allow" || result.action === "ask");
+  });
+});

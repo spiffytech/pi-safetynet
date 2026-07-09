@@ -1,9 +1,9 @@
 import { resolve } from "node:path";
 import type { ProfileName, PermissionAction, Ruleset } from "./types.ts";
 import { evaluatePermission } from "./permissions/ruleset.ts";
+import { getBaselineRules } from "./permissions/index.ts";
 import { parseCommand, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
 import { normalizePathForMatching, expandHome } from "./project.ts";
-
 /** Device files that are always safe to use as redirect targets. */
 const SAFE_DEVICE_FILES = new Set([
   "/dev/null",
@@ -56,15 +56,20 @@ export function checkFileTarget(
 
   // For external paths, the baseline catch-all rules (e.g. read: ** -> allow)
   // match but should not automatically approve — the user should be asked.
-  // However, if an explicit non-catch-all rule matched (e.g. a user-added
-  // allow rule for a specific external path), honour it.
+  // However, if an explicit rule matched (e.g. a user-added allow rule for a
+  // specific external path, or a user-added ** rule), honour it.
   //
   // External paths are identified by the normalized form: internal paths
   // are "." or relative (e.g. "src/foo.ts"), while external paths remain
   // absolute (e.g. "/etc/passwd") after normalization.
   if (!trustExternalPaths && normalized.startsWith("/")) {
     if (result.action === "allow" && result.matchedRule?.pattern === "**") {
-      return { action: "ask", reason: "Path is outside project root" };
+      // Only downgrade when the matched rule came from the baseline —
+      // user-added ** rules should be honoured as explicit approvals.
+      const baseline = getBaselineRules();
+      if (baseline.includes(result.matchedRule)) {
+        return { action: "ask", reason: "Path is outside project root" };
+      }
     }
   }
 

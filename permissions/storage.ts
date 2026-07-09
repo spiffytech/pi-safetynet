@@ -190,17 +190,25 @@ export class PermissionStorage {
 
 export function reconstructSessionRules(
   ctx: ExtensionContext,
-): Ruleset {
+  currentCwd: string,
+): { rules: Ruleset; skippedCount: number } {
   const entries = ctx.sessionManager.getBranch();
   const rules: Ruleset = [];
+  let skippedCount = 0;
   for (const entry of entries) {
     if (
       entry.type === "custom" &&
       (entry as { customType?: string }).customType === "safetynet:session-rules"
     ) {
-      const data = (entry as { data?: { rules?: Ruleset } }).data;
-      if (data?.rules) rules.push(...data.rules);
+      const data = (entry as { data?: { rules?: Ruleset; cwd?: string } }).data;
+      if (data?.rules) {
+        if (data.cwd && data.cwd !== currentCwd) {
+          skippedCount++;
+        } else {
+          rules.push(...data.rules);
+        }
+      }
     }
   }
-  return rules;
+  return { rules, skippedCount };
 }
