@@ -451,3 +451,80 @@ describe("PermissionPromptComponent: number shortcuts", () => {
     assert.ok(lines.find((l) => l.includes("1:Once")), "number badges should render on duration options");
   });
 });
+
+describe("PermissionPromptComponent: section headers", () => {
+  it("single command, no redirects — no section headers", () => {
+    const { component: c } = makePrompt();
+    const lines = c.render(WIDTH);
+    assert.ok(!lines.some((l) => l.includes("Commands:")), "no Commands: header for single group");
+    assert.ok(!lines.some((l) => l.includes("Files written:")), "no Files written: header");
+    assert.ok(!lines.some((l) => l.includes("Files read:")), "no Files read: header");
+  });
+
+  it("command + one edit redirect — shows Commands: and Files written: headers", () => {
+    const items = [
+      makeItem('sed -i "s/a/b/" /p/f', false),
+      makeItem("/p/f", true, undefined, "edit"),
+    ];
+    const c = new PermissionPromptComponent(
+      items, getDurationOptions(), "⚠️ bash approval required", [], undefined, theme, new FakeEditor(),
+      { denyAbort: "escape" },
+    );
+    const lines = c.render(WIDTH);
+    const cmdIdx = lines.findIndex((l) => l.includes("Commands:"));
+    const fwIdx = lines.findIndex((l) => l.includes("Files written:"));
+    assert.ok(cmdIdx >= 0, "Commands: header present");
+    assert.ok(fwIdx >= 0, "Files written: header present");
+    assert.ok(cmdIdx < fwIdx, "Commands: comes before Files written:");
+    // The command row and the file row each still render a checkbox.
+    assert.ok(lines.some((l) => l.includes('sed -i')), "command row present");
+    assert.ok(lines.some((l) => l.includes("/p/f")), "redirect path row present");
+  });
+
+  it("command + read + write redirects — shows all three sections", () => {
+    const items = [
+      makeItem("cat /etc/host", false),
+      makeItem("/in.txt", true, undefined, "read"),
+      makeItem("/out.txt", true, undefined, "edit"),
+    ];
+    const c = new PermissionPromptComponent(
+      items, getDurationOptions(), "⚠️ bash approval required", [], undefined, theme, new FakeEditor(),
+      { denyAbort: "escape" },
+    );
+    const lines = c.render(WIDTH);
+    assert.ok(lines.some((l) => l.includes("Commands:")), "Commands: present");
+    assert.ok(lines.some((l) => l.includes("Files read:")), "Files read: present");
+    assert.ok(lines.some((l) => l.includes("Files written:")), "Files written: present");
+  });
+
+  it("section headers do not desync navigation index", () => {
+    // 3 items across 2 groups: one command, two redirect targets.
+    // UP from duration lands on the LAST commands item (index 2). Navigate
+    // up to index 0, then back down across the group boundary to index 2,
+    // and Enter to edit — proving header/blank render lines don't consume
+    // a navigation step (selectedIndex stays aligned with items[]).
+    const items = [
+      makeItem("echo hi", false),
+      makeItem("/a", true, undefined, "edit"),
+      makeItem("/b", true, undefined, "edit"),
+    ];
+    const c = new PermissionPromptComponent(
+      items, getDurationOptions(), "⚠️ bash approval required", [], undefined, theme, new FakeEditor(),
+      { denyAbort: "escape" },
+    );
+    const spy = collect(c);
+    c.handleInput(UP);            // duration → commands (selectedIndex 2)
+    c.handleInput(UP);            // index 2 → 1 (cross group boundary)
+    c.handleInput(UP);            // index 1 → 0
+    c.handleInput(DOWN);          // index 0 → 1 (cross group boundary)
+    c.handleInput(DOWN);          // index 1 → 2
+    c.handleInput(ENTER);         // start inline-editing item 2
+    // Editing the 3rd item, not emitting a result — proves selectedIndex == 2
+    // was reached despite inter-group blank + header lines.
+    assert.equal(spy.results.length, 0, "Enter starts editing, no result emitted");
+    assert.equal(spy.cancels.n, 0);
+    const lines = c.render(WIDTH);
+    assert.ok(lines.some((l) => l.includes("Commands:")), "section header rendered");
+    assert.ok(lines.some((l) => l.includes("Files written:")), "second section rendered");
+  });
+});

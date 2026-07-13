@@ -91,6 +91,9 @@ interface CommandListItem {
   input?: Input;
   /** True when this item represents a file path (for display). */
   isFile: boolean;
+  /** For file-path items: whether this is a read or edit target
+   *  (used to pick a section header). Undefined for bash subcommands. */
+  filePermission?: "read" | "edit" | undefined;
 }
 
 interface DurationOption {
@@ -149,7 +152,12 @@ function keybindLabel(keyId: string): string {
   return keyId;
 }
 
-export function makeItem(text: string, isFile: boolean, display?: string): CommandListItem {
+export function makeItem(
+  text: string,
+  isFile: boolean,
+  display?: string,
+  filePermission?: "read" | "edit",
+): CommandListItem {
   const displayText = display ?? text;
   return {
     original: text,
@@ -158,6 +166,7 @@ export function makeItem(text: string, isFile: boolean, display?: string): Comma
     checked: true,
     editing: false,
     isFile,
+    filePermission,
   };
 }
 
@@ -227,9 +236,25 @@ export class PermissionPromptComponent implements Component, Focusable {
     }
     lines.push("");
 
-    // Command items
+    // Command items — group under muted section headers when more than
+    // one group (commands vs files-written vs files-read) is present.
+    // Single-group prompts render with no header (preserves current look).
+    const groupLabel = (it: CommandListItem): string | null => {
+      if (!it.isFile) return "Commands";
+      return it.filePermission === "read" ? "Files read" : "Files written";
+    };
+    const distinctGroups =
+      new Set(this.items.map(groupLabel).filter((g): g is string => g !== null)).size;
+    let prevGroup: string | null = null;
     for (let i = 0; i < this.items.length; i++) {
       const item = this.items[i]!;
+      const group = groupLabel(item);
+      if (distinctGroups > 1 && group !== null && group !== prevGroup) {
+        if (prevGroup !== null) lines.push("");
+        lines.push(this.theme.fg("muted", " " + group + ":"));
+        prevGroup = group;
+      }
+
       const isActive = this.focusZone === "commands" && i === this.selectedIndex;
 
       if (item.editing && item.input) {
@@ -601,7 +626,7 @@ export async function showPermissionPrompt(
   const items: CommandListItem[] = [];
 
   if (isFile) {
-    items.push(makeItem(opts.target, true));
+    items.push(makeItem(opts.target, true, undefined, opts.permission as "read" | "edit"));
   } else {
     const unapproved = opts.unapproved?.length ? opts.unapproved : [opts.target];
     const unapprovedDisplay = opts.unapprovedDisplay?.length ? opts.unapprovedDisplay : [];
@@ -615,7 +640,7 @@ export async function showPermissionPrompt(
   // Redirect targets
   if (opts.redirectTargets?.length) {
     for (const rt of opts.redirectTargets) {
-      items.push(makeItem(rt.path, true));
+      items.push(makeItem(rt.path, true, undefined, rt.permission));
     }
   }
 
