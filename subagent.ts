@@ -7,6 +7,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
+	ModelRuntime,
 	SessionManager,
 	SettingsManager,
 	type CreateAgentSessionResult,
@@ -215,9 +216,15 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	diagClear();
 	diagLog("runSubagent called", { taskType, cwd, model: opts.model ? `${(opts.model as any).provider}/${(opts.model as any).id}` : "(default)" });
 
-	const modelRegistry = parentCtx.modelRegistry;
-
 	const agentDir = process.env.PI_AGENT_DIR ?? `${process.env.HOME}/.pi/agent`;
+
+	// Build a ModelRuntime from the same agentDir that `createAgentSession` would use
+	// internally if we passed none. Constructing it explicitly lets us pass the async
+	// `modelRuntime` option (0.80.8 replaced the sync `modelRegistry` option).
+	const authPath = `${agentDir}/auth.json`;
+	const modelsPath = `${agentDir}/models.json`;
+	const modelRuntime = await ModelRuntime.create({ authPath, modelsPath });
+
 	const settingsManager = SettingsManager.create(cwd, agentDir);
 	settingsManager.setCompactionEnabled(false);
 
@@ -287,7 +294,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			model,
 			tools,
 			thinkingLevel: opts.thinkingLevel as any,
-			modelRegistry,
+			modelRuntime,
 			resourceLoader: loader,
 			sessionManager: SessionManager.inMemory(cwd),
 			settingsManager,

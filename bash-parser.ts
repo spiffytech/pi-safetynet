@@ -1,12 +1,13 @@
 import { parse } from "@aliou/sh";
 import type {
-  SimpleCommand,
-  CmdSubst,
-  ProcSubst,
-  WordPart,
-  Command,
-  TestClause as TestClauseType,
-  Word,
+	SimpleCommand,
+	CmdSubst,
+	ProcSubst,
+	WordPart,
+	Command,
+	TestClause as TestClauseType,
+	TestExpr,
+	Word,
 } from "@aliou/sh";
 
 /** Threshold (chars) beyond which a quoted string is considered "opaque"
@@ -137,6 +138,32 @@ function hasFindDangerousFlag(cmd: SimpleCommand): "exec" | "delete" | null {
 type SimpleCallback = (cmd: SimpleCommand) => boolean;
 type TestCallback = (expr: string, words: Word[]) => void;
 
+/** Flatten @aliou/sh 0.2's structured [[ ... ]] tree (UnaryTest / BinaryTest /
+ *  ParenTest / Word) into the flat Word list the rest of this module expects:
+ *  e.g. "file1 -ef file2" or "-f package.json". Operands are emitted in
+ *  source order so extractTestFilePaths() can pair them with their operators
+ *  the same way it did when the parser exposed `.expr: Word[]` directly. */
+function flattenTestExpr(node: TestExpr): Word[] {
+	if (node.type === "Word") return [node];
+	if (node.type === "UnaryTest") {
+		const x = flattenTestExpr(node.x);
+		// Bash unary form is `OP operand`; preserve that order.
+		return [{ type: "Word", parts: [{ type: "Literal", value: node.op }] }, ...x];
+	}
+	if (node.type === "BinaryTest") {
+		const x = flattenTestExpr(node.x);
+		const y = flattenTestExpr(node.y);
+		// "operand OP operand"
+		return [...x, { type: "Word", parts: [{ type: "Literal", value: node.op }] }, ...y];
+	}
+	if (node.type === "ParenTest") {
+		// `[[ ( inner ) ]]` — surface the inner expression; parens have no
+		// significance for file-path extraction.
+		return flattenTestExpr(node.x);
+	}
+	return [];
+}
+
 function walkCommands(cmd: Command, onSimple: SimpleCallback, onTest?: TestCallback): void {
   switch (cmd.type) {
     case "SimpleCommand": {
@@ -194,19 +221,21 @@ function walkCommands(cmd: Command, onSimple: SimpleCallback, onTest?: TestCallb
         }
       }
       break;
-    // @aliou/sh parses [[ ... ]] as TestClause instead of SimpleCommand.
-    // Reconstruct the expression string so it shows up as a subcommand
-    // (e.g. "[[ -f package.json ]]") and pass the raw words for
-    // file-path extraction.
+    // @aliou/sh 0.2 parses [[ ... ]] as a TestClause whose operands are a
+    // structured tree (UnaryTest / BinaryTest / ParenTest / Word) on `.x`,
+    // rather than the flat `.expr: Word[]` of 0.1. Flatten it back to the
+    // ordered Word list the rest of this module expects so it shows up as a
+    // subcommand (e.g. "[[ -f package.json ]]") and file paths are extracted.
     case "TestClause": {
       if (onTest) {
         const tc = cmd as TestClauseType;
+        const words = tc.x ? flattenTestExpr(tc.x) : [];
         const parts: string[] = [];
-        for (const w of tc.expr ?? []) {
+        for (const w of words) {
           const s = wordToString(w);
           if (s !== null) parts.push(s);
         }
-        if (parts.length) onTest(`[[ ${parts.join(" ")} ]]`, tc.expr ?? []);
+        if (parts.length) onTest(`[[ ${parts.join(" ")} ]]`, words);
       }
       break;
     }
