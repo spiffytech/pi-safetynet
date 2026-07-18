@@ -45,6 +45,7 @@ import {
 import {
   showPermissionPrompt,
   type PromptKeybindings,
+  type PermissionPromptResult,
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./check.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
@@ -162,6 +163,36 @@ export function headlessDeny(
   return { block: true, reason };
 }
 
+/** Map a permission-prompt result to a block decision.
+ *  - null (Esc / denyAbort): block + abort the turn.
+ *  - { kind: "deny", explanation }: block, non-aborting. Typed reason wins
+ *    over the default banner; empty explanation keeps the turn alive too.
+ *  - { kind: "approve" }: returns undefined (caller proceeds).
+ *  Pure function for testability, extracted to keep the deny branch's
+ *  short-circuit (command does NOT run) regression-testable.
+ */
+export function denyResultFromPrompt(
+  result: PermissionPromptResult | null,
+  permission: "bash" | "read" | "edit",
+): { block: true; reason: string; abort: boolean } | undefined {
+  // User pressed escape / aborted the turn
+  if (result === null) {
+    return { block: true, reason: `User denied ${permission}`, abort: true };
+  }
+  // Non-aborting deny (from the [Deny…] row). When the explanation is
+  // empty, fall back to the same reason the Esc path produces; otherwise
+  // surface the typed explanation.
+  if (result.kind === "deny") {
+    // prompts.ts trims on submit; trim here too as a defensive guard so a
+    // whitespace-only reason can never leak a blank-looking reason.
+    const explanation = result.explanation.trim();
+    const reason = explanation || `User denied ${permission}`;
+    return { block: true, reason, abort: false };
+  }
+  // Approval — caller proceeds with rule creation.
+  return undefined;
+}
+
 async function resolvePermission(
   ctx: ExtensionContext,
   opts: {
@@ -214,21 +245,21 @@ async function resolvePermission(
 
     const result = await showPermissionPrompt(ctx, promptOpts);
 
-    // User pressed escape / aborted the turn
-    if (result === null) {
-      ctx.abort();
+    // Deny outcomes (Esc abort or [Deny…] with/without reason) block the call.
+    // - null (Esc): abort the turn — model loses the turn.
+    // - { kind: "deny" }: non-aborting — model keeps its turn and sees the
+    //   reason as the tool's error result. The command does NOT run in either case.
+    const denied = denyResultFromPrompt(result, opts.permission);
+    if (denied) {
+      if (denied.abort) ctx.abort();
+      return { block: denied.block, reason: denied.reason };
+    }
+
+    if (result === null || result.kind === "deny") {
+      // Unreachable: denyResultFromPrompt above already handled these and
+      // returned. Belt-and-suspenders guard so the destructure below narrows.
       return { block: true, reason: `User denied ${opts.permission}` };
     }
-
-    // Non-aborting deny (from the [Deny…] row). When the explanation is
-    // empty, fall back to the same reason the Esc path produces; otherwise
-    // surface the typed explanation. Either way, do NOT call ctx.abort():
-    // the model keeps its turn and sees the reason as the tool's error result.
-    if (result.kind === "deny") {
-      const reason = result.explanation || `User denied ${opts.permission}`;
-      return { block: true, reason };
-    }
-
     const { approved, skipped, skippedDisplay, duration } = result;
 
     // "once" — approve checked items for this invocation only; no rules created
