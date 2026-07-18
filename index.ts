@@ -282,6 +282,17 @@ async function resolvePermission(
         reprompt = true;
         continue;
       }
+      // Entire tool call approved via interactive prompt (once, all items).
+      // Hidden from user; autoapprove returned earlier at the `action === "allow"` guard.
+      //
+      // We tell the model this happened in hopes it will prefer repeatable,
+      // identical commands over many small variations on a command, since each
+      // novel variation forces the user to keep approving interactively.
+      pi.sendMessage({
+        customType: "safetynet:manual-approval",
+        content: "The user manually approved this command by interactive prompt.",
+        display: false,
+      });
       return undefined;
     }
 
@@ -368,6 +379,15 @@ async function resolvePermission(
     // Recheck
     const recheckResult = opts.recheck();
     opts.check = recheckResult;
+    // Entire tool call approved via interactive prompt (rules created, recheck passes).
+    // Hidden from user; autoapprove returned earlier at the `action === "allow"` guard.
+    // See the "once" branch above for the rationale behind nudging the model
+    // toward repeatable commands over many small variations.
+    pi.sendMessage({
+      customType: "safetynet:manual-approval",
+      content: "The user manually approved this command by interactive prompt.",
+      display: false,
+    });
     if (recheckResult.action === "allow") return undefined;
     if (recheckResult.action === "deny") {
       ctx.ui.notify("Rule(s) added but still denied.", "warning");
