@@ -287,6 +287,17 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 		};
 	}
 
+	// Forward extension-registered providers (e.g. hyper) from the parent
+	// ModelRegistry so the subagent can resolve auth for non-built-in providers.
+	if (!modelRuntime.getProvider(model.provider)) {
+		const config = parentCtx.modelRegistry.getRegisteredProviderConfig(model.provider);
+		if (config) {
+			modelRuntime.registerProvider(model.provider, config);
+			diagLog("forwarded extension provider to subagent", { provider: model.provider });
+		}
+	}
+
+
 	let result: CreateAgentSessionResult;
 	try {
 		result = await createAgentSession({
