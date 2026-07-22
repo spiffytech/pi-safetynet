@@ -211,9 +211,8 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 }> {
 	const { taskType, prompt, parentCtx, parentStorage, initialRules, signal, onUpdate, cwd } = opts;
 
-	// Enable diagnostic logging — TEMPORARILY ALWAYS ON FOR DEBUGGING
-	diagEnabled = true;
-	diagClear();
+	// Enable diagnostic logging for debugging
+	diagEnabled = false;
 	diagLog("runSubagent called", { taskType, cwd, model: opts.model ? `${(opts.model as any).provider}/${(opts.model as any).id}` : "(default)" });
 
 	const agentDir = process.env.PI_AGENT_DIR ?? `${process.env.HOME}/.pi/agent`;
@@ -289,12 +288,28 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 
 	// Forward extension-registered providers (e.g. hyper) from the parent
 	// ModelRegistry so the subagent can resolve auth for non-built-in providers.
-	if (!modelRuntime.getProvider(model.provider)) {
-		const config = parentCtx.modelRegistry.getRegisteredProviderConfig(model.provider);
-		if (config) {
-			modelRuntime.registerProvider(model.provider, config);
-			diagLog("forwarded extension provider to subagent", { provider: model.provider });
-		}
+	const providerId = model.provider;
+	const config = parentCtx.modelRegistry.getRegisteredProviderConfig(providerId);
+	const native = (parentCtx.modelRegistry as any).getRegisteredNativeProvider?.(providerId);
+	if (config) {
+		modelRuntime.registerProvider(providerId, config);
+	} else if (native) {
+		// The parent registered this as a native provider (full Provider object).
+		// Extract its properties and re-register as config in the subagent.
+		const nativeConfig = {
+			name: native.name,
+			baseUrl: (native as any).baseUrl,
+			api: (native as any).api,
+			models: (native as any).getModels?.() ?? [],
+			oauth: (native as any).auth?.oauth ? {
+				name: (native as any).auth.oauth.name,
+				login: (native as any).auth.oauth.login,
+				refreshToken: (native as any).auth.oauth.refresh,
+				getApiKey: (cred: any) => cred.access,
+					// Note: must be sync — adaptOAuth doesn't await getApiKey
+			} : undefined,
+		};
+		modelRuntime.registerProvider(providerId, nativeConfig);
 	}
 
 
@@ -374,13 +389,29 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 		}
 		if (event.type === "message_end") {
 			const msg = event.message;
-			if (msg.role === "assistant" && msg.usage) {
-				cumulativeUsage.input += msg.usage.input || 0;
-				cumulativeUsage.output += msg.usage.output || 0;
-				cumulativeUsage.cacheRead += msg.usage.cacheRead || 0;
-				cumulativeUsage.cacheWrite += msg.usage.cacheWrite || 0;
-				cumulativeUsage.cost += msg.usage.cost?.total || 0;
-				emitUpdate();
+			if (msg.role === "assistant") {
+				// Capture error message from failed model calls
+				if ((msg as any).stopReason === "error" && (msg as any).errorMessage && !fullText.trim()) {
+					fullText = `Error: ${(msg as any).errorMessage}`;
+					emitUpdate();
+				}
+				// Capture text from the final message (thinking models may not emit text_delta)
+				if (!fullText.trim()) {
+					for (const part of msg.content) {
+						if (part.type === "text" && part.text) {
+							fullText = part.text;
+							emitUpdate();
+						}
+					}
+				}
+				if (msg.usage) {
+					cumulativeUsage.input += msg.usage.input || 0;
+					cumulativeUsage.output += msg.usage.output || 0;
+					cumulativeUsage.cacheRead += msg.usage.cacheRead || 0;
+					cumulativeUsage.cacheWrite += msg.usage.cacheWrite || 0;
+					cumulativeUsage.cost += msg.usage.cost?.total || 0;
+					emitUpdate();
+				}
 			}
 		}
 		if (event.type === "turn_end") {
