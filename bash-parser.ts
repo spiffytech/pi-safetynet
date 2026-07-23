@@ -716,6 +716,8 @@ function dedupParallel(acc: SubcommandAccum): void {
   acc.display = display;
   acc.words = words;
 }
+
+
 export function parseCommand(command: string): ParsedCommand {
   try {
     // @aliou/sh misparses \( and \) as subshell boundaries, but in bash these

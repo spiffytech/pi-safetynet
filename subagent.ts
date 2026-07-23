@@ -296,18 +296,21 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	} else if (native) {
 		// The parent registered this as a native provider (full Provider object).
 		// Extract its properties and re-register as config in the subagent.
+		// oauth is spread conditionally so the property is absent (not `undefined`)
+		// when there is no OAuth config — required by exactOptionalPropertyTypes.
+		const oauthConfig = (native as any).auth?.oauth ? {
+			name: (native as any).auth.oauth.name,
+			login: (native as any).auth.oauth.login,
+			refreshToken: (native as any).auth.oauth.refresh,
+			getApiKey: (cred: any) => cred.access,
+				// Note: must be sync — adaptOAuth doesn't await getApiKey
+		} : undefined;
 		const nativeConfig = {
 			name: native.name,
 			baseUrl: (native as any).baseUrl,
 			api: (native as any).api,
 			models: (native as any).getModels?.() ?? [],
-			oauth: (native as any).auth?.oauth ? {
-				name: (native as any).auth.oauth.name,
-				login: (native as any).auth.oauth.login,
-				refreshToken: (native as any).auth.oauth.refresh,
-				getApiKey: (cred: any) => cred.access,
-					// Note: must be sync — adaptOAuth doesn't await getApiKey
-			} : undefined,
+			...(oauthConfig ? { oauth: oauthConfig } : {}),
 		};
 		modelRuntime.registerProvider(providerId, nativeConfig);
 	}

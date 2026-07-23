@@ -161,7 +161,8 @@ export function checkBashPermission(
     // Command substitutions in values are extracted as separate subcommands.
     if (isBareAssignment(sub)) continue;
 
-    const result = evaluatePermission("bash", sub, profile, rules);
+    const displaySub = parsed.displaySubcommands[i] ?? sub;
+    const result = evaluatePermission("bash", sub, profile, rules, displaySub);
     if (result.action === "deny") {
       worstAction = "deny";
       if (!unapproved.includes(sub)) {

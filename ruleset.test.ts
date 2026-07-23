@@ -88,6 +88,16 @@ describe("matchesPattern", () => {
       assert.equal(matchesPattern("bash", "*", "hostname"), true);
       assert.equal(matchesPattern("bash", "*", "anything"), true);
     });
+
+    it("does not match a quoted rule pattern against an unquoted canonical target (single-form matchesPattern)", () => {
+      // `matchesPattern` is single-form: a quoted pattern does NOT match the
+      // de-quoted canonical target directly.  The dual-form matching that makes
+      // this work lives in `evaluatePermission` (tested below) — not here.
+      assert.equal(
+        matchesPattern("bash", 'curl -s "https://trmnl.com/*"', "curl -s https://trmnl.com/framework/overflow"),
+        false,
+      );
+    });
   });
 
   describe("file patterns (edit/read)", () => {
@@ -201,6 +211,60 @@ describe("evaluatePermission", () => {
       assert.equal(evaluatePermission("edit", "src/main.ts", "plan", BASELINE).action, "ask");
       assert.equal(evaluatePermission("read", "src/main.ts", "build", BASELINE).action, "allow");
       assert.equal(evaluatePermission("read", "src/main.ts", "plan", BASELINE).action, "allow");
+    });
+  });
+
+  describe("dual-form target matching (canonical + display)", () => {
+    // The bash parser emits two parallel forms per subcommand: canonical
+    // (de-quoted) and display (quote-preserving). evaluatePermission matches
+    // a rule against EITHER form so a user-approved quoted rule pattern still
+    // matches, while an unedited canonical rule still matches the canonical
+    // target (including the parser's opaque-string placeholder `"..."`).
+
+    it("a quoted rule matches via the display target (edited-approval fix)", () => {
+      // Regression for the trmnl bug: approving `curl -s "https://trmnl.com/*"`
+      // (with quotes) must match the de-quoted canonical target.
+      const rules: Ruleset = [
+        { permission: "bash", pattern: 'curl -s "https://trmnl.com/*"', action: "allow", modes: ALL_MODES },
+      ];
+      const canonical = "curl -s https://trmnl.com/framework/overflow";
+      const display = 'curl -s "https://trmnl.com/framework/overflow"';
+      // canonical-only (old behavior) would NOT match; dual-form does, via display.
+      assert.equal(evaluatePermission("bash", canonical, "build", rules, display).action, "allow");
+    });
+
+    it("a canonical rule still matches the canonical target (no regression for unedited approvals)", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: "curl -s https://trmnl.com/*", action: "allow", modes: ALL_MODES },
+      ];
+      const canonical = "curl -s https://trmnl.com/framework/overflow";
+      const display = 'curl -s "https://trmnl.com/framework/overflow"';
+      assert.equal(evaluatePermission("bash", canonical, "build", rules, display).action, "allow");
+    });
+
+    it("an opaque-arg rule matches the canonical target (no regression for long/multiline args)", () => {
+      // Regression for the python -c "<multiline>" case: the parser collapses
+      // the long quoted arg to placeholder `"..."` on BOTH canonical and display
+      // sides. A rule storing the unedited canonical form `python3 -c "..."`
+      // must still match the canonical target `python3 -c "..."`.
+      const rules: Ruleset = [
+        { permission: "bash", pattern: 'python3 -c "..."', action: "allow", modes: ALL_MODES },
+      ];
+      const canonical = 'python3 -c "..."';
+      const display = 'python3 -c "..."';
+      assert.equal(evaluatePermission("bash", canonical, "build", rules, display).action, "allow");
+    });
+
+    it("deny still overrides allow regardless of which form matched", () => {
+      const rules: Ruleset = [
+        { permission: "bash", pattern: 'curl -s "https://trmnl.com/*"', action: "allow", modes: ALL_MODES },
+        { permission: "bash", pattern: 'curl -s "https://trmnl.com/*"', action: "deny", modes: ALL_MODES, reason: "Blocked" },
+      ];
+      const canonical = "curl -s https://trmnl.com/x";
+      const display = 'curl -s "https://trmnl.com/x"';
+      const result = evaluatePermission("bash", canonical, "build", rules, display);
+      assert.equal(result.action, "deny");
+      assert.equal(result.matchedRule?.reason, "Blocked");
     });
   });
 

@@ -37,15 +37,28 @@ export interface EvaluateResult {
   matchedRule?: Rule;
 }
 
+/** Evaluate a rule against one or two target representations.
+ *
+ *  The bash parser emits two parallel forms per subcommand: a canonical
+ *  (de-quoted) form and a display (quote-preserving) form.  A rule the
+ *  user approved may carry quotes (e.g. `curl -s "https://x/*"`), so it must
+ *  be matchable against the display form; an unedited/short-arg rule may be
+ *  canonical, so it must still match the canonical form.  Passing both forms
+ *  here lets either match, without re-parsing (which would break the parser's
+ *  own opaque-string placeholders).  `displayTarget` is optional for callers
+ *  that only have a single form (e.g. `tool:<name>` targets, file paths). */
 export function evaluatePermission(
   permission: PermissionName,
   target: string,
   profile: ProfileName,
   rules: Ruleset,
+  displayTarget?: string,
 ): EvaluateResult {
   const matching = rules.filter((r) => {
     if (r.permission !== permission && r.permission !== "*") return false;
-    return matchesPattern(r.permission, r.pattern, target);
+    if (matchesPattern(r.permission, r.pattern, target)) return true;
+    if (displayTarget !== undefined && displayTarget !== target && matchesPattern(r.permission, r.pattern, displayTarget)) return true;
+    return false;
   });
 
   for (let i = matching.length - 1; i >= 0; i--) {
