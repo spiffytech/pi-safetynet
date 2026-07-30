@@ -60,6 +60,21 @@ pi-safetynet provides a two-tier security model so you can keep the agent read-o
 
 **Plan-on-error** — When enabled (default), pi-safetynet injects a hint into bash error results suggesting the agent switch to plan mode, helpful when the agent gets stuck after a mistake.
 
+**Auto-approve** — `/safetynet:auto` toggles automatic permission approval. When enabled, every action the ruleset flags as Ask is routed to a configurable permissions model (a read-only subagent with read/grep/find/ls) that judges the action against a risk policy instead of prompting the user. It runs alongside whatever profile (plan or build) you're in — status shows `+auto`.
+
+The reviewer returns a JSON assessment `{risk_level, user_authorization, outcome, rationale}`:
+
+- **Allow** — creates a turn-scoped temp rule so repeats in the same turn skip re-review. The model sees a hidden nudge.
+- **Deny** — blocks with the rationale, keeps the turn alive so the model can try a safer alternative. After 3 consecutive denials the turn is aborted.
+- **Infrastructure failure** (timeout, API error, unparseable) — falls back to the interactive permission prompt with a notice, while retrying the reviewer every 30s. If a retry succeeds the prompt is dismissed automatically.
+
+Configure which model handles review and timeouts in global config:
+
+```json
+{ "autoApprove": { "model": "provider/model-id", "timeoutMs": 90000, "maxDenials": 3, "retryIntervalMs": 30000, "maxRetries": 2 } }
+```
+
+
 ### Catastrophic command blocking
 
 System-destroying commands are **always denied**, regardless of profile or ruleset:
@@ -198,6 +213,7 @@ To make `Escape` a no-op in the prompt, simply bind `denyAbort` to something els
 | `safetynet:build` | Switch to build mode |
 | `safetynet:rules` | Show current permission rules |
 | `safetynet:plan-on-error` | Toggle plan-on-error mode |
+| `safetynet:auto` | Toggle auto-approve mode (route Asks through permissions model) |
 
 ## How it compares
 

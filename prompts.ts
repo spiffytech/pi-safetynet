@@ -69,6 +69,8 @@ export interface PermissionPromptOptions {
   reprompt?: boolean;
   /** Configurable prompt keybindings (deny/deny-abort). Required. */
   keybindings: PromptKeybindings;
+  /** Optional signal to dismiss the prompt externally (auto-review escalation). */
+  abortSignal?: AbortSignal;
 }
 
 // ─── Internal types ────────────────────────────────────────────────────────
@@ -680,9 +682,13 @@ export async function showPermissionPrompt(
         denyEditor,
         opts.keybindings,
       );
-
       inner.onConfirm = (result) => done(result);
       inner.onCancel = () => done(null);
+
+      // Wire external abort signal (auto-review escalation)
+      if (opts.abortSignal) {
+        opts.abortSignal.addEventListener("abort", () => done(null), { once: true });
+      }
 
       const wrapper = new BorderedPermissionPrompt(inner, theme);
 

@@ -38,6 +38,15 @@ function diagClear(): void {
 }
 
 /** Diagnostic extension that logs provider payloads and context mutations. */
+
+/** Extension factory that overrides the system prompt via before_agent_start return. */
+function createSystemPromptExtension(systemPrompt: string): (pi: ExtensionAPI) => void {
+	return (pi: ExtensionAPI) => {
+		pi.on("before_agent_start", async (_event) => {
+			return { systemPrompt };
+		});
+	};
+}
 function createDiagnosticExtension(): (pi: ExtensionAPI) => void {
 	return (pi: ExtensionAPI) => {
 		pi.on("session_start", async (event, _ctx) => {
@@ -182,6 +191,10 @@ export interface SubagentOptions {
 	promptKeybindings: PromptKeybindings;
 	/** Inherited from parent: auto-deny behaviour for rule-denies. */
 	autoDenyConfig: AutoDenyConfig;
+	/** Custom system prompt to replace the default (applied via before_agent_start return). */
+	systemPrompt?: string;
+	/** Override the default 300s timeout. */
+	timeoutMs?: number;
 }
 
 /** Max agent turns before we abort the subagent. */
@@ -242,26 +255,26 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 		hitPermissionDenied = true;
 		sessionRef?.abort();
 	};
-
 	const loaderOpts: ConstructorParameters<typeof DefaultResourceLoader>[0] = {
 		cwd,
 		agentDir,
 		settingsManager,
 		noExtensions: true,
 		extensionFactories: [
-	createSubagentSafetynetExtension({
-		taskType,
-		parentCtx,
-		parentStorage,
-		initialRules,
-		cwd,
-		onPermissionDenied,
-		trustExternalPaths: opts.trustExternalPaths ?? false,
-		promptKeybindings: opts.promptKeybindings,
-		autoDenyConfig: opts.autoDenyConfig,
-	}),
+		createSubagentSafetynetExtension({
+			taskType,
+			parentCtx,
+			parentStorage,
+			initialRules,
+			cwd,
+			onPermissionDenied,
+			trustExternalPaths: opts.trustExternalPaths ?? false,
+			promptKeybindings: opts.promptKeybindings,
+			autoDenyConfig: opts.autoDenyConfig,
+		}),
+		opts.systemPrompt ? createSystemPromptExtension(opts.systemPrompt) : null,
 			createDiagnosticExtension(),
-		],
+		].filter(Boolean) as any[],
 	};
 
 	const loader = new DefaultResourceLoader(loaderOpts);
@@ -433,10 +446,11 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	};
 	signal?.addEventListener("abort", onAbort, { once: true });
 
+	const effectiveTimeout = opts.timeoutMs ?? TIMEOUT_MS;
 	const timeoutId = setTimeout(() => {
 		hitTimeout = true;
 		session.abort();
-	}, TIMEOUT_MS);
+	}, effectiveTimeout);
 
 	try {
 		await session.prompt(prompt);

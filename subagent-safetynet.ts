@@ -14,10 +14,11 @@ import type { Rule, Ruleset, TempRule, ProfileName, AutoDenyConfig } from "./typ
 import type { PermissionPromptOptions, PromptKeybindings } from "./prompts.ts";
 import { showPermissionPrompt } from "./prompts.ts";
 import {
-	PermissionStorage,
+  PermissionStorage,
 } from "./permissions/index.ts";
 import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./check.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
+import { resolvePermission as resolvePermissionShared, makeTempRule } from "./pipeline.ts";
 
 export interface SubagentSafetynetOpts {
 	taskType: "explore" | "build";
@@ -80,24 +81,6 @@ function createExploreSafetynet(_opts: SubagentSafetynetOpts): (pi: ExtensionAPI
 }
 
 // ─── Build mode ────────────────────────────────────────────────────────────
-
-function makeTempRules(
-	opts: {
-		permission: "bash" | "read" | "edit";
-		patterns: string[];
-	},
-): TempRule[] {
-	const modes: ProfileName[] = ["build"];
-	return opts.patterns.map((p) => ({
-		rule: {
-			permission: opts.permission as Rule["permission"],
-			pattern: p,
-			action: "allow" as const,
-			modes,
-		},
-		expiry: { type: "turn" as const },
-	}));
-}
 
 function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) => void {
 	if (!opts.parentCtx || !opts.parentStorage) {
@@ -214,188 +197,26 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 				recheck: () => PermissionCheck;
 			},
 		): Promise<{ block: boolean; reason: string } | undefined> {
-			const { action } = opts.check;
-
-			if (action === "allow") return undefined;
-
-			if (action === "deny") {
-				// Per-rule reason wins over configured auto-deny reason.
-				const label = opts.permission[0]!.toUpperCase() + opts.permission.slice(1);
-				const reason = opts.check.reason
-					?? autoDenyConfig.reason
-					?? `${label} denied: no matching allow rule`;
-				// `continue: true` keeps the subagent's turn (non-aborting).
-				if (!autoDenyConfig.continue) {
-					ctx.abort();
-					onPermissionDenied?.();
-				}
-				return { block: true, reason };
-			}
-
-			// action === "ask" — delegate to parent's permission prompt
-			const isFile = opts.permission === "read" || opts.permission === "edit";
-
-			let reprompt = false;
-			while (true) {
-				const promptOpts: PermissionPromptOptions = {
-					permission: opts.permission,
-					target: opts.target,
-					reprompt,
+			return resolvePermissionShared(
+				{
+					displayCtx: parentCtx,
+					storage: subagentStorage,
+					dualWrite: [parentStorage],
+					cwd,
+					allowModes: ["build"],
+					...(onPermissionDenied ? { onDenied: onPermissionDenied } : {}),
 					keybindings: promptKeybindings,
-				};
-				if (opts.check.unapproved && opts.check.unapproved.length > 0) promptOpts.unapproved = opts.check.unapproved;
-				if (opts.check.unapprovedDisplay && opts.check.unapprovedDisplay.length > 0) promptOpts.unapprovedDisplay = opts.check.unapprovedDisplay;
-				if (opts.check.redirectTargets?.length) promptOpts.redirectTargets = opts.check.redirectTargets;
-				if (opts.check.reason) promptOpts.reason = opts.check.reason;
-
-				const result = await showPermissionPrompt(parentCtx, promptOpts);
-
-				if (result === null) {
-					ctx.abort();
-					onPermissionDenied?.();
-					return { block: true, reason: `User denied ${opts.permission}` };
-				}
-
-				// Non-aborting deny (from the [Deny…] row). Empty explanation falls back
-				// to the same reason the Esc path produces; the typed explanation is
-				// surfaced otherwise. The subagent's turn ends via block:true (no
-				// ctx.abort()); the parent agent (us) sees the propagated reason.
-				if (result.kind === "deny") {
-					onPermissionDenied?.();
-					const reason = result.explanation || `User denied ${opts.permission}`;
-					return { block: true, reason };
-				}
-
-				const { approved, skipped, skippedDisplay, duration } = result;
-
-				if (duration === "once") {
-					if (skipped.length > 0) {
-						const remainingRedirects = opts.check.redirectTargets?.filter(
-							(rt) => skipped.includes(rt.path),
-						);
-						const newCheck: PermissionCheck = {
-							...opts.check,
-							unapproved: skipped,
-							unapprovedDisplay: skippedDisplay,
-							action: "ask",
-						};
-						if (remainingRedirects && remainingRedirects.length > 0) {
-							newCheck.redirectTargets = remainingRedirects;
-						}
-						opts.check = newCheck;
-						reprompt = true;
-						continue;
-					}
-						// Entire tool call approved via interactive prompt (once, all items).
-						// Hidden from user; autoapprove returned earlier at the `action === "allow"` guard.
-						//
-						// We tell the model this happened in hopes it will prefer repeatable,
-						// identical commands over many small variations on a command, since each
-						// novel variation forces the user to keep approving interactively.
+					autoDeny: autoDenyConfig,
+					sendManualApproval: () => {
 						pi.sendMessage({
 							customType: "safetynet:manual-approval",
 							content: "The user manually approved this command by interactive prompt.",
 							display: false,
 						});
-						return undefined;
-				}
-
-				// Redirect targets are file paths shown alongside bash subcommands
-				// in the permission prompt.  They should produce read/edit rules
-				// (not bash rules), and must use the user-edited text (not the
-				// original raw path).  Build a set of redirect originals so the
-				// main loop can skip them, then handle them separately below.
-				const redirectOriginals = new Set(opts.check.redirectTargets?.map((rt) => rt.path) ?? []);
-
-				const patterns: string[] = [];
-				for (const [original, edited] of approved) {
-					if (redirectOriginals.has(original)) continue; // handled below
-					if (isFile) {
-						patterns.push(toRecursiveGlob(normalizePathForMatching(edited, cwd)));
-					} else {
-						patterns.push(edited);
-					}
-				}
-
-				// Handle redirect target patterns (using user-edited text)
-				const redirectPatterns: Array<{ permission: "read" | "edit"; pattern: string }> = [];
-				if (opts.check.redirectTargets?.length) {
-					for (const rt of opts.check.redirectTargets) {
-						if (approved.has(rt.path)) {
-							const editedPath = approved.get(rt.path)!;
-							redirectPatterns.push({
-								permission: rt.permission,
-								pattern: toRecursiveGlob(normalizePathForMatching(editedPath, cwd)),
-							});
-						}
-					}
-				}
-
-				if (duration === "session" || duration === "project" || duration === "global") {
-					const modes: ProfileName[] = ["build"];
-					const newRules: Ruleset = patterns.map((p) => ({
-						permission: opts.permission as Rule["permission"],
-						pattern: p,
-						action: "allow" as const,
-						modes,
-					}));
-
-					for (const rp of redirectPatterns) {
-						newRules.push({
-							permission: rp.permission,
-							pattern: rp.pattern,
-							action: "allow" as const,
-							modes,
-						});
-					}
-
-					// Write to BOTH storages (immediate rule propagation)
-					if (duration === "project") {
-						await subagentStorage.addPersistedRules(newRules);
-						await parentStorage.addPersistedRules(newRules);
-					} else if (duration === "global") {
-						await subagentStorage.addGlobalRules(newRules);
-						await parentStorage.addGlobalRules(newRules);
-					} else {
-						subagentStorage.addSessionRules(newRules);
-						parentStorage.addSessionRules(newRules);
-					}
-				} else {
-					const tempRules = makeTempRules({
-						permission: opts.permission,
-						patterns,
-					});
-
-					for (const rp of redirectPatterns) {
-						tempRules.push(...makeTempRules({
-							permission: rp.permission,
-							patterns: [rp.pattern],
-						}));
-					}
-
-					subagentStorage.addTempRules(tempRules);
-					parentStorage.addTempRules(tempRules);
-				}
-
-				const recheckResult = opts.recheck();
-				opts.check = recheckResult;
-				// Entire tool call approved via interactive prompt (rules created, recheck passes).
-				// Hidden from user; autoapprove returned earlier at the `action === "allow"` guard.
-				// See the "once" branch above for the rationale behind nudging the model
-				// toward repeatable commands over many small variations.
-				pi.sendMessage({
-					customType: "safetynet:manual-approval",
-					content: "The user manually approved this command by interactive prompt.",
-					display: false,
-				});
-				if (recheckResult.action === "allow") return undefined;
-				if (recheckResult.action === "deny") {
-					ctx.ui.notify("Rule(s) added but still denied.", "warning");
-					return { block: true, reason: "Still denied after rule update" };
-				}
-
-				reprompt = true;
-			}
+					},
+				},
+				opts,
+			);
 		}
 	};
 }

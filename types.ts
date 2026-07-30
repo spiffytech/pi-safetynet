@@ -44,3 +44,25 @@ export interface AutoDenyConfig {
    *  precedence when present (more specific). */
   reason?: string;
 }
+
+/** JSON contract returned by the permission reviewer subagent. */
+export interface ReviewerAssessment {
+  risk_level: "low" | "medium" | "high" | "critical";
+  user_authorization: "unknown" | "low" | "medium" | "high";
+  outcome: "allow" | "deny";
+  rationale: string;
+}
+
+/** Classified result of a review attempt. */
+export type ReviewVerdict =
+  | { kind: "assessment"; assessment: ReviewerAssessment }
+  | { kind: "transient"; message: string }
+  | { kind: "fatal"; message: string };
+
+export interface AutoApproveConfig {
+  model?: string;
+  timeoutMs?: number;
+  maxDenials?: number;
+  retryIntervalMs?: number;
+  maxRetries?: number;
+}
