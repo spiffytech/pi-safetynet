@@ -49,6 +49,12 @@ export interface PipelineDeps {
   sendManualApproval: () => void;
   /** Send the hidden "auto-approval" nudge (auto-reviewer allowed the action). */
   sendAutoApproval?: (risk: string, auth: string) => void;
+  /** Deliver auto/ruleset denials to the session model. "hidden" = display:false
+   *  nudge that survives aborts; "visible" = display:true transcript entry for
+   *  abort paths where the block reason is swallowed by the harness. */
+  sendDenial?: (text: string, mode: "hidden" | "visible") => void;
+  /** Reviewer subagent spawner. Defaults to runSubagent; injectable for tests. */
+  reviewSpawn?: (opts: any) => Promise<any>;
   /** Optional abort signal to pass into the prompt loop (auto escalation). */
   promptAbortSignal?: AbortSignal;
   /** Optional reason text to show in the prompt header (auto escalation). */
@@ -84,6 +90,24 @@ export function denyResultFromPrompt(
     return { block: true, reason, abort: false };
   }
   return undefined;
+}
+
+/** Source of a denial, used to label the surfaced line. */
+export type DenialSource = "reviewer" | "ruleset" | "headless";
+
+/** Build a self-contained, human-readable denial line: what was denied and why.
+ *  risk_level / user_authorization stay internal to the reviewer decision —
+ *  the model and user only see the target and the reason. */
+export function denialDetail(
+  permission: "bash" | "read" | "edit",
+  target: string,
+  reason: string,
+  source: DenialSource = "reviewer",
+): string {
+  const label =
+    source === "reviewer" ? "Auto-denied" :
+    source === "ruleset" ? "Ruleset denied" : "Denied";
+  return `${label} ${permission}: ${target} — ${reason}`;
 }
 
 /** Build a turn-expiry temp rule from checked arguments. */
@@ -145,11 +169,14 @@ export async function resolvePermission(
     const reason = opts.check.reason
       ?? deps.autoDeny.reason
       ?? `${label} denied: no matching allow rule`;
+    const detail = denialDetail(opts.permission, opts.target, reason, "ruleset");
+    deps.sendDenial?.(detail, "hidden");
     if (!deps.autoDeny.continue) {
+      deps.sendDenial?.(detail, "visible");
       deps.displayCtx.abort();
       deps.onDenied?.();
     }
-    return { block: true, reason };
+    return { block: true, reason: detail };
   }
 
   // ── Auto-review block (runs BEFORE headless check per T13) ───────────────
@@ -178,7 +205,7 @@ export async function resolvePermission(
             signal: ctl.signal,
             timeoutMs,
           },
-          { spawn: (await import("./subagent.ts")).runSubagent },
+          { spawn: deps.reviewSpawn ?? (await import("./subagent.ts").then((m) => m.runSubagent)) },
         ),
         new Promise<any>((_, reject) =>
           setTimeout(() => { ctl.abort(); reject(new Error("reviewer timeout")); }, timeoutMs)
@@ -211,13 +238,16 @@ export async function resolvePermission(
 
       if (v.kind === "assessment" && v.assessment.outcome === "deny") {
         // Deny
-        deps.displayCtx.ui.notify(` Reviewer denied (risk: ${v.assessment.risk_level}, auth: ${v.assessment.user_authorization}): ${v.assessment.rationale}`, "warning");
+        deps.displayCtx.ui.notify(` Reviewer denied: ${v.assessment.rationale}`, "warning");
         const denies = reviewIncrementDenies();
+        const detail = denialDetail(opts.permission, opts.target, v.assessment.rationale);
+        deps.sendDenial?.(detail, "hidden");
         if (denies >= maxDenials) {
+          deps.sendDenial?.(detail, "visible");
           deps.displayCtx.abort();
           deps.onDenied?.();
         }
-        return { block: true, reason: `Reviewer denied: ${v.assessment.rationale}` };
+        return { block: true, reason: detail };
       }
 
       // Fatal — config broken, disable auto
@@ -237,7 +267,7 @@ export async function resolvePermission(
           retriesDone++;
           const verdict = await runPermissionReview(
             { permission: opts.permission, target: opts.target, check: opts.check, cwd: deps.cwd, parentCtx: deps.displayCtx, profile: deps.allowModes.includes("plan") ? "plan" : "build", timeoutMs },
-            { spawn: (await import("./subagent.ts")).runSubagent },
+            { spawn: deps.reviewSpawn ?? (await import("./subagent.ts").then((m) => m.runSubagent)) },
           ).catch(() => ({ kind: "transient" as const, message: "retry failed" }));
           if (verdict.kind === "assessment") {
             clearPendingAutoResult();
@@ -259,6 +289,7 @@ export async function resolvePermission(
   const denied = headlessDeny(deps.displayCtx.hasUI, action, opts.permission, deps.autoDeny.reason);
   if (denied) {
     if (!deps.displayCtx.hasUI) console.error(`safetynet: ${denied.reason}`);
+    deps.sendDenial?.(denialDetail(opts.permission, opts.target, denied.reason, "headless"), "hidden");
     if (!deps.autoDeny.continue) deps.displayCtx.abort();
     return denied;
   }
@@ -317,10 +348,15 @@ export async function resolvePermission(
           return { block: true, reason: "Auto-approval rules did not satisfy recheck" };
         } else {
           const cfg = loadAutoApproveConfig();
-          deps.displayCtx.ui.notify(` Reviewer denied (risk: ${pending.assessment.risk_level}, auth: ${pending.assessment.user_authorization}): ${pending.assessment.rationale}`, "warning");
+          deps.displayCtx.ui.notify(` Reviewer denied: ${pending.assessment.rationale}`, "warning");
           const denies = reviewIncrementDenies();
-          if (denies >= (cfg.maxDenials ?? 3)) { deps.displayCtx.abort(); deps.onDenied?.(); }
-          return { block: true, reason: `Reviewer denied: ${pending.assessment.rationale}` };
+          const detail = denialDetail(opts.permission, opts.target, pending.assessment.rationale);
+          deps.sendDenial?.(detail, "hidden");
+          if (denies >= (cfg.maxDenials ?? 3)) {
+            deps.sendDenial?.(detail, "visible");
+            deps.displayCtx.abort(); deps.onDenied?.();
+          }
+          return { block: true, reason: detail };
         }
       }
       return { block: true, reason: `User denied ${opts.permission}` };

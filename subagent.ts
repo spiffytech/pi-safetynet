@@ -481,7 +481,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	let suffix = "";
 	if (hitPermissionDenied) suffix += "\n[Subagent stopped: permission denied]";
 	if (hitTurnLimit) suffix += `\n[Subagent hit turn limit (${MAX_TURNS})]`;
-	if (hitTimeout) suffix += `\n[Subagent hit timeout (${TIMEOUT_MS / 1000}s)]`;
+	if (hitTimeout) suffix += `\n[Subagent hit timeout (${effectiveTimeout / 1000}s)]`;
 
 	return {
 		content: [{ type: "text", text: fullText + suffix }],

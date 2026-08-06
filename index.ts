@@ -85,12 +85,24 @@ async function resolvePermission(
           display: false,
         });
       },
+      sendDenial,
       appendSessionRules: (rules, cwd) => {
         pi.appendEntry("safetynet:session-rules", { rules, cwd });
       },
     },
     opts,
   );
+}
+
+/** Deliver an auto/ruleset denial to the session model: a display:false nudge
+ *  that survives aborts, plus (when visible) a display:true transcript entry
+ *  for abort paths where the harness swallows the block reason. */
+function sendDenial(text: string, mode: "hidden" | "visible"): void {
+  pi.sendMessage({
+    customType: "safetynet:denial",
+    content: text,
+    display: mode === "visible",
+  });
 }
 let storage: PermissionStorage;
 
@@ -199,6 +211,7 @@ async function handleToolCall(
           ?? autoDenyConfig.reason
           ?? `Denied by ruleset: ${(check.unapproved ?? []).join(", ")}`;
         ctx.ui.notify(`Command denied: ${command} (${detail})`, "error");
+        sendDenial(detail, autoDenyConfig.continue ? "hidden" : "visible");
         if (!autoDenyConfig.continue) ctx.abort();
         return { block: true, reason: `Command denied: ${detail}` };
       }

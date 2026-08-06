@@ -91,6 +91,15 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 	const { initialRules, cwd, onPermissionDenied, trustExternalPaths = false, promptKeybindings = { denyAbort: "escape" }, autoDenyConfig = { continue: false } } = opts;
 
 	return (pi: ExtensionAPI) => {
+		/** Deliver a denial to the subagent's model: display:false nudge plus,
+		 *  when visible, a display:true transcript entry for abort paths. */
+		function sendDenial(text: string, mode: "hidden" | "visible"): void {
+			pi.sendMessage({
+				customType: "safetynet:denial",
+				content: text,
+				display: mode === "visible",
+			});
+		}
 		let subagentStorage: PermissionStorage;
 
 		pi.on("session_start", async (_event, ctx) => {
@@ -113,9 +122,10 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					const check = checkBashPermission(command, profile, rules, cwd, trustExternalPaths);
 
 					if (check.action === "deny") {
-						ctx.abort();
 						const detail = check.reason ?? `Denied by ruleset: ${(check.unapproved ?? []).join(", ")}`;
 						ctx.ui.notify(`Command denied: ${command} (${detail})`, "error");
+						sendDenial(`Command denied: ${detail}`, ctx.hasUI ? "visible" : "hidden");
+						ctx.abort();
 						return { block: true, reason: `Command denied: ${detail}` };
 					}
 
@@ -212,6 +222,13 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 							customType: "safetynet:manual-approval",
 							content: "The user manually approved this command by interactive prompt.",
 							display: false,
+						});
+					},
+					sendDenial: (text, mode) => {
+						pi.sendMessage({
+							customType: "safetynet:denial",
+							content: text,
+							display: mode === "visible",
 						});
 					},
 				},

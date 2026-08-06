@@ -66,6 +66,9 @@ The reviewer returns a JSON assessment `{risk_level, user_authorization, outcome
 
 - **Allow** — creates a turn-scoped temp rule so repeats in the same turn skip re-review. The model sees a hidden nudge.
 - **Deny** — blocks with the rationale, keeps the turn alive so the model can try a safer alternative. After 3 consecutive denials the turn is aborted.
+Every denial is surfaced in two places:
+- **On the rejected tool call** — the blocked call's error result reads `Auto-denied <permission>: <target> — <rationale>` (a `Ruleset denied …` or `Denied …` prefix for deny-rule/headless denials). The reviewer's internal risk/authorization scores are not shown.
+- **To the model** — a hidden transcript message carries the same line so the reason reaches the model even when the denial aborts the turn. When the denial aborts, the message is also rendered as a visible transcript entry next to the rejected call.
 - **Infrastructure failure** (timeout, API error, unparseable) — falls back to the interactive permission prompt with a notice, while retrying the reviewer every 30s. If a retry succeeds the prompt is dismissed automatically.
 
 Configure which model handles review and timeouts in global config:
