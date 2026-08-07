@@ -102,7 +102,11 @@ export async function runPermissionReview(
     for (const e of entries) {
       if (e.type === "message") {
         const msg = (e as { message: { role: string; content: string | Array<{ type: string; text?: string }> } }).message;
-        if (msg.role === "user" || msg.role === "assistant") {
+        // Trajectory: only the user's own messages establish intent/authorization.
+        // Assistant tool calls/outputs are momentum-bias and are intentionally
+        // NOT included — the reviewer independently verifies local state with its
+        // read-only tools (read/grep/find/ls) when it needs to.
+        if (msg.role === "user") {
           const text = typeof msg.content === "string"
             ? msg.content
             : Array.isArray(msg.content)
