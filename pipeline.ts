@@ -125,12 +125,17 @@ export function makeTempRule(
 // ─── Temp-rule building shared with the auto branch ────────────────────────
 
 /** Build the complete list of temp rules for a reviewer allow verdict.
- *  Mirrors what the interactive path builds from approve results. */
+ *  Mirrors what the interactive path builds from approve results.
+ *  `target` is the raw permission target (the file path for read/edit
+ *  tool calls); for file permissions with no unapproved subcommands or
+ *  redirect targets it produces the single file rule needed to satisfy
+ *  the post-approval recheck. */
 export function buildApprovalRules(
   check: PermissionCheck,
   permission: "bash" | "read" | "edit",
   cwd: string,
   modes: ProfileName[],
+  target?: string,
 ): TempRule[] {
   const rules: TempRule[] = [];
   // One bash rule per unapproved subcommand (canonical form)
@@ -144,6 +149,15 @@ export function buildApprovalRules(
     for (const rt of check.redirectTargets) {
       rules.push(makeTempRule(rt.permission, toRecursiveGlob(normalizePathForMatching(rt.path, cwd)), modes));
     }
+  }
+  // Plain read/edit/write tool call: check.unapproved and redirectTargets
+  // are both absent. Without this the reviewer's allow would create no
+  // rules and the post-approval recheck would still return "ask",
+  // degrading an honest auto-approval into the transient→prompt→abort
+  // loop. Approve the file itself, mirroring the interactive prompt's
+  // file-pattern construction.
+  if (rules.length === 0 && target && (permission === "read" || permission === "edit")) {
+    rules.push(makeTempRule(permission, toRecursiveGlob(normalizePathForMatching(target, cwd)), modes));
   }
   return rules;
 }
@@ -222,7 +236,7 @@ export async function resolvePermission(
       if (v.kind === "assessment" && v.assessment.outcome === "allow") {
         // Approve
         reviewResetDenies();
-        const tempRules = buildApprovalRules(opts.check, opts.permission, deps.cwd, deps.allowModes);
+        const tempRules = buildApprovalRules(opts.check, opts.permission, deps.cwd, deps.allowModes, opts.target);
         const allStorages = [deps.storage, ...(deps.dualWrite ?? [])];
         for (const s of allStorages) s.addTempRules(tempRules);
 
@@ -317,26 +331,21 @@ export async function resolvePermission(
 
     const result = await showPermissionPrompt(deps.displayCtx, promptOpts);
 
-    // Deny outcomes
-    const d = denyResultFromPrompt(result, opts.permission);
-    if (d) {
-      if (d.abort) {
-        deps.displayCtx.abort();
-        deps.onDenied?.();
-      } else {
-        deps.onDenied?.();
-      }
-      return { block: d.block, reason: d.reason };
-    }
-
-    // Check for pending auto result (background retry succeeded before user answered)
+    // A null prompt result is ambiguous between two very different situations:
+    //  (a) the user pressed the deny-abort key (Esc) — deny and abort the turn;
+    //  (b) the background auto-review retry resolved while the prompt was open,
+    //      which aborts the prompt controller (promptCtl.abort()) and resolves
+    //      the prompt with null. In case (b) a pending verdict exists and must
+    //      be processed BEFORE the null is mistaken for a user deny-abort —
+    //      otherwise a successful auto-approval kills the whole turn with
+    //      "Operation aborted" (regression: session 019fd4a1 write aborts).
     if (result === null) {
       const pending = getPendingAutoResult();
       if (pending && pending.kind === "assessment") {
         clearPendingAutoResult();
         if (pending.assessment.outcome === "allow") {
           reviewResetDenies();
-          const tempRules = buildApprovalRules(opts.check, opts.permission, deps.cwd, deps.allowModes);
+          const tempRules = buildApprovalRules(opts.check, opts.permission, deps.cwd, deps.allowModes, opts.target);
           const allStorages = [deps.storage, ...(deps.dualWrite ?? [])];
           for (const s of allStorages) s.addTempRules(tempRules);
           const r = opts.recheck();
@@ -359,7 +368,25 @@ export async function resolvePermission(
           return { block: true, reason: detail };
         }
       }
-      return { block: true, reason: `User denied ${opts.permission}` };
+      // No pending auto verdict and the prompt was dismissed (Esc / abort):
+      // this is a genuine user deny-abort. denyResultFromPrompt(null) always
+      // yields { block: true, abort: true }, so this path always returns.
+      const d0 = denyResultFromPrompt(null, opts.permission)!;
+      if (d0.abort) deps.displayCtx.abort();
+      deps.onDenied?.();
+      return { block: d0.block, reason: d0.reason };
+    }
+
+    // Deny outcomes: typed deny-with-reason (result is non-null here).
+    const d = denyResultFromPrompt(result, opts.permission);
+    if (d) {
+      if (d.abort) {
+        deps.displayCtx.abort();
+        deps.onDenied?.();
+      } else {
+        deps.onDenied?.();
+      }
+      return { block: d.block, reason: d.reason };
     }
     if (result.kind === "deny") {
       return { block: true, reason: `User denied ${opts.permission}` };

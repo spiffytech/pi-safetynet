@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { resolvePermission, denialDetail } from "./pipeline.ts";
+import { resolvePermission, denialDetail, buildApprovalRules } from "./pipeline.ts";
+import { checkFileTarget } from "./check.ts";
 import { setAutoEnabled } from "./auto-config.ts";
 import { resetReviewStateForTests } from "./reviewer.ts";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
@@ -45,7 +46,14 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
     aborted,
     notifies,
     hasUI: true,
-    ui: { notify: (m: string) => notifies.push(m) },
+    ui: {
+      notify: (m: string) => notifies.push(m),
+      getToolsExpanded: () => false,
+      setToolsExpanded: () => {},
+      // Default: any prompt resolves null immediately (dismissed). Tests that
+      // need a delayed dismissal override `custom` with a timed promise.
+      custom: async () => null,
+    },
     abort() { aborted.value = true; },
     sessionManager: { getEntries: () => [] },
     ...overrides,
@@ -276,5 +284,141 @@ describe("resolvePermission — headless deny", () => {
       ["Denied bash: curl http://example.com — Bash requires approval (headless mode)", "hidden"],
     ]);
     assert.equal(result?.block, true);
+  });
+});
+
+// ─── Regression: auto-approval must not abort the turn on write batches ─────
+//
+// Session 019fd4a1: with /safetynet:auto on, a batch of `write` tool calls
+// (package.json, tsconfig.json, main.css, .gitignore) aborted with
+// "Operation aborted" every time, even after removing .env.example. Two bugs:
+//   1. buildApprovalRules created NO temp rule for a plain read/edit/write file
+//      call (no subcommands, no redirects), so the reviewer's allow never
+//      satisfied the post-allow recheck → transient → prompt+retry → abort.
+//   2. When the background retry verdict arrived, the prompt dismissed with
+//      null, and the null was treated as a user Esc-abort BEFORE the pending
+//      auto result was consulted → ctx.abort() killed the whole turn.
+
+function allowAssessment(rationale = "routinely reviewed low-risk file write") {
+  return {
+    kind: "assessment" as const,
+    assessment: {
+      risk_level: "low" as const,
+      user_authorization: "high" as const,
+      outcome: "allow" as const,
+      rationale,
+    },
+  };
+}
+
+describe("buildApprovalRules — plain file target", () => {
+  it("creates a temp rule for a read/edit/write call with no subcommands or redirects", () => {
+    const rules = buildApprovalRules(
+      { action: "ask" },
+      "edit",
+      "/tmp/proj",
+      ["build"],
+      "/tmp/proj/package.json",
+    );
+    assert.equal(rules.length, 1, "must emit exactly one file rule");
+    assert.equal(rules[0]!.rule.permission, "edit");
+    assert.equal(rules[0]!.rule.action, "allow");
+    assert.ok(rules[0]!.rule.pattern.includes("package.json"), `pattern=${rules[0]!.rule.pattern}`);
+    assert.equal(rules[0]!.expiry.type, "turn");
+  });
+
+  it("creates no extra file rule when unapproved subcommands already exist", () => {
+    const rules = buildApprovalRules(
+      { action: "ask", unapproved: ["bun install"] },
+      "bash",
+      "/tmp/proj",
+      ["build"],
+      "bun install",
+    );
+    assert.equal(rules.length, 1);
+    assert.equal(rules[0]!.rule.pattern, "bun install");
+  });
+});
+
+describe("resolvePermission — auto allow satisfies recheck for file write", () => {
+  it("reviewer allow + recheck-now-allow returns undefined (proceeds) without aborting", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const fileTarget = "/tmp/regression-auto-allow/package.json";
+    // recheck consults the storage that buildApprovalRules seeded via
+    // addTempRules — exactly like the main-session storage wiring. cwd must
+    // match deps.cwd so the temp rule normalizes to the same key the
+    // recheck evaluates.
+    const storage = makeStorage();
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        storage,
+        cwd: "/tmp/regression-auto-allow",
+        reviewSpawn: makeReviewSpawn([allowAssessment()]),
+        sendAutoApproval: () => {},
+      }),
+      {
+        permission: "edit",
+        target: fileTarget,
+        check: { action: "ask" },
+        recheck: () => {
+          return checkFileTarget(fileTarget, "edit", "build", storage.getAllRules(), "/tmp/regression-auto-allow");
+        },
+      },
+    );
+    assert.equal(ctx.aborted.value, false, "successful auto-approval must not abort");
+    assert.equal(result, undefined, "allow must proceed (no block)");
+    const rules = storage.temp.getRules();
+    assert.equal(rules.length, 1, "temp rule created from reviewer allow");
+  });
+});
+
+describe("resolvePermission — delayed pending auto verdict on null prompt", () => {
+  it("processes pending allow before treating null as a user Esc-abort", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const storage = makeStorage();
+
+    // The real bug: with auto on, the first review attempt fails (infra
+    // hiccup) so the pipeline falls to the interactive prompt while
+    // background retries run. When a retry succeeds it stores the verdict
+    // and aborts the prompt controller; the prompt resolves null. The old
+    // code treated that null as a user Esc-abort and killed the turn.
+    // Make the reviewer permanently transient so we control when the
+    // verdict lands, then simulate a completed background retry.
+    const transientSpawn = async () => ({ content: [], details: { error: "simulated infrastructure failure" } });
+    let resolvePrompt: (v: null) => void = () => {};
+    ctx.ui.custom = () => new Promise<null>((res) => { resolvePrompt = res; });
+    ctx.ui.getToolsExpanded = () => true;
+
+    const promise = resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        storage,
+        cwd: "/tmp/regression-pending",
+        reviewSpawn: transientSpawn,
+        sendAutoApproval: () => {},
+      }),
+      {
+        permission: "edit",
+        target: "/tmp/regression-pending/package.json",
+        check: { action: "ask" },
+        recheck: () => {
+          return checkFileTarget("/tmp/regression-pending/package.json", "edit", "build", storage.getAllRules(), "/tmp/regression-pending");
+        },
+      },
+    );
+
+    // Wait for the pipeline to reach the prompt, then deliver the verdict
+    // the way the background retry would: store it, then dismiss the prompt.
+    await new Promise((r) => setTimeout(r, 5));
+    const { setPendingAutoResult } = await import("./reviewer.ts");
+    setPendingAutoResult(allowAssessment());
+    resolvePrompt(null);
+
+    const result = await promise;
+    assert.equal(ctx.aborted.value, false, "pending allow must not abort the turn");
+    assert.equal(result, undefined, "pending allow must proceed (no block)");
   });
 });
