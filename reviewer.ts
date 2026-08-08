@@ -141,7 +141,6 @@ export async function runPermissionReview(
   }
 
   // Run the reviewer subagent
-  // Run the reviewer subagent
   const result = await deps.spawn({
     taskType: "explore",
     prompt: taskPrompt,
@@ -157,8 +156,11 @@ export async function runPermissionReview(
   const text = result.content.map((c) => c.text).join("\n").trim();
   if (result.details.error) {
     const errMsg = String(result.details.error);
-    // Fatal: session creation / auth failures
-    if (errMsg.includes("create") || errMsg.includes("auth") || errMsg.includes("sign in") || errMsg.includes("login") || errMsg.includes("not found")) {
+    // Fatal only when recovery in-session is impossible (structural/session
+    // creation failures). Auth/credential failures are transient: an expired or
+    // rejected token can refresh on a later retry, so they must flow to the
+    // background-retry path instead of permanently disabling auto-approve.
+    if (errMsg.includes("create") || errMsg.includes("not found") || errMsg.includes("Unknown provider")) {
       return { kind: "fatal", message: errMsg };
     }
     return { kind: "transient", message: errMsg };

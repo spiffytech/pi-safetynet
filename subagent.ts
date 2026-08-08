@@ -18,26 +18,6 @@ import type { PromptKeybindings } from "./prompts.ts";
 import type { PermissionStorage } from "./permissions/index.ts";
 import { toDisplayPath } from "./project.ts";
 import { createSubagentSafetynetExtension } from "./subagent-safetynet.ts";
-import { writeFileSync, appendFileSync } from "node:fs";
-
-// ── Diagnostic logging ──────────────────────────────────────────────────
-const DEBUG_LOG = "/tmp/safetynet-subagent-debug.log";
-let diagEnabled = false;
-
-function diagLog(label: string, data: unknown): void {
-	if (!diagEnabled) return;
-	const ts = new Date().toISOString();
-	const sep = "═".repeat(60);
-	const entry = `\n${sep}\n[${ts}] ${label}\n${sep}\n${typeof data === "string" ? data : JSON.stringify(data, null, 2)}\n`;
-	appendFileSync(DEBUG_LOG, entry);
-}
-
-function diagClear(): void {
-	if (!diagEnabled) return;
-	writeFileSync(DEBUG_LOG, ``);
-}
-
-/** Diagnostic extension that logs provider payloads and context mutations. */
 
 /** Extension factory that overrides the system prompt via before_agent_start return. */
 function createSystemPromptExtension(systemPrompt: string): (pi: ExtensionAPI) => void {
@@ -47,90 +27,7 @@ function createSystemPromptExtension(systemPrompt: string): (pi: ExtensionAPI) =
 		});
 	};
 }
-function createDiagnosticExtension(): (pi: ExtensionAPI) => void {
-	return (pi: ExtensionAPI) => {
-		pi.on("session_start", async (event, _ctx) => {
-			diagLog("session_start", { reason: (event as any).reason });
-		});
 
-		pi.on("resources_discover", async (event, _ctx) => {
-			diagLog("resources_discover", { reason: event.reason });
-		});
-
-		pi.on("context", async (event, _ctx) => {
-			const msgTypes = event.messages.map((m: any) => ({
-				role: m.role,
-				customType: (m as any).customType ?? undefined,
-				contentType: m.content
-					? (typeof m.content === "string"
-						? "string"
-						: Array.isArray(m.content)
-							? m.content.map((c: any) => c.type).join(",")
-							: typeof m.content)
-					: "none",
-				textPreview: typeof m.content === "string"
-					? m.content.slice(0, 200)
-					: Array.isArray(m.content)
-						? m.content.filter((c: any) => c.type === "text").map((c: any) => c.text?.slice(0, 200)).join(" | ")
-						: undefined,
-			}));
-			diagLog("context messages", msgTypes);
-		});
-
-		pi.on("before_agent_start", async (event, _ctx) => {
-			const e = event as any;
-			diagLog("before_agent_start systemPrompt (first 2000 chars)", e.systemPrompt?.slice(0, 2000));
-			diagLog("before_agent_start systemPromptOptions", {
-				customPrompt: e.systemPromptOptions?.customPrompt?.slice(0, 500),
-				selectedTools: e.systemPromptOptions?.selectedTools,
-				toolSnippets: e.systemPromptOptions?.toolSnippets,
-				promptGuidelines: e.systemPromptOptions?.promptGuidelines,
-				appendSystemPrompt: e.systemPromptOptions?.appendSystemPrompt,
-				cwd: e.systemPromptOptions?.cwd,
-				contextFiles: e.systemPromptOptions?.contextFiles?.map((f: any) => f.path),
-				skills: e.systemPromptOptions?.skills?.map((s: any) => s.name),
-			});
-		});
-
-		pi.on("before_provider_request", async (event, _ctx) => {
-			const payload = event.payload as Record<string, unknown>;
-			diagLog("before_provider_request — full keys", Object.keys(payload ?? {}));
-			diagLog("before_provider_request — model", payload?.model);
-
-			// 1) Anthropic-style: separate top-level `system` field
-			if (payload?.system) {
-				const sys = payload.system;
-				diagLog("before_provider_request — payload.system (anthropic-style)",
-					typeof sys === "string" ? sys.slice(0, 10000) : JSON.stringify(sys, null, 2)?.slice(0, 10000));
-			} else {
-				diagLog("before_provider_request — payload.system", "(not present)");
-			}
-
-			// 2) OpenAI-style: system message inside messages[]
-			const sysMsg = (payload?.messages as any[])?.find((m: any) => m.role === "system");
-			diagLog("before_provider_request — system message in messages[]", sysMsg
-				? { role: sysMsg.role, contentPreview: typeof sysMsg.content === "string" ? sysMsg.content.slice(0, 5000) : JSON.stringify(sysMsg.content)?.slice(0, 5000) }
-				: "(no system message in messages[])");
-
-			// 3) Search entire payload for "claude" / "Claude" (case-insensitive)
-			const payloadStr = JSON.stringify(payload);
-			const lower = payloadStr.toLowerCase();
-			let searchFrom = 0;
-			const claudeHits: string[] = [];
-			while (true) {
-				const idx = lower.indexOf("claude", searchFrom);
-				if (idx < 0) break;
-				claudeHits.push(payloadStr.slice(Math.max(0, idx - 80), idx + 80));
-				searchFrom = idx + 6;
-			}
-			if (claudeHits.length) {
-				diagLog(`before_provider_request — 'claude' found ${claudeHits.length} time(s) in full payload`, claudeHits);
-			} else {
-				diagLog("before_provider_request — 'claude' NOT found in full payload", "");
-			}
-		});
-	};
-}
 
 export type SubagentTaskType = "explore" | "build";
 
@@ -224,10 +121,6 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 }> {
 	const { taskType, prompt, parentCtx, parentStorage, initialRules, signal, onUpdate, cwd } = opts;
 
-	// Enable diagnostic logging for debugging
-	diagEnabled = false;
-	diagLog("runSubagent called", { taskType, cwd, model: opts.model ? `${(opts.model as any).provider}/${(opts.model as any).id}` : "(default)" });
-
 	const agentDir = process.env.PI_AGENT_DIR ?? `${process.env.HOME}/.pi/agent`;
 
 	// Build a ModelRuntime from the same agentDir that `createAgentSession` would use
@@ -273,23 +166,12 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			autoDenyConfig: opts.autoDenyConfig,
 		}),
 		opts.systemPrompt ? createSystemPromptExtension(opts.systemPrompt) : null,
-			createDiagnosticExtension(),
 		].filter(Boolean) as any[],
 	};
 
 	const loader = new DefaultResourceLoader(loaderOpts);
 	await loader.reload();
 
-	// Log ResourceLoader discoveries after reload (cast to any to access private fields)
-	const loaderAny = loader as any;
-	diagLog("ResourceLoader — systemPrompt (first 3000 chars)", loaderAny.systemPrompt?.slice(0, 3000));
-	diagLog("ResourceLoader — appendSystemPrompt", loaderAny.appendSystemPrompt);
-	diagLog("ResourceLoader — agentsFiles paths + content", loaderAny.agentsFiles?.map((f: any) => ({
-		path: f.path,
-		contentPreview: f.content?.slice(0, 500),
-	})));
-	diagLog("ResourceLoader — skills", loaderAny.skills?.map((s: any) => s.name));
-	diagLog("ResourceLoader — prompts", loaderAny.prompts?.map((p: any) => p.name));
 
 	const model = opts.model ?? parentCtx.model;
 	if (!model) {
@@ -299,35 +181,34 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 		};
 	}
 
-	// Forward extension-registered providers (e.g. hyper) from the parent
-	// ModelRegistry so the subagent can resolve auth for non-built-in providers.
+	// Forward extension-registered providers from the parent ModelRegistry so the
+	// subagent can resolve auth for non-built-in providers (e.g. hyper).
+	// - Config-registered providers are re-registered as config.
+	// - Native providers (full Provider objects, e.g. hyper/neuralwatt registered via
+	//   pi.registerProvider(Provider)) are passed through as-is — re-composing them from
+	//   parts loses streamSimple/refreshModels/headers and can mislabel OAuth as unconfigured.
 	const providerId = model.provider;
 	const config = parentCtx.modelRegistry.getRegisteredProviderConfig(providerId);
-	const native = (parentCtx.modelRegistry as any).getRegisteredNativeProvider?.(providerId);
+	const native = parentCtx.modelRegistry.getRegisteredNativeProvider(providerId);
 	if (config) {
 		modelRuntime.registerProvider(providerId, config);
 	} else if (native) {
-		// The parent registered this as a native provider (full Provider object).
-		// Extract its properties and re-register as config in the subagent.
-		// oauth is spread conditionally so the property is absent (not `undefined`)
-		// when there is no OAuth config — required by exactOptionalPropertyTypes.
-		const oauthConfig = (native as any).auth?.oauth ? {
-			name: (native as any).auth.oauth.name,
-			login: (native as any).auth.oauth.login,
-			refreshToken: (native as any).auth.oauth.refresh,
-			getApiKey: (cred: any) => cred.access,
-				// Note: must be sync — adaptOAuth doesn't await getApiKey
-		} : undefined;
-		const nativeConfig = {
-			name: native.name,
-			baseUrl: (native as any).baseUrl,
-			api: (native as any).api,
-			models: (native as any).getModels?.() ?? [],
-			...(oauthConfig ? { oauth: oauthConfig } : {}),
-		};
-		modelRuntime.registerProvider(providerId, nativeConfig);
+		modelRuntime.registerNativeProvider(native);
 	}
 
+	// Runtime API keys (set via setRuntimeApiKey, e.g. /apikey or another extension) live
+	// only in the parent's runtime and are invisible to the fresh subagent ModelRuntime,
+	// which reads auth.json. Forward them so a runtime-keyed provider doesn't fail with
+	// "No API key found". OAuth providers are excluded — they keep full refresh semantics.
+	const authStatus = parentCtx.modelRegistry.getProviderAuthStatus(providerId);
+	if (authStatus.source === "runtime") {
+		const runtimeKey = await parentCtx.modelRegistry.getApiKeyForProvider(providerId);
+		if (runtimeKey) await modelRuntime.setRuntimeApiKey(providerId, runtimeKey);
+	}
+
+	// Settle the snapshot (provider configured + auth type) before createAgentSession
+	// asserts auth on it; otherwise the first prompt can race an unawaited refresh.
+	await modelRuntime.refresh({ allowNetwork: false });
 
 	let result: CreateAgentSessionResult;
 	try {
@@ -351,12 +232,6 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	const { session } = result;
 	sessionRef = session; // wire up the abort target for onPermissionDenied
 
-	diagLog("session.model after createAgentSession", {
-		provider: (session as any).model?.provider,
-		id: (session as any).model?.id,
-		sentModel: { provider: (model as any)?.provider, id: (model as any)?.id },
-	});
-
 	await session.bindExtensions({
 		commandContextActions: {
 			waitForIdle: () => session.agent.waitForIdle(),
@@ -367,15 +242,9 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			reload: async () => {},
 		},
 	});
-
 	// bindExtensions resets active tools to defaults.
 	// The subagent safetynet extension fixes this in its session_start handler
 	// via pi.setActiveTools().
-
-	diagLog("session.model after bindExtensions", {
-		provider: (session as any).model?.provider,
-		id: (session as any).model?.id,
-	});
 
 	let fullText = "";
 	let turnCount = 0;
