@@ -1,4 +1,4 @@
-export type ProfileName = "plan" | "build";
+export type ProfileName = "plan" | "build" | "ro" | "rw";
 export type PermissionAction = "allow" | "deny" | "ask";
 export type PermissionName = "bash" | "edit" | "read" | "*";
 
@@ -11,6 +11,12 @@ export interface Rule {
 }
 
 export type Ruleset = Rule[];
+
+/** Which pair of modes the extension currently presents: plan/build or ro/rw. */
+export type Paradigm = "plan-build" | "ro-rw";
+
+/** Partial mapping of mode names to their aliases in the other paradigm. */
+export type ModeAliases = Partial<Record<ProfileName, ProfileName>>;
 
 /** Expiry policy for a temporary approval rule. */
 export type TempExpiry = { type: "turn" };

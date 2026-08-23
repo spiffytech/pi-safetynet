@@ -1,5 +1,5 @@
 import picomatch from "picomatch";
-import type { Rule, Ruleset, PermissionName, PermissionAction, ProfileName } from "../types.ts";
+import type { Rule, Ruleset, PermissionName, PermissionAction, ProfileName, ModeAliases } from "../types.ts";
 
 export function bashPatternToRegex(pattern: string): RegExp {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
@@ -27,8 +27,11 @@ function actionForProfile(
   action: PermissionAction,
   modes: ProfileName[],
   profile: ProfileName,
+  modeAliases: ModeAliases,
 ): PermissionAction | null {
   if (modes.includes(profile)) return action;
+  const aliased = modeAliases[profile];
+  if (aliased !== undefined && aliased !== profile && modes.includes(aliased)) return action;
   return null;
 }
 
@@ -53,6 +56,7 @@ export function evaluatePermission(
   profile: ProfileName,
   rules: Ruleset,
   displayTarget?: string,
+  modeAliases: ModeAliases = {},
 ): EvaluateResult {
   const matching = rules.filter((r) => {
     if (r.permission !== permission && r.permission !== "*") return false;
@@ -63,7 +67,7 @@ export function evaluatePermission(
 
   for (let i = matching.length - 1; i >= 0; i--) {
     const rule = matching[i]!;
-    const effectiveAction = actionForProfile(rule.action, rule.modes, profile);
+    const effectiveAction = actionForProfile(rule.action, rule.modes, profile, modeAliases);
     if (effectiveAction !== null) {
       return { action: effectiveAction, matchedRule: rule };
     }

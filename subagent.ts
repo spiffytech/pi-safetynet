@@ -13,7 +13,7 @@ import {
 	type CreateAgentSessionResult,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
-import type { AutoDenyConfig, Ruleset } from "./types.ts";
+import type { AutoDenyConfig, Paradigm, ProfileName, ModeAliases, Ruleset } from "./types.ts";
 import type { PromptKeybindings } from "./prompts.ts";
 import type { PermissionStorage } from "./permissions/index.ts";
 import { toDisplayPath } from "./project.ts";
@@ -88,6 +88,10 @@ export interface SubagentOptions {
 	promptKeybindings: PromptKeybindings;
 	/** Inherited from parent: auto-deny behaviour for rule-denies. */
 	autoDenyConfig: AutoDenyConfig;
+	/** Active paradigm (ro-rw vs plan-build) for canonical subagent mode names. */
+	paradigm?: Paradigm;
+	/** Mode-name aliasing for rule matching (plan→ro / build→rw bijection). */
+	modeAliases?: ModeAliases;
 	/** Custom system prompt to replace the default (applied via before_agent_start return). */
 	systemPrompt?: string;
 	/** Override the default 300s timeout. */
@@ -164,6 +168,8 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			trustExternalPaths: opts.trustExternalPaths ?? false,
 			promptKeybindings: opts.promptKeybindings,
 			autoDenyConfig: opts.autoDenyConfig,
+			paradigm: opts.paradigm ?? "plan-build",
+			modeAliases: opts.modeAliases ?? {},
 		}),
 		opts.systemPrompt ? createSystemPromptExtension(opts.systemPrompt) : null,
 		].filter(Boolean) as any[],

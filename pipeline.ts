@@ -269,7 +269,7 @@ export async function resolvePermission(
             check: opts.check,
             cwd: deps.cwd,
             parentCtx: deps.displayCtx,
-            profile: deps.allowModes.includes("plan") ? "plan" : "build",
+            profile: deps.allowModes.includes("plan") || deps.allowModes.includes("ro") ? "ro" : "rw",
             signal: ctl.signal,
             timeoutMs,
           },
@@ -334,7 +334,7 @@ export async function resolvePermission(
           if (retriesDone >= maxRetries) { clearInterval(retryInterval); return; }
           retriesDone++;
           const verdict = await runPermissionReview(
-            { permission: opts.permission, target: opts.target, check: opts.check, cwd: deps.cwd, parentCtx: deps.displayCtx, profile: deps.allowModes.includes("plan") ? "plan" : "build", timeoutMs },
+            { permission: opts.permission, target: opts.target, check: opts.check, cwd: deps.cwd, parentCtx: deps.displayCtx, profile: deps.allowModes.includes("plan") || deps.allowModes.includes("ro") ? "ro" : "rw", timeoutMs },
             { spawn: deps.reviewSpawn ?? (await import("./subagent.ts").then((m) => m.runSubagent)) },
           ).catch(() => ({ kind: "transient" as const, message: "retry failed" }));
           if (verdict.kind === "assessment") {

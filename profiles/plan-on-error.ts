@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getLatestCustomEntry } from "./index.ts";
+import { getLatestCustomEntry, getParadigm } from "./index.ts";
 
 let planOnErrorEnabled = true;
 
@@ -27,7 +27,8 @@ export function restorePlanOnError(ctx: ExtensionContext): void {
 
 export function getPlanOnErrorInstruction(): string | null {
   if (!planOnErrorEnabled) return null;
-  return `Command exited with a non-zero status. If you're stuck or going in circles, consider stepping back: switch to plan mode with /safetynet:plan and ask the user for input before continuing.`;
+  const modeCmd = getParadigm() === "ro-rw" ? "/safetynet:ro" : "/safetynet:plan";
+  return `Command exited with a non-zero status. If you're stuck or going in circles, consider stepping back: switch to read-only mode with ${modeCmd} and ask the user for input before continuing.`;
 }
 
 export function hasPlanOnErrorMarker(text: string): boolean {

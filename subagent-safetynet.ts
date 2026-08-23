@@ -10,7 +10,7 @@
 
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Rule, Ruleset, TempRule, ProfileName, AutoDenyConfig } from "./types.ts";
+import type { Rule, Ruleset, TempRule, ProfileName, Paradigm, ModeAliases, AutoDenyConfig } from "./types.ts";
 import type { PermissionPromptOptions, PromptKeybindings } from "./prompts.ts";
 import { showPermissionPrompt } from "./prompts.ts";
 import {
@@ -31,6 +31,10 @@ export interface SubagentSafetynetOpts {
 	initialRules?: Ruleset;
 	/** Build-only: callback to abort the entire subagent session on permission rejection */
 	onPermissionDenied?: () => void;
+	/** Active paradigm, so build subagents use the matching write-mode name. */
+	paradigm?: Paradigm;
+	/** Mode-name aliasing for rule matching (plan→ro / build→rw bijection). */
+	modeAliases?: ModeAliases;
 	/** Inherited from parent: trust file paths outside the project root */
 	trustExternalPaths?: boolean;
 	/** Inherited from parent: prompt keybindings for the bridged permission prompt. */
@@ -88,12 +92,13 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 	}
 	const parentCtx: ExtensionContext = opts.parentCtx;
 	const parentStorage: PermissionStorage = opts.parentStorage;
-	const { initialRules, cwd, onPermissionDenied, trustExternalPaths = false, promptKeybindings = { denyAbort: "escape" }, autoDenyConfig = { continue: false } } = opts;
+		const { initialRules, cwd, onPermissionDenied, trustExternalPaths = false, promptKeybindings = { denyAbort: "escape" }, autoDenyConfig = { continue: false }, paradigm = "plan-build", modeAliases = {} } = opts;
 
 	return (pi: ExtensionAPI) => {
 		/** Per-scope hazardous-deny counter for this subagent. Fresh per extension
 		 *  instance — parallel subagents never share the parent's counter. */
 		const hazardousDenyState: HazardousDenyState = { count: 0 };
+		const writeProfile: ProfileName = paradigm === "ro-rw" ? "rw" : "build";
 
 		/** Deliver a denial to the subagent's model: display:false nudge plus,
 		 *  when visible, a display:true transcript entry for abort paths. */
@@ -118,12 +123,12 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 
 		pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => {
 			try {
-				const profile: ProfileName = "build";
+				const profile: ProfileName = writeProfile;
 
 				if (event.toolName === "bash") {
 					const command = event.input.command as string;
 					const rules = subagentStorage.getAllRules();
-					const check = checkBashPermission(command, profile, rules, cwd, trustExternalPaths);
+					const check = checkBashPermission(command, profile, rules, cwd, trustExternalPaths, modeAliases);
 
 					if (check.action === "deny") {
 						const detail = check.reason ?? `Denied by ruleset: ${(check.unapproved ?? []).join(", ")}`;
@@ -145,7 +150,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 						permission: "bash",
 						target: command,
 						check,
-						recheck: () => checkBashPermission(command, profile, subagentStorage.getAllRules(), cwd, trustExternalPaths),
+						recheck: () => checkBashPermission(command, profile, subagentStorage.getAllRules(), cwd, trustExternalPaths, modeAliases),
 					});
 				}
 
@@ -155,8 +160,8 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					return resolvePermission(ctx, {
 						permission: "read",
 						target: filePath,
-						check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternalPaths),
-						recheck: () => checkFileTarget(filePath, "read", profile, subagentStorage.getAllRules(), cwd, trustExternalPaths),
+						check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternalPaths, modeAliases),
+						recheck: () => checkFileTarget(filePath, "read", profile, subagentStorage.getAllRules(), cwd, trustExternalPaths, modeAliases),
 					});
 				}
 
@@ -166,8 +171,8 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					return resolvePermission(ctx, {
 						permission: "edit",
 						target: filePath,
-						check: checkFileTarget(filePath, "edit", profile, rules, cwd, trustExternalPaths),
-						recheck: () => checkFileTarget(filePath, "edit", profile, subagentStorage.getAllRules(), cwd, trustExternalPaths),
+						check: checkFileTarget(filePath, "edit", profile, rules, cwd, trustExternalPaths, modeAliases),
+						recheck: () => checkFileTarget(filePath, "edit", profile, subagentStorage.getAllRules(), cwd, trustExternalPaths, modeAliases),
 					});
 				}
 
@@ -177,8 +182,8 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					return resolvePermission(ctx, {
 						permission: "read",
 						target: filePath,
-						check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternalPaths),
-						recheck: () => checkFileTarget(filePath, "read", profile, subagentStorage.getAllRules(), cwd, trustExternalPaths),
+						check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternalPaths, modeAliases),
+						recheck: () => checkFileTarget(filePath, "read", profile, subagentStorage.getAllRules(), cwd, trustExternalPaths, modeAliases),
 					});
 				}
 			} catch (err) {
@@ -226,7 +231,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					storage: subagentStorage,
 					dualWrite: [parentStorage],
 					cwd,
-					allowModes: ["build"],
+					allowModes: [writeProfile],
 					...(onPermissionDenied ? { onDenied: onPermissionDenied } : {}),
 					keybindings: promptKeybindings,
 					autoDeny: autoDenyConfig,

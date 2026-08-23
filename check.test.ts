@@ -168,6 +168,39 @@ describe("checkBashPermission plan-mode edit denial", () => {
   }
 });
 
+describe("checkBashPermission ro-mode edit denial", () => {
+  // ro mode mirrors plan mode's read-only gate (soft enforcement). Writes must
+  // be denied with the read-only label; reads stay allowed. modeAliases maps
+  // ro→plan so the plan/build baseline rules apply to ro (as index.ts passes
+  // getModeAliases() in production).
+  const RO_ALIASES = { ro: "plan" } as Record<string, "plan">;
+
+  const WRITE_CMDS: [string, string][] = [
+    ["sed -i s/foo/bar/ file.txt", "sed -i"],
+    ["echo hello > file.txt", "echo redirect"],
+    ["tee file.txt", "tee"],
+    ["python3 -c \"open('f','w')\"", "python3 -c"],
+  ];
+
+  for (const [cmd, label] of WRITE_CMDS) {
+    it(`denies in ro mode: ${label}`, () => {
+      const result = checkBashPermission(cmd, "ro", RULES, CWD, false, RO_ALIASES);
+      assert.equal(result.action, "deny");
+      assert.ok(result.reason?.includes("Read-only mode"));
+    });
+
+    it(`does not deny in rw mode: ${label}`, () => {
+      const result = checkBashPermission(cmd, "rw", RULES, CWD, false, { rw: "build" } as Record<string, "build">);
+      assert.notEqual(result.action, "deny");
+    });
+  }
+
+  it("allows read-only bash in ro mode", () => {
+    const result = checkBashPermission("cat file.txt && git status", "ro", RULES, CWD, false, RO_ALIASES);
+    assert.equal(result.action, "allow");
+  });
+});
+
 describe("checkBashPermission bare variable assignment auto-approve", () => {
   it("auto-approves single bare variable assignment", () => {
     const result = checkBashPermission(

@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { ProfileName, PermissionAction, Ruleset } from "./types.ts";
+import type { ProfileName, PermissionAction, Ruleset, ModeAliases } from "./types.ts";
 import { evaluatePermission } from "./permissions/ruleset.ts";
 import { getBaselineRules } from "./permissions/index.ts";
 import { parseCommand, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
@@ -38,6 +38,7 @@ export function checkFileTarget(
   rules: Ruleset,
   cwd?: string,
   trustExternalPaths = false,
+  modeAliases: ModeAliases = {},
 ): PermissionCheck {
   if (isHazardousFile(filePath)) {
     return { action: "deny", reason: "Sensitive file (e.g., .env, .ssh, credentials): contains secrets, access blocked. Don't read or write it. If you need a secret value, ask the user or use an already-set environment variable instead.", hazardous: true };
@@ -50,7 +51,7 @@ export function checkFileTarget(
   const absCwd = cwd ?? process.cwd();
   const normalized = normalizePathForMatching(filePath, absCwd);
 
-  const result = evaluatePermission(permission, normalized, profile, rules);
+  const result = evaluatePermission(permission, normalized, profile, rules, undefined, modeAliases);
   if (result.action === "deny") {
     return {
       action: "deny",
@@ -131,6 +132,7 @@ export function checkBashPermission(
   rules: Ruleset,
   cwd?: string,
   trustExternalPaths = false,
+  modeAliases: ModeAliases = {},
 ): PermissionCheck {
   const parsed = parseCommand(command);
 
@@ -138,12 +140,13 @@ export function checkBashPermission(
     return { action: "deny", reason: "Catastrophic command", unapproved: [] };
   }
 
-  // In plan mode, deny bash commands that are functionally equivalent
-  // to the edit/write tools (which are disabled in plan mode).
+  // In read-only modes, deny bash commands that are functionally equivalent
+  // to the edit/write tools (which are disabled in read-only modes).
   // This prevents circumvention via heredoc+redirect, sed -i, tee,
   // interpreter -c/-e, etc.
-  if (profile === "plan" && isEditLikeBashCommand(command, parsed)) {
-    return { action: "deny", reason: "Plan mode: bash command writes to a file (equivalent to edit/write tool)" };
+  if ((profile === "plan" || profile === "ro") && isEditLikeBashCommand(command, parsed)) {
+    const label = profile === "ro" ? "Read-only mode" : "Plan mode";
+    return { action: "deny", reason: `${label}: bash command writes to a file (equivalent to edit/write tool)` };
   }
 
   const unapproved: string[] = [];
@@ -167,7 +170,7 @@ export function checkBashPermission(
     if (isBareAssignment(sub)) continue;
 
     const displaySub = parsed.displaySubcommands[i] ?? sub;
-    const result = evaluatePermission("bash", sub, profile, rules, displaySub);
+    const result = evaluatePermission("bash", sub, profile, rules, displaySub, modeAliases);
     if (result.action === "deny") {
       worstAction = "deny";
       if (!unapproved.includes(sub)) {
@@ -187,7 +190,7 @@ export function checkBashPermission(
 
   for (const target of parsed.redirects) {
     const perm = target.direction === "input" ? "read" : "edit";
-    const targetResult = checkFileTarget(target.path, perm, profile, rules, cwd, trustExternalPaths);
+    const targetResult = checkFileTarget(target.path, perm, profile, rules, cwd, trustExternalPaths, modeAliases);
     if (targetResult.action === "deny") {
       worstAction = "deny";
       redirectTargets.push({ permission: perm, path: target.path });
@@ -212,13 +215,14 @@ export function checkToolPermission(
   toolName: string,
   profile: ProfileName,
   rules: Ruleset,
+  modeAliases: ModeAliases = {},
 ): PermissionCheck {
-  const result = evaluatePermission("bash", `tool:${toolName}`, profile, rules);
+  const result = evaluatePermission("bash", `tool:${toolName}`, profile, rules, undefined, modeAliases);
   if (result.action === "deny") {
     return { action: "deny", reason: result.matchedRule?.reason ?? "Unknown tool denied by ruleset" };
   }
   if (result.action === "ask") {
-    return { action: "ask", reason: "Unknown tool in plan mode requires approval" };
+    return { action: "ask", reason: profile === "plan" ? "Unknown tool in plan mode requires approval" : "Unknown tool in read-only mode requires approval" };
   }
   return { action: result.action };
 }

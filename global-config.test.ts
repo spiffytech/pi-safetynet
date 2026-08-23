@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadGlobalRules, saveGlobalRules, addGlobalRules, getGlobalConfigPath, getGlobalConfigDir, loadDefaultProfile, saveDefaultProfile, loadTrustExternalPaths } from "./global-config.ts";
+import { loadGlobalRules, saveGlobalRules, addGlobalRules, getGlobalConfigPath, getGlobalConfigDir, loadDefaultProfile, saveDefaultProfile, loadTrustExternalPaths, loadParadigm } from "./global-config.ts";
 import type { Ruleset } from "./types.ts";
 
 /** Temporary homedir override for testing. */
@@ -208,6 +208,42 @@ describe("global-config", () => {
       writeFileSync(getGlobalConfigPath(), JSON.stringify({ defaultProfile: "build" }), "utf-8");
 
       assert.equal(loadDefaultProfile(), "build");
+    });
+
+    it("returns 'ro'/'rw' when defaultProfile uses the new mode names", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ defaultProfile: "ro" }), "utf-8");
+      assert.equal(loadDefaultProfile(), "ro");
+
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ defaultProfile: "rw" }), "utf-8");
+      assert.equal(loadDefaultProfile(), "rw");
+    });
+  });
+
+  describe("loadParadigm", () => {
+    it("defaults to plan-build when unset or invalid", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({}), "utf-8");
+      assert.equal(loadParadigm(), "plan-build");
+
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ paradigm: "bogus" }), "utf-8");
+      assert.equal(loadParadigm(), "plan-build");
+    });
+
+    it("reads ro-rw when configured", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ paradigm: "ro-rw" }), "utf-8");
+      assert.equal(loadParadigm(), "ro-rw");
+    });
+
+    it("reads plan-build when configured", () => {
+      const dir = getGlobalConfigDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(getGlobalConfigPath(), JSON.stringify({ paradigm: "plan-build" }), "utf-8");
+      assert.equal(loadParadigm(), "plan-build");
     });
   });
 

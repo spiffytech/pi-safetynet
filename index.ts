@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction, KeybindingsConfig, AutoDenyConfig } from "./types.ts";
 import questionnaire from "./questionnaire.ts";
-import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./global-config.ts";
+import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile, loadParadigm, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./global-config.ts";
 import { runSubagent, addUsage, formatSubagentUsage, ZERO_USAGE, type SubagentUsage } from "./subagent.ts";
 import {
   getBaselineRules,
@@ -34,6 +34,12 @@ import {
   persistProfile,
   restoreProfile,
   getLatestCustomEntry,
+  getParadigm,
+  setParadigm,
+  getModeAliases,
+  normalizeProfile,
+  isReadOnly,
+  paradigmModes,
 } from "./profiles/index.ts";
 import {
   isPlanOnErrorEnabled,
@@ -69,7 +75,8 @@ async function resolvePermission(
   },
 ): Promise<{ block: boolean; reason: string } | undefined> {
   const profile = getCurrentProfile();
-  const allowModes: ProfileName[] = profile === "plan" ? ["plan", "build"] : ["build"];
+  const { read, write } = paradigmModes();
+  const allowModes: ProfileName[] = profile === write ? [write] : [read, write];
   return resolvePermissionShared(
     {
       displayCtx: ctx,
@@ -199,6 +206,7 @@ async function handleToolCall(
 ): Promise<{ block: boolean; reason: string } | undefined> {
   try {
     const profile = getCurrentProfile();
+    const modeAliases = getModeAliases();
 
     const cwd = process.cwd();
     const trustExternal = trustExternalActive();
@@ -206,7 +214,7 @@ async function handleToolCall(
     if (event.toolName === "bash") {
       const command = event.input.command as string;
       const rules = storage.getAllRules();
-      const check = checkBashPermission(command, profile, rules, cwd, trustExternal);
+      const check = checkBashPermission(command, profile, rules, cwd, trustExternal, modeAliases);
 
       if (check.action === "deny") {
         // Per-rule reason wins over configured auto-deny reason; default
@@ -232,7 +240,7 @@ async function handleToolCall(
         permission: "bash",
         target: command,
         check,
-        recheck: () => checkBashPermission(command, profile, storage.getAllRules(), cwd, trustExternal),
+        recheck: () => checkBashPermission(command, profile, storage.getAllRules(), cwd, trustExternal, modeAliases),
         cwd,
       });
     }
@@ -243,24 +251,27 @@ async function handleToolCall(
       return resolvePermission(ctx, {
         permission: "read",
         target: filePath,
-        check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternal),
-        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules(), cwd, trustExternal),
+        check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternal, modeAliases),
+        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules(), cwd, trustExternal, modeAliases),
         cwd,
       });
     }
 
     if (event.toolName === "edit" || event.toolName === "write") {
-      if (profile === "plan") {
+      if (isReadOnly(profile)) {
+        const { write: writeMode } = paradigmModes();
+        const writeCmd = writeMode === "rw" ? "/safetynet:rw" : "/safetynet:build";
+        const label = profile === "ro" ? "Read-only mode" : "Plan mode";
         ctx.abort();
-        return { block: true, reason: `Plan mode: ${event.toolName} is disabled. The user must switch to build mode with /safetynet:build before implementation.` };
+        return { block: true, reason: `${label}: ${event.toolName} is disabled. The user must switch to ${writeMode} mode with ${writeCmd} before implementation.` };
       }
       const filePath = event.input.path as string;
       const rules = storage.getAllRules();
       return resolvePermission(ctx, {
         permission: "edit",
         target: filePath,
-        check: checkFileTarget(filePath, "edit", profile, rules, cwd, trustExternal),
-        recheck: () => checkFileTarget(filePath, "edit", profile, storage.getAllRules(), cwd, trustExternal),
+        check: checkFileTarget(filePath, "edit", profile, rules, cwd, trustExternal, modeAliases),
+        recheck: () => checkFileTarget(filePath, "edit", profile, storage.getAllRules(), cwd, trustExternal, modeAliases),
         cwd,
       });
     }
@@ -274,20 +285,20 @@ async function handleToolCall(
       return resolvePermission(ctx, {
         permission: "read",
         target: filePath,
-        check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternal),
-        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules(), cwd, trustExternal),
+        check: checkFileTarget(filePath, "read", profile, rules, cwd, trustExternal, modeAliases),
+        recheck: () => checkFileTarget(filePath, "read", profile, storage.getAllRules(), cwd, trustExternal, modeAliases),
         cwd,
       });
     }
 
     const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "planWrite", "planEdit", "planPresent", ...(loadSubagentsConfig())]);
-    if (!knownTools.has(event.toolName) && profile === "plan") {
+    if (!knownTools.has(event.toolName) && isReadOnly(profile)) {
       const rules = storage.getAllRules();
       return resolvePermission(ctx, {
         permission: "bash",
         target: `tool:${event.toolName}`,
-        check: checkToolPermission(event.toolName, profile, rules),
-        recheck: () => checkToolPermission(event.toolName, profile, storage.getAllRules()),
+        check: checkToolPermission(event.toolName, profile, rules, modeAliases),
+        recheck: () => checkToolPermission(event.toolName, profile, storage.getAllRules(), modeAliases),
         cwd,
       });
     }
@@ -598,14 +609,15 @@ function registerAnswerTool(pi: ExtensionAPI) {
 }
 
 function switchToProfile(ctx: ExtensionContext, profile: ProfileName): void {
+  const target = normalizeProfile(profile);
   const current = getCurrentProfile();
-  if (current === profile) {
-    ctx.ui.notify(`Already in ${profile} mode`, "info");
+  if (current === target) {
+    ctx.ui.notify(`Already in ${target} mode`, "info");
     return;
   }
-  setCurrentProfile(profile);
+  setCurrentProfile(target);
   persistProfile(pi);
-  ctx.ui.notify(`Switched from ${current} to ${profile} mode`, "info");
+  ctx.ui.notify(`Switched from ${current} to ${target} mode`, "info");
   updateStatus(ctx);
 
   // Leave a permanent mode-switch marker in the session.
@@ -613,7 +625,7 @@ function switchToProfile(ctx: ExtensionContext, profile: ProfileName): void {
   // that stays in the conversation prefix forever.
   pi.sendMessage({
     customType: "safetynet:mode-switch",
-    content: `Switched to ${profile} mode`,
+    content: `Switched to ${target} mode`,
     display: true,
   });
 }
@@ -663,6 +675,16 @@ function registerCommands(pi: ExtensionAPI) {
   pi.registerCommand("safetynet:build", {
     description: "Switch to build mode (full access)",
     handler: async (_args, ctx) => switchToProfile(ctx, "build"),
+  });
+
+  pi.registerCommand("safetynet:ro", {
+    description: "Switch to read-only mode",
+    handler: async (_args, ctx) => switchToProfile(ctx, "ro"),
+  });
+
+  pi.registerCommand("safetynet:rw", {
+    description: "Switch to read-write mode",
+    handler: async (_args, ctx) => switchToProfile(ctx, "rw"),
   });
 
   pi.registerCommand("safetynet:plan-show", {
@@ -759,6 +781,8 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 				trustExternalPaths: trustExternalActive(),
 				promptKeybindings,
 				autoDenyConfig,
+				paradigm: getParadigm(),
+				modeAliases: getModeAliases(),
 			});
 			if (result.details && typeof result.details === "object" && "usage" in result.details) {
 				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
@@ -796,6 +820,8 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 				trustExternalPaths: trustExternalActive(),
 				promptKeybindings,
 				autoDenyConfig,
+				paradigm: getParadigm(),
+				modeAliases: getModeAliases(),
 			});
 			if (result.details && typeof result.details === "object" && "usage" in result.details) {
 				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
@@ -808,9 +834,10 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 
 function registerShortcuts(pi: ExtensionAPI) {
   pi.registerShortcut(loadToggleModeKey() as "ctrl+\\", {
-    description: "Toggle between plan and build profile",
+    description: "Toggle between read-only and read-write mode",
     handler: async (ctx) => {
-      const next: ProfileName = getCurrentProfile() === "plan" ? "build" : "plan";
+      const { read, write } = paradigmModes();
+      const next: ProfileName = getCurrentProfile() === read ? write : read;
       switchToProfile(ctx, next);
     },
   });
@@ -887,6 +914,11 @@ export default function safetynetExtension(api: ExtensionAPI) {
     default: false,
   });
 
+  pi.registerFlag("paradigm", {
+    description: "Which mode pair to use: plan-build or ro-rw",
+    type: "string",
+  });
+
   pi.registerFlag("plan-on-error", {
     description: "Enable plan-on-error mode",
     type: "boolean",
@@ -920,6 +952,17 @@ export default function safetynetExtension(api: ExtensionAPI) {
       currentModelSupportsReasoning = ctx.model.reasoning ?? false;
     }
     currentThinkingLevel = pi.getThinkingLevel();
+
+    // Apply the paradigm FIRST, before profile restore/brand-new default above,
+    // so restoreProfile and the default profile normalize against the correct
+    // paradigm. Config default, overridden by the --paradigm flag.
+    const flagParadigm = pi.getFlag("paradigm");
+    if (flagParadigm === "plan-build" || flagParadigm === "ro-rw") {
+      setParadigm(flagParadigm);
+    } else {
+      setParadigm(loadParadigm());
+    }
+
     await restoreSessionState(ctx, { init: true, notify: true, replaceSession: event.reason === "fork" });
 
     // Brand-new sessions always start in the configured default profile (plan by default).
@@ -930,7 +973,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
       event.reason === "new" ||
       (event.reason === "startup" && ctx.sessionManager.getEntries().length === 0);
     if (isBrandNew) {
-      const defaultProfile = loadDefaultProfile() ?? "plan";
+      const defaultProfile = normalizeProfile(loadDefaultProfile() ?? paradigmModes().read);
       setCurrentProfile(defaultProfile);
       persistProfile(pi);
       updateStatus(ctx);
@@ -949,15 +992,16 @@ export default function safetynetExtension(api: ExtensionAPI) {
     // Ensure plans directory exists
     mkdirSync(plansDir, { recursive: true });
 
-    // Headless: no UI for permission prompts or plan/build switching, so default to build
+    // Headless: no UI for permission prompts or mode switching, so default to
+    // the active paradigm's write mode.
     if (!ctx.hasUI) {
-      setCurrentProfile("build");
+      setCurrentProfile(paradigmModes().write);
       persistProfile(pi);
       updateStatus(ctx);
     }
 
     if (pi.getFlag("build") === true) {
-      setCurrentProfile("build");
+      setCurrentProfile(paradigmModes().write);
       persistProfile(pi);
       updateStatus(ctx);
     }

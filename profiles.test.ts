@@ -1,4 +1,4 @@
-import { describe, it, afterEach } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   getCurrentProfile,
@@ -7,6 +7,12 @@ import {
   EPHEMERAL_CUSTOM_TYPE,
   getLatestCustomEntry,
   restoreProfile,
+  getParadigm,
+  setParadigm,
+  normalizeProfile,
+  getModeAliases,
+  isReadOnly,
+  paradigmModes,
 } from "./profiles/index.ts";
 import {
   restorePlanOnError,
@@ -16,7 +22,15 @@ import {
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 describe("profiles", () => {
+  beforeEach(() => {
+    // Hermetic: reset module state so ambient config (e.g. paradigm: "ro-rw"
+    // in the developer's real config) never leaks into these assertions.
+    setParadigm("plan-build");
+    setCurrentProfile("plan");
+  });
+
   afterEach(() => {
+    setParadigm("plan-build");
     setCurrentProfile("plan");
   });
 
@@ -34,6 +48,72 @@ describe("profiles", () => {
       setCurrentProfile("build");
       setCurrentProfile("plan");
       assert.equal(getCurrentProfile(), "plan");
+    });
+  });
+
+  describe("paradigm", () => {
+    afterEach(() => { setParadigm("plan-build"); setCurrentProfile("plan"); });
+
+    it("defaults to plan-build paradigm", () => {
+      assert.equal(getParadigm(), "plan-build");
+    });
+
+    it("setParadigm changes the active paradigm", () => {
+      setParadigm("ro-rw");
+      assert.equal(getParadigm(), "ro-rw");
+    });
+
+    it("normalizeProfile is identity for canonical plan-build names", () => {
+      assert.equal(normalizeProfile("plan"), "plan");
+      assert.equal(normalizeProfile("build"), "build");
+    });
+
+    it("normalizeProfile maps foreign names under plan-build", () => {
+      assert.equal(normalizeProfile("ro"), "plan");
+      assert.equal(normalizeProfile("rw"), "build");
+    });
+
+    it("under ro-rw, plan maps to ro and build maps to rw", () => {
+      setParadigm("ro-rw");
+      assert.equal(normalizeProfile("plan"), "ro");
+      assert.equal(normalizeProfile("build"), "rw");
+      assert.equal(normalizeProfile("ro"), "ro");
+      assert.equal(normalizeProfile("rw"), "rw");
+    });
+
+    it("setCurrentProfile normalizes to canonical under plan-build", () => {
+      setParadigm("plan-build");
+      setCurrentProfile("rw");
+      assert.equal(getCurrentProfile(), "build");
+    });
+
+    it("setCurrentProfile normalizes to canonical under ro-rw", () => {
+      setParadigm("ro-rw");
+      setCurrentProfile("plan");
+      assert.equal(getCurrentProfile(), "ro");
+    });
+
+    it("getModeAliases is the symmetric bijection", () => {
+      const aliases = getModeAliases();
+      assert.equal(aliases.plan, "ro");
+      assert.equal(aliases.build, "rw");
+      assert.equal(aliases.ro, "plan");
+      assert.equal(aliases.rw, "build");
+    });
+
+    it("isReadOnly returns true for plan and ro", () => {
+      assert.equal(isReadOnly("plan"), true);
+      assert.equal(isReadOnly("ro"), true);
+      assert.equal(isReadOnly("build"), false);
+      assert.equal(isReadOnly("rw"), false);
+    });
+
+    it("paradigmModes returns the active read/write pair", () => {
+      setParadigm("plan-build");
+      assert.deepEqual(paradigmModes(), { read: "plan", write: "build" });
+      setParadigm("ro-rw");
+      assert.deepEqual(paradigmModes(), { read: "ro", write: "rw" });
+      setParadigm("plan-build");
     });
   });
 
@@ -92,6 +172,37 @@ describe("profiles", () => {
       assert.ok(msg.includes("edit"));
       assert.ok(msg.includes("write"));
       assert.ok(msg.includes("read"));
+    });
+
+    it("ro message mentions read-only and includes plan tools as ordinary tools", () => {
+      const msg = getEphemeralContextMessage("ro");
+      assert.ok(msg.includes("READ-ONLY") || msg.includes("read-only"));
+      assert.ok(msg.includes("read"));
+      // plan tools present as ordinary tools
+      assert.ok(msg.includes("planWrite"));
+      assert.ok(msg.includes("planPresent"));
+      assert.ok(msg.includes("planEdit"));
+      assert.ok(!msg.includes("bash"));
+    });
+
+    it("ro message explains the state is deliberate (not a limitation)", () => {
+      const msg = getEphemeralContextMessage("ro");
+      assert.ok(msg.toLowerCase().includes("deliberate"));
+    });
+
+    it("rw message mentions read-write and includes plan tools as ordinary tools", () => {
+      const msg = getEphemeralContextMessage("rw");
+      assert.ok(msg.includes("READ-WRITE") || msg.includes("read-write"));
+      assert.ok(msg.includes("bash"));
+      assert.ok(msg.includes("edit"));
+      assert.ok(msg.includes("planWrite"));
+      assert.ok(msg.includes("planPresent"));
+      assert.ok(msg.includes("planEdit"));
+    });
+
+    it("rw message points to /safetynet:ro for read-only", () => {
+      const msg = getEphemeralContextMessage("rw");
+      assert.ok(msg.includes("/safetynet:ro"));
     });
 
     it("EPHEMERAL_CUSTOM_TYPE is defined", () => {

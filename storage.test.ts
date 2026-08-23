@@ -31,6 +31,14 @@ describe("sanitizeRules", () => {
     assert.deepEqual(sanitizeRules(input), []);
   });
 
+  it("accepts ro/rw mode names (ro-rw paradigm rules)", () => {
+    const input = [
+      { permission: "bash", pattern: "ls *", action: "allow", modes: ["ro", "rw"] },
+      { permission: "edit", pattern: "**", action: "ask", modes: ["rw"] },
+    ];
+    assert.deepEqual(sanitizeRules(input), input);
+  });
+
   it("filters out rules with invalid permission", () => {
     const input = [
       { permission: "invalid", pattern: "ls *", action: "allow", modes: ["build"] },

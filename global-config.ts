@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { AutoDenyConfig, KeybindingsConfig, ProfileName, Ruleset } from "./types.ts";
+import type { AutoDenyConfig, KeybindingsConfig, Paradigm, ProfileName, Ruleset } from "./types.ts";
 import type { PromptKeybindings } from "./prompts.ts";
 import { sanitizeRules } from "./permissions/storage.ts";
 
@@ -19,6 +19,7 @@ interface GlobalConfig {
   rules?: Ruleset;
   subagents?: string[] | null;
   defaultProfile?: ProfileName;
+  paradigm?: Paradigm | string;
   trustExternalPaths?: boolean;
   keybindings?: KeybindingsConfig;
   autoDeny?: AutoDenyConfig;
@@ -71,8 +72,15 @@ export function saveGlobalRules(rules: Ruleset): void {
 export function loadDefaultProfile(): ProfileName | undefined {
   const config = loadConfig();
   const val = config.defaultProfile;
-  if (val === "plan" || val === "build") return val;
+  if (val === "plan" || val === "build" || val === "ro" || val === "rw") return val;
   return undefined;
+}
+
+/** Load the active mode paradigm (plan/build vs ro/rw). Defaults to plan/build. */
+export function loadParadigm(): Paradigm {
+  const config = loadConfig();
+  if (config.paradigm === "ro-rw" || config.paradigm === "plan-build") return config.paradigm;
+  return "plan-build";
 }
 
 /** Load trustExternalPaths from global config. Returns false if unset or not a boolean. */

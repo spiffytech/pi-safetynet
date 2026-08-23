@@ -30,7 +30,7 @@ class SessionRuleStore {
 
 const VALID_ACTIONS = new Set(["allow", "deny", "ask"]);
 const VALID_PERMISSIONS = new Set(["bash", "edit", "read", "*"]);
-const VALID_MODES = new Set(["plan", "build"]);
+const VALID_MODES = new Set(["plan", "build", "ro", "rw"]);
 
 export function sanitizeRules(raw: unknown[]): Ruleset {
   return raw.filter((r): r is Rule => {
