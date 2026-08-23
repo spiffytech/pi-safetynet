@@ -18,7 +18,7 @@ import {
 } from "./permissions/index.ts";
 import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./check.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
-import { resolvePermission as resolvePermissionShared, makeTempRule } from "./pipeline.ts";
+import { resolvePermission as resolvePermissionShared, makeTempRule, resolveDeny, type HazardousDenyState } from "./pipeline.ts";
 
 export interface SubagentSafetynetOpts {
 	taskType: "explore" | "build";
@@ -91,6 +91,10 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 	const { initialRules, cwd, onPermissionDenied, trustExternalPaths = false, promptKeybindings = { denyAbort: "escape" }, autoDenyConfig = { continue: false } } = opts;
 
 	return (pi: ExtensionAPI) => {
+		/** Per-scope hazardous-deny counter for this subagent. Fresh per extension
+		 *  instance — parallel subagents never share the parent's counter. */
+		const hazardousDenyState: HazardousDenyState = { count: 0 };
+
 		/** Deliver a denial to the subagent's model: display:false nudge plus,
 		 *  when visible, a display:true transcript entry for abort paths. */
 		function sendDenial(text: string, mode: "hidden" | "visible"): void {
@@ -124,9 +128,17 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					if (check.action === "deny") {
 						const detail = check.reason ?? `Denied by ruleset: ${(check.unapproved ?? []).join(", ")}`;
 						ctx.ui.notify(`Command denied: ${command} (${detail})`, "error");
-						sendDenial(`Command denied: ${detail}`, ctx.hasUI ? "visible" : "hidden");
-						ctx.abort();
-						return { block: true, reason: `Command denied: ${detail}` };
+						return resolveDeny({
+							permission: "bash",
+							target: command,
+							reason: detail,
+							hazardous: check.hazardous ?? false,
+							autoDeny: autoDenyConfig,
+							displayCtx: ctx,
+							sendDenial,
+							onDenied: onPermissionDenied,
+							state: hazardousDenyState,
+						});
 					}
 
 					return resolvePermission(ctx, {
@@ -177,6 +189,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 
 		pi.on("agent_end", async () => {
 			subagentStorage.temp.clearTurnRules();
+			hazardousDenyState.count = 0;
 			// Do NOT clear parentStorage temp rules here.
 			// The parent's own agent_end handler manages its temp rules.
 			// The subagent's agent_end fires on every subagent turn completion,
@@ -217,6 +230,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 					...(onPermissionDenied ? { onDenied: onPermissionDenied } : {}),
 					keybindings: promptKeybindings,
 					autoDeny: autoDenyConfig,
+					hazardousDenyState,
 					sendManualApproval: () => {
 						pi.sendMessage({
 							customType: "safetynet:manual-approval",

@@ -117,6 +117,8 @@ pi-safetynet automatically denies access to sensitive files, regardless of tool:
 
 These are blocked at the file-permission level — whether accessed via `read`, `edit`, `bash`, or redirect.
 
+Hazardous-file denials do **not** abort the conversation. Instead the model receives the instructional message as a non-aborting nudge, so it can course-correct (ask the user, use an env var) or move on. To stop loophole-hunting, each scope (main session, and each subagent independently) allows up to **3** hazardous denials per turn — the 3rd aborts the turn. The counter resets on `agent_end`.
+
 ### Redirect-aware permission checks
 
 When a bash command includes file redirects, pi-safetynet enforces the corresponding file-level permission:

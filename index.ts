@@ -49,7 +49,7 @@ import {
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./check.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
-import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp } from "./pipeline.ts";
+import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, type HazardousDenyState } from "./pipeline.ts";
 import { bindHerdrBlockedEmitter } from "./herdr-state.ts";
 import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./auto-config.ts";
 import { reviewBumpTurnToken, reviewResetDenies } from "./reviewer.ts";
@@ -79,6 +79,7 @@ async function resolvePermission(
       allowModes,
       keybindings: promptKeybindings,
       autoDeny: autoDenyConfig,
+      hazardousDenyState,
       sendManualApproval: () => {
         pi.sendMessage({
           customType: "safetynet:manual-approval",
@@ -106,6 +107,9 @@ function sendDenial(text: string, mode: "hidden" | "visible"): void {
   });
 }
 let storage: PermissionStorage;
+
+/** Per-scope hazardous-deny counter for the main session. Resets on agent_end. */
+const hazardousDenyState: HazardousDenyState = { count: 0 };
 
 /** Loaded prompt keybindings (denyContinue/denyAbort). Initialized at extension init. */
 let promptKeybindings: PromptKeybindings = { denyAbort: "escape" };
@@ -212,9 +216,17 @@ async function handleToolCall(
           ?? autoDenyConfig.reason
           ?? `Denied by ruleset: ${(check.unapproved ?? []).join(", ")}`;
         ctx.ui.notify(`Command denied: ${command} (${detail})`, "error");
-        sendDenial(detail, autoDenyConfig.continue ? "hidden" : "visible");
-        if (!autoDenyConfig.continue) ctx.abort();
-        return { block: true, reason: `Command denied: ${detail}` };
+        return resolveDeny({
+          permission: "bash",
+          target: command,
+          reason: detail,
+          hazardous: check.hazardous ?? false,
+          autoDeny: autoDenyConfig,
+          displayCtx: ctx,
+          sendDenial,
+          onDenied: undefined,
+          state: hazardousDenyState,
+        });
       }
 
       return resolvePermission(ctx, {
@@ -978,6 +990,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
     refreshSubagentStatus(ctx);
     reviewBumpTurnToken();
     reviewResetDenies();
+    hazardousDenyState.count = 0;
   });
 
   // The context hook fires before every API call. We use it to swap the

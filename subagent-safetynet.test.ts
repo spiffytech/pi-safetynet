@@ -24,6 +24,7 @@ function createMockPi() {
 			activeTools.push(...tools);
 		},
 		appendEntry() {},
+		sendMessage() {},
 	};
 }
 
@@ -343,6 +344,32 @@ describe("createSubagentSafetynetExtension — build", () => {
 			(msg.content as string).includes("BUILD"),
 			"content mentions BUILD mode",
 		);
+	});
+
+	it("hazardous bash deny in subagent: nudge-and-continue, no abort on 1st strike", async () => {
+		const factory = createSubagentSafetynetExtension({
+			taskType: "build",
+			cwd: "/tmp/test",
+			parentCtx: createMockCtx() as any,
+			parentStorage: createMockStorage() as any,
+		});
+		const pi = createMockPi();
+		factory(pi as unknown as ExtensionAPI);
+
+		const sessionHandler = pi.handlers.get("session_start")![0]!;
+		await sessionHandler({}, createMockCtx());
+
+		const toolHandler = pi.handlers.get("tool_call")![0]!;
+		const ctx = createMockCtx();
+		const result = await toolHandler(
+			makeToolCallEvent("bash", { command: "echo x > .env" }),
+			ctx,
+		);
+
+		assert.ok(result, "bash redirect to hazardous file is denied");
+		assert.equal(result!.block, true);
+		assert.equal(ctx.aborted.value, false, "1st hazardous deny must NOT abort the subagent");
+		assert.match(result!.reason, /Sensitive file/, "reason names the sensitive file");
 	});
 });
 

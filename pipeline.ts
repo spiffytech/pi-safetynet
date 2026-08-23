@@ -54,6 +54,10 @@ export interface PipelineDeps {
    *  nudge that survives aborts; "visible" = display:true transcript entry for
    *  abort paths where the block reason is swallowed by the harness. */
   sendDenial?: (text: string, mode: "hidden" | "visible") => void;
+  /** Per-scope hazardous-deny counter. Main session and each subagent get their
+   *  own (parallel subagents must not share the parent's counter). Resets on
+   *  agent_end. Absent → fresh { count: 0 } (test ergonomics). */
+  hazardousDenyState?: HazardousDenyState;
   /** Reviewer subagent spawner. Defaults to runSubagent; injectable for tests. */
   reviewSpawn?: (opts: any) => Promise<any>;
   /** Optional abort signal to pass into the prompt loop (auto escalation). */
@@ -63,6 +67,53 @@ export interface PipelineDeps {
 }
 
 // ─── Pure seams ────────────────────────────────────────────────────────────
+
+/** Cap on hazardous-file denials per turn (per scope). The 3rd hazardous deny
+ *  aborts the turn, stopping loophole-hunting while still letting the model
+ *  course-correct on the first two. */
+export const HAZARDOUS_MAX_DENIES = 3;
+
+/** Per-scope hazardous-deny counter. */
+export interface HazardousDenyState {
+  count: number;
+}
+
+/** Resolve a deny verdict. Hazardous denials nudge-and-continue up to
+ *  HAZARDOUS_MAX_DENIES per scope, then abort. Non-hazardous denials keep
+ *  historical behavior (abort unless autoDeny.continue). */
+export function resolveDeny(opts: {
+  permission: "bash" | "read" | "edit";
+  target: string;
+  reason: string;
+  hazardous: boolean;
+  autoDeny: AutoDenyConfig;
+  displayCtx: { abort(): void };
+  sendDenial: ((text: string, mode: "hidden" | "visible") => void) | undefined;
+  onDenied: (() => void) | undefined;
+  state: HazardousDenyState;
+}): { block: boolean; reason: string } {
+  const detail = denialDetail(opts.permission, opts.target, opts.reason, "ruleset");
+
+  if (opts.hazardous) {
+    opts.state.count++;
+    opts.sendDenial?.(detail, "hidden");
+    if (opts.state.count >= HAZARDOUS_MAX_DENIES) {
+      opts.sendDenial?.(detail, "visible");
+      opts.displayCtx.abort();
+      opts.onDenied?.();
+    }
+    return { block: true, reason: detail };
+  }
+
+  // Non-hazardous: historical behavior.
+  opts.sendDenial?.(detail, "hidden");
+  if (!opts.autoDeny.continue) {
+    opts.sendDenial?.(detail, "visible");
+    opts.displayCtx.abort();
+    opts.onDenied?.();
+  }
+  return { block: true, reason: detail };
+}
 
 /** Check headless-mode deny behavior. Pure function for testability. */
 export function headlessDeny(
@@ -191,14 +242,17 @@ export async function resolvePermission(
     const reason = opts.check.reason
       ?? deps.autoDeny.reason
       ?? `${label} denied: no matching allow rule`;
-    const detail = denialDetail(opts.permission, opts.target, reason, "ruleset");
-    deps.sendDenial?.(detail, "hidden");
-    if (!deps.autoDeny.continue) {
-      deps.sendDenial?.(detail, "visible");
-      deps.displayCtx.abort();
-      deps.onDenied?.();
-    }
-    return { block: true, reason: detail };
+    return resolveDeny({
+      permission: opts.permission,
+      target: opts.target,
+      reason,
+      hazardous: opts.check.hazardous ?? false,
+      autoDeny: deps.autoDeny,
+      displayCtx: deps.displayCtx,
+      sendDenial: deps.sendDenial,
+      onDenied: deps.onDenied,
+      state: deps.hazardousDenyState ?? { count: 0 },
+    });
   }
 
   // ── Auto-review block (runs BEFORE headless check per T13) ───────────────

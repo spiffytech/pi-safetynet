@@ -25,6 +25,10 @@ export interface PermissionCheck {
    *  length/order). */
   unapprovedDisplay?: string[];
   redirectTargets?: Array<{ permission: "read" | "edit"; path: string }>;
+  /** True when the deny is caused by a hazardous/sensitive file (e.g. .env,
+   *  .ssh, credentials).  Hazardous denials nudge-and-continue up to a per-scope
+   *  cap instead of aborting the turn immediately. */
+  hazardous?: boolean;
 }
 
 export function checkFileTarget(
@@ -36,7 +40,7 @@ export function checkFileTarget(
   trustExternalPaths = false,
 ): PermissionCheck {
   if (isHazardousFile(filePath)) {
-    return { action: "deny", reason: "Sensitive file (e.g., .env, .ssh, credentials): contains secrets, access blocked. Don't read or write it. If you need a secret value, ask the user or use an already-set environment variable instead." };
+    return { action: "deny", reason: "Sensitive file (e.g., .env, .ssh, credentials): contains secrets, access blocked. Don't read or write it. If you need a secret value, ask the user or use an already-set environment variable instead.", hazardous: true };
   }
 
   if (SAFE_DEVICE_FILES.has(filePath)) {
@@ -147,6 +151,7 @@ export function checkBashPermission(
   const redirectTargets: Array<{ permission: "read" | "edit"; path: string }> = [];
   const denyReasons: string[] = [];
   let worstAction: PermissionAction = "allow";
+  let hazardous = false;
 
   const absCwd = cwd ?? process.cwd();
 
@@ -186,6 +191,7 @@ export function checkBashPermission(
     if (targetResult.action === "deny") {
       worstAction = "deny";
       redirectTargets.push({ permission: perm, path: target.path });
+      if (targetResult.hazardous) hazardous = true;
       if (targetResult.reason && !denyReasons.includes(targetResult.reason)) {
         denyReasons.push(targetResult.reason);
       }
@@ -196,6 +202,7 @@ export function checkBashPermission(
   }
 
   const result: PermissionCheck = { action: worstAction, unapproved, unapprovedDisplay, redirectTargets };
+  if (hazardous) result.hazardous = true;
   if (worstAction === "deny" && denyReasons.length > 0) {
     result.reason = denyReasons.join("; ");
   }
