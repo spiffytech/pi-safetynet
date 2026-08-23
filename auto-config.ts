@@ -1,6 +1,6 @@
 /**
  * Auto-approve toggle state persistence.
- * Mirrors profiles/plan-on-error.ts pattern.
+ * Mirrors the profiles persistence pattern (per-session custom entries).
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutoApproveConfig } from "./types.ts";

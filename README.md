@@ -58,8 +58,6 @@ pi-safetynet provides a two-tier security model so you can keep the agent read-o
 
 **Build mode** — Full tool access. Allowlisted commands run silently. Unknown commands prompt for approval. Catastrophic commands are always blocked. Escalation from plan to build requires your approval; de-escalation is automatic.
 
-**Plan-on-error** — When enabled (default), pi-safetynet injects a hint into bash error results suggesting the agent switch to plan mode, helpful when the agent gets stuck after a mistake.
-
 **Auto-approve** — `/safetynet:auto` toggles automatic permission approval. When enabled, every action the ruleset flags as Ask is routed to a configurable permissions model (a read-only subagent with read/grep/find/ls) that judges the action against a risk policy instead of prompting the user. It runs alongside whatever profile (plan or build) you're in — status shows `+auto`.
 
 The reviewer returns a JSON assessment `{risk_level, user_authorization, outcome, rationale}`:
@@ -209,7 +207,6 @@ To make `Escape` a no-op in the prompt, simply bind `denyAbort` to something els
 |---|---|---|
 | `--build` | `false` | Start in build mode (full access) |
 | `--allow <rules>` | | Comma-separated allow rules (format: `permission: pattern`) |
-| `--plan-on-error` | `true` | Enable plan-on-error mode |
 | `--trust-external-paths` | `false` | Trust file paths outside the project root (skip external-path approval) |
 **Example:** `pi --build --allow "edit: src/**, bash: npm *"`
 
@@ -220,7 +217,6 @@ To make `Escape` a no-op in the prompt, simply bind `denyAbort` to something els
 | `safetynet:plan` | Switch to plan mode |
 | `safetynet:build` | Switch to build mode |
 | `safetynet:rules` | Show current permission rules |
-| `safetynet:plan-on-error` | Toggle plan-on-error mode |
 | `safetynet:auto` | Toggle auto-approve mode (route Asks through permissions model) |
 
 ## How it compares

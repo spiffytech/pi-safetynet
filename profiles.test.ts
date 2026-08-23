@@ -14,11 +14,6 @@ import {
   isReadOnly,
   paradigmModes,
 } from "./profiles/index.ts";
-import {
-  restorePlanOnError,
-  isPlanOnErrorEnabled,
-  setPlanOnError,
-} from "./profiles/plan-on-error.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 describe("profiles", () => {
@@ -324,48 +319,6 @@ describe("profiles", () => {
       } as unknown as ExtensionContext;
       restoreProfile(ctx);
       assert.equal(getCurrentProfile(), "plan");
-    });
-  });
-
-  describe("restorePlanOnError", () => {
-    afterEach(() => {
-      // reset to default
-      // planOnErrorEnabled is module-private, but setPlanOnError can reset it
-    });
-
-    it("restores enabled=false from session entry", () => {
-      const ctx = {
-        sessionManager: {
-          getEntries: () => [
-            { type: "custom", customType: "safetynet:plan-on-error", data: { enabled: false } },
-          ],
-        },
-      } as unknown as ExtensionContext;
-      restorePlanOnError(ctx);
-      assert.equal(isPlanOnErrorEnabled(), false);
-    });
-
-    it("restores enabled=true from session entry", () => {
-      const ctx = {
-        sessionManager: {
-          getEntries: () => [
-            { type: "custom", customType: "safetynet:plan-on-error", data: { enabled: true } },
-          ],
-        },
-      } as unknown as ExtensionContext;
-      restorePlanOnError(ctx);
-      assert.equal(isPlanOnErrorEnabled(), true);
-    });
-
-    it("keeps default when no entry exists", () => {
-      const ctx = {
-        sessionManager: {
-          getEntries: () => [],
-        },
-      } as unknown as ExtensionContext;
-      restorePlanOnError(ctx);
-      // default is true
-      assert.equal(isPlanOnErrorEnabled(), true);
     });
   });
 });

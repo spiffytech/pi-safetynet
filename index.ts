@@ -2,7 +2,6 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   ToolCallEvent,
-  ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Markdown, Text } from "@earendil-works/pi-tui";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -10,7 +9,6 @@ import {
   createEditTool,
   createWriteTool,
   getMarkdownTheme,
-  isBashToolResult,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -41,13 +39,6 @@ import {
   isReadOnly,
   paradigmModes,
 } from "./profiles/index.ts";
-import {
-  isPlanOnErrorEnabled,
-  setPlanOnError,
-  togglePlanOnError,
-  restorePlanOnError,
-  getPlanOnErrorInstruction,
-} from "./profiles/plan-on-error.ts";
 import {
   showPermissionPrompt,
   type PromptKeybindings,
@@ -306,19 +297,6 @@ async function handleToolCall(
     ctx.ui.notify(`Permission check error: ${err}`, "warning");
     return undefined;
   }
-}
-
-async function handleToolResult(event: ToolResultEvent, _ctx: ExtensionContext) {
-  if (!isPlanOnErrorEnabled() || !event.isError || !isBashToolResult(event)) return;
-
-  const instruction = getPlanOnErrorInstruction();
-  if (!instruction) return;
-
-  pi.sendMessage({
-    customType: "safetynet:plan-on-error",
-    content: instruction,
-    display: false,
-  });
 }
 
 /**
@@ -658,14 +636,6 @@ function registerCommands(pi: ExtensionAPI) {
       updateStatus(ctx);
     },
   });
-  pi.registerCommand("safetynet:plan-on-error", {
-    description: "Toggle plan-on-error mode",
-    handler: async (_args, ctx) => {
-      const enabled = togglePlanOnError(pi);
-      ctx.ui.notify(`Plan-on-error ${enabled ? "enabled" : "disabled"}`, "info");
-      updateStatus(ctx);
-    },
-  });
 
   pi.registerCommand("safetynet:plan", {
     description: "Switch to plan mode",
@@ -705,7 +675,6 @@ function registerCommands(pi: ExtensionAPI) {
 
       const lines = [
         `Current profile: ${profile}`,
-        `Plan-on-error: ${isPlanOnErrorEnabled() ? "enabled" : "disabled"}`,
         "",
         "Rules (last match wins):",
         "",
@@ -850,10 +819,7 @@ function registerShortcuts(pi: ExtensionAPI) {
 
 function updateStatus(ctx: ExtensionContext) {
   const profile = getCurrentProfile();
-  const poe = isPlanOnErrorEnabled();
-  let text = profile;
-  if (poe) text += " +poe";
-  ctx.ui.setStatus("safetynet", text);
+  ctx.ui.setStatus("safetynet", profile);
 }
 
 let pi: ExtensionAPI;
@@ -867,7 +833,6 @@ interface RestoreOpts {
 async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): Promise<void> {
   if (opts?.init) await storage.init(ctx);
   restoreProfile(ctx);
-  restorePlanOnError(ctx);
   restoreSubagentUsage(ctx);
   restoreAutoEnabled(ctx);
 
@@ -917,12 +882,6 @@ export default function safetynetExtension(api: ExtensionAPI) {
   pi.registerFlag("paradigm", {
     description: "Which mode pair to use: plan-build or ro-rw",
     type: "string",
-  });
-
-  pi.registerFlag("plan-on-error", {
-    description: "Enable plan-on-error mode",
-    type: "boolean",
-    default: true,
   });
 
   pi.registerFlag("trust-external-paths", {
@@ -1005,10 +964,6 @@ export default function safetynetExtension(api: ExtensionAPI) {
       persistProfile(pi);
       updateStatus(ctx);
     }
-    if (pi.getFlag("plan-on-error") === true) {
-      setPlanOnError(true, pi);
-      updateStatus(ctx);
-    }
     const allowFlag = pi.getFlag("allow");
     if (typeof allowFlag === "string" && allowFlag.trim()) {
       const rules = parseAllowFlag(allowFlag);
@@ -1019,7 +974,6 @@ export default function safetynetExtension(api: ExtensionAPI) {
   });
 
   pi.on("tool_call", handleToolCall);
-  pi.on("tool_result", handleToolResult);
 
   pi.on("agent_end", async (_event, ctx) => {
     storage.temp.clearTurnRules();
