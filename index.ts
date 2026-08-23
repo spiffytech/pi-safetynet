@@ -50,7 +50,6 @@ import {
 import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./check.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
 import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, type HazardousDenyState } from "./pipeline.ts";
-import { bindHerdrBlockedEmitter } from "./herdr-state.ts";
 import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./auto-config.ts";
 import { reviewBumpTurnToken, reviewResetDenies } from "./reviewer.ts";
 /** Re-exported pure seams for test compatibility. */
@@ -868,12 +867,6 @@ async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): P
 export default function safetynetExtension(api: ExtensionAPI) {
   pi = api;
 
-  // herdr block-signal: emit on the shared extension event bus while a
-  // permission prompt is open. herdr's pi integration listens on
-  // "herdr:blocked" and reports state "blocked" to the sidebar.
-  bindHerdrBlockedEmitter((active, label) =>
-    pi.events.emit("herdr:blocked", active ? { active: true, label } : { active: false }),
-  );
   storage = new PermissionStorage(pi, process.cwd());
 
   // Load configurable prompt keybindings + auto-deny behaviour from global config.

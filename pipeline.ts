@@ -18,7 +18,6 @@ import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
 import { PermissionStorage } from "./permissions/index.ts";
 import type { PermissionCheck } from "./check.ts";
 import { isAutoEnabled, loadAutoApproveConfig, setAutoEnabled } from "./auto-config.ts";
-import { reportBlocked } from "./herdr-state.ts";
 import {
   runPermissionReview, reviewConsecutiveDenies, reviewResetDenies,
   reviewIncrementDenies, reviewTurnToken, reviewBumpTurnToken,
@@ -214,13 +213,6 @@ export function buildApprovalRules(
   return rules;
 }
 
-/** Human-readable label for herdr's blocked message: the command (bash) or
- *  target path (read/edit), truncated. */
-function blockedLabel(opts: { permission: "bash" | "read" | "edit"; target: string }): string {
-  const raw = opts.target.replace(/\s+/g, " ").trim();
-  return raw.length > 60 ? `${raw.slice(0, 57)}…` : raw;
-}
-
 // ─── Shared pipeline ───────────────────────────────────────────────────────
 
 export async function resolvePermission(
@@ -374,12 +366,6 @@ export async function resolvePermission(
   const isFile = opts.permission === "read" || opts.permission === "edit";
   let reprompt = false;
 
-  // herdr: block signal — active for the whole interactive resolution span.
-  // Cleared in finally so approve, deny-abort, Esc, auto-review verdicts, and
-  // reprompt exits all release it. herdr's integration counts increments, so
-  // parallel tool calls (N pending prompts) stay blocked until all clear.
-  reportBlocked(true, blockedLabel(opts));
-  try {
   while (true) {
     const promptOpts: PermissionPromptOptions = {
       permission: opts.permission,
@@ -566,8 +552,5 @@ export async function resolvePermission(
     }
 
     reprompt = true;
-  }
-  } finally {
-    reportBlocked(false);
   }
 }
