@@ -36,7 +36,7 @@ export function checkFileTarget(
   trustExternalPaths = false,
 ): PermissionCheck {
   if (isHazardousFile(filePath)) {
-    return { action: "deny", reason: "Hazardous file (e.g., .env, .ssh, credentials)" };
+    return { action: "deny", reason: "Sensitive file (e.g., .env, .ssh, credentials): contains secrets, access blocked. Don't read or write it. If you need a secret value, ask the user or use an already-set environment variable instead." };
   }
 
   if (SAFE_DEVICE_FILES.has(filePath)) {

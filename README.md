@@ -123,7 +123,7 @@ When a bash command includes file redirects, pi-safetynet enforces the correspon
 
 ```
 echo secret > .env
-         └── parsed as: edit .env → DENIED (hazardous file)
+         └── parsed as: edit .env → DENIED (sensitive file: contains secrets, access blocked)
 
 sort < /etc/passwd
      └── parsed as: read /etc/passwd → ASK (external path)

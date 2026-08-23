@@ -267,6 +267,8 @@ describe("read-only tools (grep/find/ls) use read permission, not bash parsing",
   it("checkFileTarget denies hazardous files", () => {
     const result = checkFileTarget(`${CWD}/.env`, "read", "build", RULES, CWD);
     assert.equal(result.action, "deny");
+    assert.match(result.reason!, /ask the user/, "reason tells the model what to do instead");
+    assert.match(result.reason!, /environment variable/, "reason suggests the alternative");
   });
 
   it("checkFileTarget auto-approves reading the project root itself (ls .)", () => {
