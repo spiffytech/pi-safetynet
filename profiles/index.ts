@@ -86,83 +86,6 @@ export function restoreProfile(ctx: ExtensionContext): void {
 	if (entry?.data?.enabled) currentProfile = normalizeProfile(entry.data.enabled);
 }
 
-/** Tools available in plan mode (soft read-only: plan tools still present). */
-function getPlanModeTools(): string[] {
-	const tools = [
-		"read",
-		"grep",
-		"find",
-		"ls",
-		"planWrite",
-		"planEdit",
-		"planPresent",
-	];
-	const subagents = loadSubagentsConfig();
-	if (subagents.includes("subagent_explore")) tools.push("subagent_explore");
-	return tools;
-}
-
-/** Tools available in build mode. */
-function getBuildModeTools(): string[] {
-	const tools = [
-		"read",
-		"grep",
-		"find",
-		"ls",
-		"bash",
-		"edit",
-		"write",
-		"planWrite",
-		"planEdit",
-		"planPresent",
-	];
-	const subagents = loadSubagentsConfig();
-	if (subagents.includes("subagent_explore")) tools.push("subagent_explore");
-	if (subagents.includes("subagent_build")) tools.push("subagent_build");
-	return tools;
-}
-
-/** Tools available in ro mode. The plan tools are present as ordinary tools
- *  (no special prompting), consistent with the other write-capable tools. */
-function getRoModeTools(): string[] {
-	const tools = [
-		"read",
-		"grep",
-		"find",
-		"ls",
-		"planWrite",
-		"planEdit",
-		"planPresent",
-	];
-	const subagents = loadSubagentsConfig();
-	if (subagents.includes("subagent_explore")) tools.push("subagent_explore");
-	return tools;
-}
-
-/** Tools available in rw mode. The plan tools are present as ordinary tools. */
-function getRwModeTools(): string[] {
-	const tools = [
-		"read",
-		"grep",
-		"find",
-		"ls",
-		"bash",
-		"edit",
-		"write",
-		"planWrite",
-		"planEdit",
-		"planPresent",
-	];
-	const subagents = loadSubagentsConfig();
-	if (subagents.includes("subagent_explore")) tools.push("subagent_explore");
-	if (subagents.includes("subagent_build")) tools.push("subagent_build");
-	return tools;
-}
-
-function toolList(tools: string[]): string {
-	return tools.join(", ");
-}
-
 /** Custom type for the ephemeral context message. */
 export const EPHEMERAL_CUSTOM_TYPE = "safetynet:ephemeral";
 
@@ -199,10 +122,7 @@ Only call planPresent if the user explicitly asks to see the plan without change
 Do NOT start implementing in plan mode. After the plan is presented, the user will decide whether to request revisions or manually switch to build mode with /safetynet:build.${subagents.includes("subagent_explore") ? `
 
 ## Subagents
-You may spawn a read-only subagent with subagent_explore to inspect the codebase in parallel. The subagent gets a clean session and cannot modify files. Provide a complete, self-sufficient prompt.` : ""}
-
-## Available tools
-${toolList(getPlanModeTools())}`;
+You may spawn a read-only subagent with subagent_explore to inspect the codebase in parallel. The subagent gets a clean session and cannot modify files. Provide a complete, self-sufficient prompt.` : ""}`;
 	}
 
 	if (profile === "ro") {
@@ -218,10 +138,7 @@ ask to switch modes. Discuss, explain, analyze, and help reach a decision freely
 If making changes becomes the point, the user will switch you to read-write mode.${subagents.includes("subagent_explore") ? `
 
 ## Subagents
-You may spawn subagent_explore, a read-only subagent, to inspect the codebase in parallel.` : ""}
-
-## Available tools
-${toolList(getRoModeTools())}`;
+You may spawn subagent_explore, a read-only subagent, to inspect the codebase in parallel.` : ""}`;
 	}
 
 	if (profile === "rw") {
@@ -238,10 +155,7 @@ The user can switch to read-only mode with /safetynet:ro.${subagents.length > 0 
 ## Subagents
 You may spawn subagents for parallel or delegated work:${subagents.includes("subagent_explore") ? "\n- subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands." : ""}${subagents.includes("subagent_build") ? "\n- subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval." : ""}
 
-Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.` : ""}
-
-## Available tools
-${toolList(getRwModeTools())}`;
+Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.` : ""}`;
 	}
 
 	// "build"
@@ -259,8 +173,5 @@ To switch back to planning, the user can run /safetynet:plan.${subagents.length 
 ## Subagents
 You may spawn subagents for parallel or delegated work:${subagents.includes("subagent_explore") ? "\n- subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands." : ""}${subagents.includes("subagent_build") ? "\n- subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval." : ""}
 
-Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.` : ""}
-
-## Available tools
-${toolList(getBuildModeTools())}`;
+Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.` : ""}`;
 }

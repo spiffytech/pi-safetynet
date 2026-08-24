@@ -134,20 +134,9 @@ describe("profiles", () => {
       assert.ok(msg.includes("/safetynet:build"));
     });
 
-    it("plan message includes available tools", () => {
+    it("plan message has no Available tools footer", () => {
       const msg = getEphemeralContextMessage("plan");
-      assert.ok(msg.includes("read"));
-      assert.ok(msg.includes("grep"));
-      assert.ok(msg.includes("planWrite"));
-      assert.ok(!msg.includes("bash"));
-      // Parse the Available tools line to check exact tool names
-      const toolsSection = msg.split("Available tools\n")[1]?.split("\n")[0] ?? "";
-      const tools = toolsSection.split(", ").map(t => t.trim());
-      assert.ok(!tools.includes("edit"));
-      assert.ok(!tools.includes("write"));
-      assert.ok(!tools.includes("bash"));
-      assert.ok(tools.includes("read"));
-      assert.ok(tools.includes("planWrite"));
+      assert.ok(!msg.includes("Available tools"));
     });
 
     it("build message mentions full access", () => {
@@ -161,23 +150,15 @@ describe("profiles", () => {
       assert.ok(msg.includes("/safetynet:plan"));
     });
 
-    it("build message includes all tools", () => {
+    it("build message has no Available tools footer", () => {
       const msg = getEphemeralContextMessage("build");
-      assert.ok(msg.includes("bash"));
-      assert.ok(msg.includes("edit"));
-      assert.ok(msg.includes("write"));
-      assert.ok(msg.includes("read"));
+      assert.ok(!msg.includes("Available tools"));
     });
 
-    it("ro message mentions read-only and includes plan tools as ordinary tools", () => {
+    it("ro message mentions read-only and has no Available tools footer", () => {
       const msg = getEphemeralContextMessage("ro");
       assert.ok(msg.includes("READ-ONLY") || msg.includes("read-only"));
-      assert.ok(msg.includes("read"));
-      // plan tools present as ordinary tools
-      assert.ok(msg.includes("planWrite"));
-      assert.ok(msg.includes("planPresent"));
-      assert.ok(msg.includes("planEdit"));
-      assert.ok(!msg.includes("bash"));
+      assert.ok(!msg.includes("Available tools"));
     });
 
     it("ro message explains the state is deliberate (not a limitation)", () => {
@@ -185,14 +166,10 @@ describe("profiles", () => {
       assert.ok(msg.toLowerCase().includes("deliberate"));
     });
 
-    it("rw message mentions read-write and includes plan tools as ordinary tools", () => {
+    it("rw message mentions read-write and has no Available tools footer", () => {
       const msg = getEphemeralContextMessage("rw");
       assert.ok(msg.includes("READ-WRITE") || msg.includes("read-write"));
-      assert.ok(msg.includes("bash"));
-      assert.ok(msg.includes("edit"));
-      assert.ok(msg.includes("planWrite"));
-      assert.ok(msg.includes("planPresent"));
-      assert.ok(msg.includes("planEdit"));
+      assert.ok(!msg.includes("Available tools"));
     });
 
     it("rw message points to /safetynet:ro for read-only", () => {
