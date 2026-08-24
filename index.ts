@@ -819,7 +819,8 @@ function registerShortcuts(pi: ExtensionAPI) {
 
 function updateStatus(ctx: ExtensionContext) {
   const profile = getCurrentProfile();
-  ctx.ui.setStatus("safetynet", profile);
+  const label = isAutoEnabled() ? `${profile} auto` : profile;
+  ctx.ui.setStatus("safetynet", label);
 }
 
 let pi: ExtensionAPI;
