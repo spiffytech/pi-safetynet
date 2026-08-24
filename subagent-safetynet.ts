@@ -274,10 +274,7 @@ function getSubagentContextMessage(taskType: "explore" | "build"): string {
 You are a read-only explore subagent. You can read files and search the codebase.
 
 You CANNOT modify files, run commands, or ask questions.
-Focus on completing the task you were given. Report your findings concisely.
-
-## Available tools
-read, grep, find, ls`;
+Focus on completing the task you were given. Report your findings concisely.`;
 	}
 
 	return `[SAFENET SUBAGENT BUILD MODE]
@@ -288,8 +285,5 @@ Commands are evaluated against the permission ruleset:
 - Unknown commands prompt the user for approval
 - Dangerous commands are blocked
 
-Focus on completing the task you were given. Be concise in your output.
-
-## Available tools
-read, bash, edit, write, grep, find, ls`;
+Focus on completing the task you were given. Be concise in your output.`;
 }
