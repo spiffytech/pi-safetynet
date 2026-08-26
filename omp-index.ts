@@ -1,85 +1,187 @@
 /**
- * omp port of pi-safetynet — Phase 2 skeleton.
+ * omp port of pi-safetynet — Phase 3.
  *
- * Wires omp's `tool_call` interception to the shared core/ permission
- * checkers (same logic as the pi frontend). Phase 2 scope: allow passes
- * silently, ask/deny blocks with a reason. Interactive askDialog prompts,
- * profile/paradigm state machine, reviewer, and subagents come in Phases 3–4.
+ * Wires omp's tool_call interception to the shared core/ checkers plus an
+ * interactive askDialog-based permission pipeline, profile (plan/build/ro/rw)
+ * state machine with journal persistence, and KV-cache-friendly ephemeral
+ * mode-context injection via the context event.
+ *
+ * Not yet ported (Phase 4): LLM auto-approve reviewer, subagent bridging.
  */
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { ProfileName } from "./core/types.ts";
-import { PermissionStorage, getBaselineRules } from "./core/permissions/index.ts";
-import { loadGlobalRules } from "./core/global-config.ts";
+import type { ProfileName, Ruleset } from "./core/types.ts";
+import { PermissionStorage } from "./core/permissions/index.ts";
+import {
+	loadSubagentsConfig,
+	loadTrustExternalPaths,
+	loadDefaultProfile,
+	loadParadigm,
+} from "./core/global-config.ts";
 import { checkBashPermission, checkFileTarget } from "./core/check.ts";
+import {
+	getCurrentProfile,
+	setCurrentProfile,
+	getParadigm,
+	setParadigm,
+	getModeAliases,
+	normalizeProfile,
+	isReadOnly,
+	paradigmModes,
+	persistProfile,
+	restoreProfile,
+	getEphemeralContextMessage,
+	EPHEMERAL_CUSTOM_TYPE,
+} from "./core/profiles.ts";
+import { resolveOmpPermission, type OmpPipelineDeps } from "./omp-pipeline.ts";
 
-/** Rules active for this session: baseline + global + persisted + session. */
-function activeRules(storage: PermissionStorage): ReturnType<PermissionStorage["getAllRules"]> {
-  return storage.getAllRules();
-}
+const SESSION_RULES_CUSTOM_TYPE = "safetynet:session-rules";
 
 export default function safetynetOmp(pi: ExtensionAPI) {
-  pi.setLabel("safetynet");
+	pi.setLabel("safetynet");
 
-  let storage: PermissionStorage | undefined;
+	let storage: PermissionStorage | undefined;
+	let trustExternalPaths = false;
 
-  // Phase 2 runs rules-only with full-access semantics; profiles land in Phase 3.
-  const profile: ProfileName = "build";
+	function deps(ctx: ExtensionContext): OmpPipelineDeps | undefined {
+		if (!storage) return undefined;
+		return {
+			storage,
+			ctx,
+			profile: getCurrentProfile(),
+			trustExternalPaths,
+			modeAliases: getModeAliases(),
+			appendSessionRules: (rules: Ruleset, cwd: string) => {
+				pi.appendEntry(SESSION_RULES_CUSTOM_TYPE, { rules, cwd });
+			},
+		};
+	}
 
-  pi.on("session_start", async (_event, ctx: ExtensionContext) => {
-    storage = new PermissionStorage(ctx.cwd);
-    await storage.init();
-    ctx.ui.setStatus("safetynet", "rules on");
-  });
+	function switchProfile(profile: ProfileName, ctx?: ExtensionContext) {
+		setCurrentProfile(normalizeProfile(profile));
+		persistProfile(pi);
+		ctx?.ui.notify(`safetynet: ${getCurrentProfile()} mode`, "info");
+	}
 
-  pi.on("session_shutdown", async () => {
-    storage = undefined;
-  });
+	// ── Lifecycle ────────────────────────────────────────────────────────────
 
-  pi.on("tool_call", async (event) => {
-    if (!storage) return; // no session yet — fail open like pre-init pi behavior
+	pi.on("session_start", async (_event, ctx) => {
+		storage = new PermissionStorage(ctx.cwd);
+		await storage.init();
+		trustExternalPaths = loadTrustExternalPaths();
+		setParadigm(loadParadigm());
+		const def = loadDefaultProfile();
+		if (def) setCurrentProfile(def);
+		restoreProfile({ sessionManager: ctx.sessionManager });
+		ctx.ui.setStatus(
+			"safetynet",
+			`${getCurrentProfile()}${isReadOnly(getCurrentProfile()) ? "" : " · rules on"}`,
+		);
+	});
 
-    const rules = activeRules(storage);
+	pi.on("session_shutdown", async () => {
+		storage = undefined;
+	});
 
-    if (event.toolName === "bash") {
-      const command = typeof event.input.command === "string" ? event.input.command : "";
-      if (!command) return;
-      const result = checkBashPermission(command, profile, rules, process.cwd());
-      if (result.action === "allow") return;
-      return {
-        block: true,
-        reason:
-          result.reason ??
-          `Blocked pending approval (Phase 2: no interactive prompt yet). Unapproved: ${
-            (result.unapproved ?? []).join("; ") || "see command"
-          }`,
-      };
-    }
+	// Turn-scoped approvals expire when the agent finishes.
+	pi.on("agent_end", async () => {
+		storage?.temp.clearTurnRules();
+	});
 
-    // File-writing / reading tools: check declared path targets.
-    const fileTools: Record<string, "read" | "edit"> = {
-      read: "read",
-      edit: "edit",
-      write: "edit",
-    };
-    const perm = fileTools[event.toolName];
-    if (!perm) return;
+	// ── Mode switching commands ──────────────────────────────────────────────
 
-    const input = event.input as Record<string, unknown>;
-    const paths: string[] = [];
-    if (typeof input.path === "string") paths.push(input.path);
-    if (Array.isArray(input.paths)) {
-      for (const p of input.paths) if (typeof p === "string") paths.push(p);
-    }
-    if (paths.length === 0) return;
+	for (const [cmd, profile] of [
+		["safetynet:plan", "plan"],
+		["safetynet:build", "build"],
+		["safetynet:ro", "ro"],
+		["safetynet:rw", "rw"],
+	] as const) {
+		pi.registerCommand(cmd, {
+			description: `Switch to ${profile} mode`,
+			handler: async (_args, ctx) => switchProfile(profile, ctx),
+		});
+	}
 
-    for (const path of paths) {
-      const result = checkFileTarget(path, perm, profile, rules, process.cwd());
-      if (result.action !== "allow") {
-        return {
-          block: true,
-          reason: result.reason ?? `Blocked pending approval: ${perm} ${path}`,
-        };
-      }
-    }
-  });
+	pi.registerCommand("safetynet:mode", {
+		description: "Show current safetynet mode",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify(`safetynet mode: ${getCurrentProfile()} (${getParadigm()})`, "info");
+		},
+	});
+
+	// ── Ephemeral mode context (KV-cache-friendly suffix swap) ──────────────
+
+	pi.on("context", async (event) => {
+		const messages = event.messages as Array<{ customType?: string }>;
+		const filtered = messages.filter((m) => m.customType !== EPHEMERAL_CUSTOM_TYPE);
+		filtered.push({
+			customType: EPHEMERAL_CUSTOM_TYPE,
+			content: getEphemeralContextMessage(getCurrentProfile()),
+			display: false,
+			timestamp: Date.now(),
+		} as never);
+		return { messages: filtered as typeof event.messages };
+	});
+
+	// ── Tool-call interception ───────────────────────────────────────────────
+
+	pi.on("tool_call", async (event, ctx) => {
+		if (!storage) return; // no session yet
+
+		const profile = getCurrentProfile();
+		const readOnly = isReadOnly(profile);
+
+		// Read-only modes: deny file-mutating tools outright.
+		if (readOnly && ["edit", "write"].includes(event.toolName)) {
+			return {
+				block: true,
+				reason: `${profile === "ro" ? "Read-only" : "Plan"} mode: ${event.toolName} tool unavailable. The user can switch to ${paradigmModes().write} mode.`,
+			};
+		}
+
+		const d = deps(ctx);
+		if (!d) return;
+
+		// ── bash ─────────────────────────────────────────────────────────────
+		if (event.toolName === "bash") {
+			const command = typeof event.input.command === "string" ? event.input.command : "";
+			if (!command) return;
+			const runCheck = () => checkBashPermission(command, profile, storage!.getAllRules(), ctx.cwd, trustExternalPaths, getModeAliases());
+			const resolved = await resolveOmpPermission(d, {
+				permission: "bash",
+				target: command,
+				check: runCheck(),
+				recheck: runCheck,
+			});
+			return resolved;
+		}
+
+		// ── read / edit / write ──────────────────────────────────────────────
+		const perm = event.toolName === "read" ? "read" : "edit";
+		const input = event.input as Record<string, unknown>;
+		const paths: string[] = [];
+		if (typeof input.path === "string") paths.push(input.path);
+		if (Array.isArray(input.paths)) {
+			for (const p of input.paths) if (typeof p === "string") paths.push(p);
+		}
+		if (paths.length === 0) return;
+
+		const runCheck = () => {
+			// Worst action across all targets.
+			let worst: ReturnType<typeof checkFileTarget> = { action: "allow" };
+			for (const path of paths) {
+				const r = checkFileTarget(path, perm, profile, storage!.getAllRules(), ctx.cwd, trustExternalPaths, getModeAliases());
+				if (r.action === "deny") return { ...r, unapproved: [], redirectTargets: [] };
+				if (r.action === "ask") worst = { action: "ask" };
+			}
+			return worst;
+		};
+
+		const resolved = await resolveOmpPermission(d, {
+			permission: perm,
+			target: paths[0]!,
+			check: runCheck(),
+			recheck: runCheck,
+		});
+		return resolved;
+	});
 }

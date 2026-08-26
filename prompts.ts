@@ -27,11 +27,13 @@ export interface DenyEditor {
 }
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { toDisplayPath } from "./core/project.ts";
-import type { PromptKeybindings } from "./core/types.ts";
+import type { PromptKeybindings, PermissionDuration } from "./core/types.ts";
+
+export type { PermissionDuration };
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
-export type PermissionDuration = "once" | "session" | "project" | "global" | "turn";
+// PermissionDuration is defined in core/types.ts and re-exported above.
 
 /**
  * Result from the permission prompt.

@@ -1,5 +1,8 @@
 export type ProfileName = "plan" | "build" | "ro" | "rw";
 export type PermissionAction = "allow" | "deny" | "ask";
+
+/** Approval lifetime chosen at the permission prompt. Shared by both frontends. */
+export type PermissionDuration = "once" | "turn" | "session" | "project" | "global";
 export type PermissionName = "bash" | "edit" | "read" | "*";
 
 export interface Rule {
@@ -95,4 +98,14 @@ export interface JournalEntryLike {
 /** Structural seam for reading a session journal without harness imports. */
 export interface SessionJournalSource {
   sessionManager: { getBranch(): readonly JournalEntryLike[] };
+}
+
+/** Structural seam for appending session-journal entries without harness imports. */
+export interface AppendEntrySink {
+  appendEntry(customType: string, data?: unknown): void;
+}
+
+/** Structural seam for reading the full session journal (not just the branch). */
+export interface SessionEntriesSource {
+  sessionManager: { getEntries(): readonly JournalEntryLike[] };
 }

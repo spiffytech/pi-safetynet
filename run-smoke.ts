@@ -4,7 +4,7 @@
  */
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent";
 
-const result = await discoverAndLoadExtensions([], import.meta.dir);
+const result = await discoverAndLoadExtensions([], process.cwd());
 const paths = result.extensions.map((e: any) => e.path ?? e.sourcePath ?? "");
 console.log("loaded:", JSON.stringify(paths, null, 2));
 console.log("errors:", JSON.stringify(result.errors ?? []));

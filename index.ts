@@ -39,7 +39,7 @@ import {
   normalizeProfile,
   isReadOnly,
   paradigmModes,
-} from "./profiles/index.ts";
+} from "./core/profiles.ts";
 import {
   showPermissionPrompt,
   type PermissionPromptResult,

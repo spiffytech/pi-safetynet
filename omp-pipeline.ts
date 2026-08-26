@@ -1,0 +1,169 @@
+/**
+ * omp permission-resolution pipeline: mirrors pi-safetynet's resolvePermission
+ * loop semantics (allow/deny short-circuits, interactive prompt, rule creation
+ * at chosen scope, recheck) against ctx.ui.askDialog. Auto-review and
+ * hazardous nudge-and-abort arrive with Phase 4.
+ */
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type {
+	ModeAliases,
+	PermissionDuration,
+	ProfileName,
+	Rule,
+	Ruleset,
+	TempRule,
+} from "./core/types.ts";
+import { PermissionStorage } from "./core/permissions/index.ts";
+import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
+import type { PermissionCheck } from "./core/check.ts";
+import { showOmpPermissionPrompt } from "./omp-prompts.ts";
+
+export interface OmpPipelineDeps {
+	storage: PermissionStorage;
+	ctx: ExtensionContext;
+	profile: ProfileName;
+	trustExternalPaths: boolean;
+	modeAliases: ModeAliases;
+	/** Persist session-scoped rules as a journal entry for resume reconstruction. */
+	appendSessionRules?: (rules: Ruleset, cwd: string) => void;
+}
+
+export interface ResolveOpts {
+	permission: "bash" | "read" | "edit";
+	target: string;
+	check: PermissionCheck;
+	recheck: () => PermissionCheck;
+}
+
+function makeTempRule(permission: "bash" | "read" | "edit", pattern: string, modes: ProfileName[]): TempRule {
+	return { rule: { permission, pattern, action: "allow", modes }, expiry: { type: "turn" } };
+}
+
+export async function resolveOmpPermission(
+	deps: OmpPipelineDeps,
+	opts: ResolveOpts,
+): Promise<{ block: boolean; reason: string } | undefined> {
+	let check = opts.check;
+
+	for (;;) {
+		const { action } = check;
+
+		if (action === "allow") return undefined;
+
+		if (action === "deny") {
+			const label = opts.permission[0]!.toUpperCase() + opts.permission.slice(1);
+			const reason =
+				check.reason ?? `${label} denied: no matching allow rule`;
+			return { block: true, reason };
+		}
+
+		// ── ask ──────────────────────────────────────────────────────────────
+		const isFile = opts.permission !== "bash";
+		const canonical: string[] = [];
+		const display: string[] = [];
+
+		if (!isFile) {
+			for (let i = 0; i < (check.unapproved?.length ?? 0); i++) {
+				canonical.push(check.unapproved![i]!);
+				display.push(check.unapprovedDisplay?.[i] ?? check.unapproved![i]!);
+			}
+			for (const rt of check.redirectTargets ?? []) {
+				canonical.push(rt.path);
+				display.push(`${rt.permission}: ${rt.path}`);
+			}
+		} else {
+			canonical.push(opts.target);
+			display.push(opts.target);
+		}
+
+		const result = await showOmpPermissionPrompt(deps.ctx, {
+			canonical,
+			display,
+			title: `safetynet ${opts.permission} approval`,
+		});
+
+		if (result.kind === "deny") {
+			const reason = result.reason ?? `User denied ${opts.permission}`;
+			deps.ctx.abort();
+			return { block: true, reason };
+		}
+
+		const { approved, duration } = result;
+
+		// "once" — approve this invocation only; if some items were skipped,
+		// narrow the check to them and re-prompt.
+		if (duration === "once") {
+			const skipped = canonical.filter((c) => !approved.has(c));
+			if (skipped.length > 0) {
+				check = {
+					...check,
+					unapproved: skipped.filter((s) => !(check.redirectTargets ?? []).some((rt) => rt.path === s)),
+					unapprovedDisplay: skipped.map((s) => display[canonical.indexOf(s)] ?? s),
+					action: "ask",
+					redirectTargets: (check.redirectTargets ?? []).filter((rt) => skipped.includes(rt.path)),
+				};
+				continue;
+			}
+			return undefined;
+		}
+
+		// Build rules from approved items (mirrors pi pipeline semantics).
+		const redirectOriginals = new Set((check.redirectTargets ?? []).map((rt) => rt.path));
+		const patterns: Array<{ permission: "bash" | "read" | "edit"; pattern: string }> = [];
+		for (const [original] of approved) {
+			if (redirectOriginals.has(original)) continue;
+			patterns.push({
+				permission: opts.permission,
+				pattern: isFile ? toRecursiveGlob(normalizePathForMatching(original, deps.ctx.cwd)) : original,
+			});
+		}
+		for (const rt of check.redirectTargets ?? []) {
+			if (approved.has(rt.path)) {
+				patterns.push({
+					permission: rt.permission,
+					pattern: toRecursiveGlob(normalizePathForMatching(rt.path, deps.ctx.cwd)),
+				});
+			}
+		}
+		void duration; // scope handled below
+
+		const newRules: Ruleset = patterns.map(
+			(p): Rule => ({ permission: p.permission, pattern: p.pattern, action: "allow", modes: [deps.profile] }),
+		);
+		const tempRules: TempRule[] = patterns.map((p) => makeTempRule(p.permission, p.pattern, [deps.profile]));
+
+		if (duration === "turn") {
+			deps.storage.addTempRules(tempRules);
+		} else if (duration === "session") {
+			deps.storage.addSessionRules(newRules);
+			deps.appendSessionRules?.(newRules, deps.ctx.cwd);
+		} else if (duration === "project") {
+			await deps.storage.addPersistedRules(newRules);
+		} else if (duration === "global") {
+			await deps.storage.addGlobalRules(newRules);
+		}
+
+		// Recheck after rule creation.
+		check = opts.recheck();
+		if (check.action === "allow") return undefined;
+		if (check.action === "deny") {
+			deps.ctx.ui.notify("Rule(s) added but still denied.", "warning");
+			return { block: true, reason: "Still denied after rule update" };
+		}
+		// still ask → loop back into the prompt
+	}
+}
+
+/** Convenience wrapper: run a checker and resolve through the full pipeline.
+ *  Returns undefined when approved (tool should run), or block/reason. */
+export async function checkAndResolve(
+	deps: OmpPipelineDeps,
+	opts: {
+		permission: "bash" | "read" | "edit";
+		runCheck: () => PermissionCheck;
+		recheck: () => PermissionCheck;
+	},
+): Promise<{ block: boolean; reason: string } | undefined> {
+	const check = opts.runCheck();
+	return resolveOmpPermission(deps, { permission: opts.permission, target: "", check, recheck: opts.recheck });
+}

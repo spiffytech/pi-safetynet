@@ -4,7 +4,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutoApproveConfig } from "./core/types.ts";
-import { getLatestCustomEntry } from "./profiles/index.ts";
+import { getLatestCustomEntry } from "./core/profiles.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";

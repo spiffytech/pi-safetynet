@@ -9,4 +9,4 @@ for (const e of result.extensions as any[]) {
 	console.log("ext:", e.name ?? "(no name)", "|", e.path ?? e.sourcePath ?? "?");
 }
 console.log("result keys:", Object.keys(result));
-console.log("errors:", JSON.stringify((result as any).errors ?? result.loadErrors ?? []));
+console.log("errors:", JSON.stringify((result as any).errors ?? []));
