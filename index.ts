@@ -47,7 +47,7 @@ import {
 import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./core/check.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, type HazardousDenyState } from "./pipeline.ts";
-import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./auto-config.ts";
+import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./core/auto-config-state.ts";
 import { reviewBumpTurnToken, reviewResetDenies } from "./core/reviewer-state.ts";
 /** Re-exported pure seams for test compatibility. */
 export const headlessDeny = hd;

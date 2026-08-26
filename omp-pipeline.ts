@@ -17,6 +17,16 @@ import { PermissionStorage } from "./core/permissions/index.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import type { PermissionCheck } from "./core/check.ts";
 import { showOmpPermissionPrompt } from "./omp-prompts.ts";
+import { spawnReviewer } from "./omp-subagent.ts";
+import {
+	runPermissionReview,
+	reviewIsActive,
+	reviewSetActive,
+	reviewTurnToken,
+	reviewIncrementDenies,
+	reviewResetDenies,
+} from "./core/reviewer-state.ts";
+import { loadAutoApproveConfig, isAutoEnabled } from "./core/auto-config-state.ts";
 
 export interface OmpPipelineDeps {
 	storage: PermissionStorage;
@@ -39,6 +49,29 @@ function makeTempRule(permission: "bash" | "read" | "edit", pattern: string, mod
 	return { rule: { permission, pattern, action: "allow", modes }, expiry: { type: "turn" } };
 }
 
+/** Turn-scoped rules for an auto-review allow verdict. Mirrors pi's
+ *  buildApprovalRules: one bash rule per unapproved subcommand, one read/edit
+ *  rule per redirect target, else the file itself for plain file tool calls. */
+function buildApprovalTempRules(
+	permission: "bash" | "read" | "edit",
+	check: PermissionCheck,
+	target: string,
+	cwd: string,
+	modes: ProfileName[],
+): TempRule[] {
+	const rules: TempRule[] = [];
+	for (const sub of check.unapproved ?? []) {
+		rules.push(makeTempRule(permission, sub, modes));
+	}
+	for (const rt of check.redirectTargets ?? []) {
+		rules.push(makeTempRule(rt.permission, toRecursiveGlob(normalizePathForMatching(rt.path, cwd)), modes));
+	}
+	if (rules.length === 0 && (permission === "read" || permission === "edit")) {
+		rules.push(makeTempRule(permission, toRecursiveGlob(normalizePathForMatching(target, cwd)), modes));
+	}
+	return rules;
+}
+
 export async function resolveOmpPermission(
 	deps: OmpPipelineDeps,
 	opts: ResolveOpts,
@@ -58,6 +91,51 @@ export async function resolveOmpPermission(
 		}
 
 		// ── ask ──────────────────────────────────────────────────────────────
+
+		// Auto-review: a read-only reviewer subagent judges the action against
+		// the risk policy before we bother the user. Circuit-breaker state and
+		// verdict classification live in core/reviewer-state.ts.
+		if (isAutoEnabled() && !reviewIsActive()) {
+			const config = loadAutoApproveConfig();
+			const token = reviewTurnToken();
+			reviewSetActive(true);
+			try {
+				const verdict = await runPermissionReview(
+					{
+						permission: opts.permission,
+						target: opts.target,
+						check,
+						cwd: deps.ctx.cwd,
+						parentCtx: { sessionManager: deps.ctx.sessionManager },
+						profile: deps.profile,
+						timeoutMs: config.timeoutMs ?? 90000,
+					},
+					{ spawn: (o) => spawnReviewer({ ...o, cwd: deps.ctx.cwd }) },
+				);
+				// Discard stale verdicts (their turn already ended).
+				if (token === reviewTurnToken() && verdict.kind === "assessment") {
+					if (verdict.assessment.outcome === "allow") {
+						reviewResetDenies();
+						// Turn-scoped rules so the approval dies with the turn.
+						const tempRules = buildApprovalTempRules(opts.permission, check, opts.target, deps.ctx.cwd, [deps.profile]);
+						deps.storage.addTempRules(tempRules);
+						const recheckResult = opts.recheck();
+						if (recheckResult.action === "allow") return undefined;
+					} else if (verdict.assessment.outcome === "deny") {
+						const count = reviewIncrementDenies();
+						const maxDenials = config.maxDenials ?? 3;
+						if (count >= maxDenials) {
+							return { block: true, reason: `Auto-review denied ${count} consecutive actions; disabling auto-approve for this session.` };
+						}
+						return { block: true, reason: `Auto-review denied: ${verdict.assessment.rationale}` };
+					}
+				}
+				// stale / transient / fatal → fall through to the interactive prompt
+			} finally {
+				reviewSetActive(false);
+			}
+		}
+
 		const isFile = opts.permission !== "bash";
 		const canonical: string[] = [];
 		const display: string[] = [];

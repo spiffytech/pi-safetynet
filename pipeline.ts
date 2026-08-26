@@ -18,7 +18,7 @@ import { showPermissionPrompt } from "./prompts.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import { PermissionStorage } from "./core/permissions/index.ts";
 import type { PermissionCheck } from "./core/check.ts";
-import { isAutoEnabled, loadAutoApproveConfig, setAutoEnabled } from "./auto-config.ts";
+import { isAutoEnabled, loadAutoApproveConfig, setAutoEnabled } from "./core/auto-config-state.ts";
 import {
   runPermissionReview, reviewConsecutiveDenies, reviewResetDenies,
   reviewIncrementDenies, reviewTurnToken, reviewBumpTurnToken,

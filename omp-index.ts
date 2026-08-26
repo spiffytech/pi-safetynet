@@ -33,6 +33,14 @@ import {
 	EPHEMERAL_CUSTOM_TYPE,
 } from "./core/profiles.ts";
 import { resolveOmpPermission, type OmpPipelineDeps } from "./omp-pipeline.ts";
+import {
+	isAutoEnabled,
+	toggleAutoEnabled,
+	restoreAutoEnabled,
+	resetAutoEnabledForNewSession,
+	setAutoEnabled,
+} from "./core/auto-config-state.ts";
+import { reviewBumpTurnToken } from "./core/reviewer-state.ts";
 
 const SESSION_RULES_CUSTOM_TYPE = "safetynet:session-rules";
 
@@ -72,6 +80,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		const def = loadDefaultProfile();
 		if (def) setCurrentProfile(def);
 		restoreProfile({ sessionManager: ctx.sessionManager });
+		restoreAutoEnabled({ sessionManager: ctx.sessionManager });
 		ctx.ui.setStatus(
 			"safetynet",
 			`${getCurrentProfile()}${isReadOnly(getCurrentProfile()) ? "" : " · rules on"}`,
@@ -85,6 +94,17 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 	// Turn-scoped approvals expire when the agent finishes.
 	pi.on("agent_end", async () => {
 		storage?.temp.clearTurnRules();
+		reviewBumpTurnToken(); // invalidate in-flight auto-review verdicts
+	});
+
+	// ── Auto-approve toggle ──────────────────────────────────────────────────
+
+	pi.registerCommand("safetynet:auto", {
+		description: "Toggle LLM auto-approval of low-risk actions",
+		handler: async (_args, ctx) => {
+			const on = toggleAutoEnabled(pi);
+			ctx.ui.notify(`safetynet auto-approve: ${on ? "ON" : "OFF"}`, "info");
+		},
 	});
 
 	// ── Mode switching commands ──────────────────────────────────────────────
