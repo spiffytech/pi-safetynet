@@ -1,9 +1,9 @@
 /**
- * reviewer.ts — spawns a permission-review subagent and classifies the result.
+ * reviewer-state.ts — permission-review circuit-breaker state and review
+ * execution. Harness-free: transcript source and subagent spawn are injected.
  */
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ReviewVerdict, ReviewerAssessment } from "./core/types.ts";
-import type { PermissionCheck } from "./core/check.ts";
+import type { ReviewVerdict, ReviewerAssessment, SessionEntriesSource } from "./types.ts";
+import type { PermissionCheck } from "./check.ts";
 import {
   REVIEWER_SYSTEM_PROMPT,
   formatActionJson,
@@ -11,7 +11,7 @@ import {
   compactTranscript,
   type ActionJsonOpts,
   type TranscriptEntry,
-} from "./core/reviewer-prompt.ts";
+} from "./reviewer-prompt.ts";
 
 // ─── Module state (circuit breaker + turn token) ───────────────────────────
 
@@ -59,7 +59,7 @@ export interface SpawnOpts {
   systemPrompt?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
-  parentCtx: ExtensionContext;
+  parentCtx: SessionEntriesSource & { cwd?: string };
   parentStorage?: any;
   initialRules?: any[];
   promptKeybindings?: any;
@@ -81,7 +81,7 @@ export interface ReviewCallOpts {
   check: PermissionCheck;
   cwd: string;
   /** Parent session's context — used for transcript. */
-  parentCtx: ExtensionContext;
+  parentCtx: SessionEntriesSource & { cwd?: string };
   /** Profile string for action JSON (plan/build). */
   profile: string;
   signal?: AbortSignal;

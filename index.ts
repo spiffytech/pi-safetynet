@@ -48,7 +48,7 @@ import { checkBashPermission, checkFileTarget, checkToolPermission, type Permiss
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, type HazardousDenyState } from "./pipeline.ts";
 import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./auto-config.ts";
-import { reviewBumpTurnToken, reviewResetDenies } from "./reviewer.ts";
+import { reviewBumpTurnToken, reviewResetDenies } from "./core/reviewer-state.ts";
 /** Re-exported pure seams for test compatibility. */
 export const headlessDeny = hd;
 export const denyResultFromPrompt = drfp;

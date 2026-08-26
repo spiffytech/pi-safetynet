@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { resolvePermission, denialDetail, buildApprovalRules } from "./pipeline.ts";
 import { checkFileTarget } from "./core/check.ts";
 import { setAutoEnabled } from "./auto-config.ts";
-import { resetReviewStateForTests } from "./reviewer.ts";
+import { resetReviewStateForTests } from "./core/reviewer-state.ts";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -527,7 +527,7 @@ describe("resolvePermission — delayed pending auto verdict on null prompt", ()
     // Wait for the pipeline to reach the prompt, then deliver the verdict
     // the way the background retry would: store it, then dismiss the prompt.
     await new Promise((r) => setTimeout(r, 5));
-    const { setPendingAutoResult } = await import("./reviewer.ts");
+    const { setPendingAutoResult } = await import("./core/reviewer-state.ts");
     setPendingAutoResult(allowAssessment());
     resolvePrompt(null);
 

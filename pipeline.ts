@@ -25,7 +25,7 @@ import {
   reviewIsActive, reviewSetActive,
   getPendingAutoResult, clearPendingAutoResult, setPendingAutoResult,
   resetReviewStateForTests,
-} from "./reviewer.ts";
+} from "./core/reviewer-state.ts";
 
 // ─── Deps ─────────────────────────────────────────────────────────────────
 
