@@ -72,3 +72,27 @@ export interface AutoApproveConfig {
   retryIntervalMs?: number;
   maxRetries?: number;
 }
+
+/** Configurable prompt keybindings (key identifiers as understood by
+ * pi-tui's `matchesKey`, e.g. "n", "shift+n", "escape", "ctrl+c").
+ * Uppercase letters cannot be expressed as a bare capital (pi-tui lowercases
+ * single-char ids); use the shifted form, e.g. "shift+n" for N. */
+export interface PromptKeybindings {
+  /** Key id for deny-and-continue, or undefined to disable the shortcut. */
+  denyContinue?: string;
+  /** Key id for deny-and-abort. Always set (defaults to "escape"). */
+  denyAbort: string;
+}
+
+/** Minimal structural view of a session-journal entry (custom entries carry
+ * customType/data). Lets core/ read journals without importing harness types. */
+export interface JournalEntryLike {
+  type?: string;
+  customType?: string;
+  data?: unknown;
+}
+
+/** Structural seam for reading a session journal without harness imports. */
+export interface SessionJournalSource {
+  sessionManager: { getBranch(): readonly JournalEntryLike[] };
+}

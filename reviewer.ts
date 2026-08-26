@@ -2,8 +2,8 @@
  * reviewer.ts — spawns a permission-review subagent and classifies the result.
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ReviewVerdict, ReviewerAssessment } from "./types.ts";
-import type { PermissionCheck } from "./check.ts";
+import type { ReviewVerdict, ReviewerAssessment } from "./core/types.ts";
+import type { PermissionCheck } from "./core/check.ts";
 import {
   REVIEWER_SYSTEM_PROMPT,
   formatActionJson,
@@ -11,7 +11,7 @@ import {
   compactTranscript,
   type ActionJsonOpts,
   type TranscriptEntry,
-} from "./reviewer-prompt.ts";
+} from "./core/reviewer-prompt.ts";
 
 // ─── Module state (circuit breaker + turn token) ───────────────────────────
 

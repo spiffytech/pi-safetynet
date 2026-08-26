@@ -26,7 +26,8 @@ export interface DenyEditor {
   invalidate(): void;
 }
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { toDisplayPath } from "./project.ts";
+import { toDisplayPath } from "./core/project.ts";
+import type { PromptKeybindings } from "./core/types.ts";
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -104,14 +105,6 @@ interface DurationOption {
 }
 
 type FocusZone = "commands" | "duration" | "deny";
-
-export interface PromptKeybindings {
-  /** Key id (pi-tui matchesKey form) for deny-and-continue, or undefined to
-   *  disable the single-key shortcut. */
-  denyContinue?: string;
-  /** Key id for deny-and-abort. Always set (defaults to "escape"). */
-  denyAbort: string;
-}
 
 const MAX_DISPLAY_CHARS = 280;
 

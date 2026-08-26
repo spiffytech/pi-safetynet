@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Paradigm, ProfileName, ModeAliases } from "../types.ts";
-import { loadDefaultProfile, loadParadigm, loadSubagentsConfig } from "../global-config.ts";
+import type { Paradigm, ProfileName, ModeAliases } from "../core/types.ts";
+import { loadDefaultProfile, loadParadigm, loadSubagentsConfig } from "../core/global-config.ts";
 
 let currentParadigm: Paradigm = loadParadigm();
 

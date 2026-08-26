@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { resolvePermission, denialDetail, buildApprovalRules } from "./pipeline.ts";
-import { checkFileTarget } from "./check.ts";
+import { checkFileTarget } from "./core/check.ts";
 import { setAutoEnabled } from "./auto-config.ts";
 import { resetReviewStateForTests } from "./reviewer.ts";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";

@@ -3,7 +3,7 @@
  * Mirrors the profiles persistence pattern (per-session custom entries).
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AutoApproveConfig } from "./types.ts";
+import type { AutoApproveConfig } from "./core/types.ts";
 import { getLatestCustomEntry } from "./profiles/index.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";

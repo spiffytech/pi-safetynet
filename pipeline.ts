@@ -11,12 +11,13 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   Rule, Ruleset, TempRule, ProfileName, PermissionAction, AutoDenyConfig,
-} from "./types.ts";
-import type { PermissionPromptOptions, PermissionPromptResult, PromptKeybindings, PermissionDuration } from "./prompts.ts";
+} from "./core/types.ts";
+import type { PermissionPromptOptions, PermissionPromptResult, PermissionDuration } from "./prompts.ts";
+import type { PromptKeybindings } from "./core/types.ts";
 import { showPermissionPrompt } from "./prompts.ts";
-import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
-import { PermissionStorage } from "./permissions/index.ts";
-import type { PermissionCheck } from "./check.ts";
+import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
+import { PermissionStorage } from "./core/permissions/index.ts";
+import type { PermissionCheck } from "./core/check.ts";
 import { isAutoEnabled, loadAutoApproveConfig, setAutoEnabled } from "./auto-config.ts";
 import {
   runPermissionReview, reviewConsecutiveDenies, reviewResetDenies,
