@@ -109,6 +109,8 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const on = toggleAutoEnabled(pi);
 			ctx.ui.notify(`safetynet auto-approve: ${on ? "ON" : "OFF"}`, "info");
+			const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
+			ctx.ui.setStatus("safetynet", label);
 		},
 	});
 
