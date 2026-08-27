@@ -16,7 +16,7 @@ import type {
 import { PermissionStorage } from "./core/permissions/index.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import type { PermissionCheck } from "./core/check.ts";
-import { showOmpPermissionPrompt } from "./omp-prompts.ts";
+import { showOmpPermissionPrompt } from "./omp-permission-prompt.ts";
 import { spawnReviewer } from "./omp-subagent.ts";
 import {
 	runPermissionReview,
@@ -77,6 +77,7 @@ export async function resolveOmpPermission(
 	opts: ResolveOpts,
 ): Promise<{ block: boolean; reason: string } | undefined> {
 	let check = opts.check;
+	let reprompt = false;
 
 	for (;;) {
 		const { action } = check;
@@ -155,30 +156,41 @@ export async function resolveOmpPermission(
 		}
 
 		const result = await showOmpPermissionPrompt(deps.ctx, {
-			canonical,
-			display,
-			title: `safetynet ${opts.permission} approval`,
+			permission: opts.permission,
+			target: opts.target,
+			unapproved: canonical,
+			unapprovedDisplay: display,
+			...(check.reason ? { reason: check.reason } : {}),
+			...(reprompt ? { reprompt: true } : {}),
+			keybindings: { denyAbort: "escape" },
 		});
 
-		if (result.kind === "deny") {
-			const reason = result.reason ?? `User denied ${opts.permission}`;
+		if (!result) {
+			// Esc / abort → deny and end the turn.
 			deps.ctx.abort();
+			return { block: true, reason: `User denied ${opts.permission}` };
+		}
+
+		if (result.kind === "deny") {
+			const reason = result.explanation
+				? `User denied ${opts.permission}: ${result.explanation}`
+				: `User denied ${opts.permission}`;
 			return { block: true, reason };
 		}
 
-		const { approved, duration } = result;
+		const { approved, skipped, skippedDisplay, duration } = result;
 
 		// "once" — approve this invocation only; if some items were skipped,
 		// narrow the check to them and re-prompt.
 		if (duration === "once") {
-			const skipped = canonical.filter((c) => !approved.has(c));
-			if (skipped.length > 0) {
+			const skippedItems = skipped.length > 0 ? skipped : canonical.filter((c) => !approved.has(c));
+			if (skippedItems.length > 0) {
 				check = {
 					...check,
-					unapproved: skipped.filter((s) => !(check.redirectTargets ?? []).some((rt) => rt.path === s)),
-					unapprovedDisplay: skipped.map((s) => display[canonical.indexOf(s)] ?? s),
+					unapproved: skippedItems.filter((s) => !(check.redirectTargets ?? []).some((rt) => rt.path === s)),
+					unapprovedDisplay: skippedItems.map((s) => display[canonical.indexOf(s)] ?? s),
 					action: "ask",
-					redirectTargets: (check.redirectTargets ?? []).filter((rt) => skipped.includes(rt.path)),
+					redirectTargets: (check.redirectTargets ?? []).filter((rt) => skippedItems.includes(rt.path)),
 				};
 				continue;
 			}
@@ -228,7 +240,8 @@ export async function resolveOmpPermission(
 			deps.ctx.ui.notify("Rule(s) added but still denied.", "warning");
 			return { block: true, reason: "Still denied after rule update" };
 		}
-		// still ask → loop back into the prompt
+		// still ask → loop back into the prompt, flagging the reprompt.
+		reprompt = true;
 	}
 }
 
