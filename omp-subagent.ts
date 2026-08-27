@@ -7,6 +7,8 @@
  * Mirrors the SpawnOpts/SpawnResult seam pi-safetynet uses.
  */
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionEntriesSource } from "./core/types.ts";
 
 export interface OmpSpawnResult {
@@ -20,8 +22,17 @@ export interface OmpSpawnOpts {
 	systemPrompt?: string;
 	timeoutMs?: number;
 	cwd: string;
-	/** Reviewer model pattern (provider/model or model id). Falls back to
-	 *  SAFENET_REVIEWER_MODEL env, then omp defaults. */
+	/** Resolved reviewer model object (from the parent, where provider
+	 *  extensions are loaded). Passing the object — not a deferred
+	 *  modelPattern — lets the child session select it without loading
+	 *  provider plugins itself. */
+	model?: Model;
+	/** Parent's model registry (carries provider auth). Forwarded like
+	 *  omp's own task executor does for subagents. */
+	modelRegistry?: ModelRegistry;
+	/** Reviewer model pattern (provider/model or model id). Used only when
+	 *  no resolved model object was provided. Falls back to
+	 *  SAFENET_REVIEWER_MODEL env. */
 	modelPattern?: string;
 }
 
@@ -38,11 +49,16 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 			toolNames: ["read", "grep", "glob"],
 			...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
 			...(opts.timeoutMs ? { deadline: Date.now() + opts.timeoutMs } : {}),
-			...(opts.modelPattern
-				? { modelPattern: opts.modelPattern }
-				: process.env.SAFENET_REVIEWER_MODEL
-					? { modelPattern: process.env.SAFENET_REVIEWER_MODEL }
-					: {}),
+			...(opts.model ? { model: opts.model } : {}),
+			...(opts.modelRegistry ? { modelRegistry: opts.modelRegistry } : {}),
+			// modelPattern only when no resolved model object is available.
+			...(opts.model
+				? {}
+				: opts.modelPattern
+					? { modelPattern: opts.modelPattern }
+					: process.env.SAFENET_REVIEWER_MODEL
+						? { modelPattern: process.env.SAFENET_REVIEWER_MODEL }
+						: {}),
 		});
 
 		await session.prompt(opts.prompt);

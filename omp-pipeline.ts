@@ -18,6 +18,25 @@ import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import type { PermissionCheck } from "./core/check.ts";
 import { showOmpPermissionPrompt } from "./omp-permission-prompt.ts";
 import { spawnReviewer } from "./omp-subagent.ts";
+
+/** Resolve the reviewer model in the parent session (where provider
+ *  extensions like hyper are loaded and authenticated) so the child
+ *  session can select it via the resolved Model object instead of a
+ *  deferred modelPattern that fails without provider plugins loaded.
+ *  Returns an object fit for spreading into OmpSpawnOpts. */
+function resolveReviewerModel(
+	ctx: ExtensionContext,
+	configModel?: string,
+): { model?: unknown; modelRegistry?: unknown; modelPattern?: string } {
+	const spec = configModel ?? process.env.SAFENET_REVIEWER_MODEL;
+	if (spec) {
+		const resolved = ctx.models.resolve(spec);
+		if (resolved) {
+			return { model: resolved, modelRegistry: ctx.modelRegistry };
+		}
+	}
+	return spec ? { modelPattern: spec } : {};
+}
 import {
 	runPermissionReview,
 	reviewIsActive,
@@ -114,7 +133,12 @@ export async function resolveOmpPermission(
 						profile: deps.profile,
 						timeoutMs: config.timeoutMs ?? 90000,
 					},
-					{ spawn: (o) => spawnReviewer({ ...o, cwd: deps.ctx.cwd, ...(config.model ? { modelPattern: config.model } : {}) }) },
+					{ spawn: (o) =>
+						spawnReviewer({
+							...o,
+							cwd: deps.ctx.cwd,
+							...resolveReviewerModel(deps.ctx, config.model),
+						}) },
 				);
 				// Discard stale verdicts (their turn already ended).
 				if (token === reviewTurnToken() && verdict.kind === "assessment") {
