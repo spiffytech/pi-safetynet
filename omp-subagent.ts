@@ -48,11 +48,15 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 		await session.prompt(opts.prompt);
 
 		// Extract final assistant text from the session journal.
+		// omp's SessionMessageEntry stores the message in `entry.message`
+		// (an AgentMessage), NOT `entry.data` — reading the wrong field made
+		// the reviewer output always empty, so every verdict was "transient"
+		// and auto mode silently fell through to the interactive prompt.
 		const sm = session.sessionManager as unknown as SessionEntriesSource["sessionManager"];
 		let text = "";
 		for (const entry of sm.getEntries()) {
 			if (entry.type !== "message") continue;
-			const msg = entry.data as
+			const msg = (entry as { message?: unknown }).message as
 				| { role?: string; content?: string | Array<{ type: string; text?: string }> }
 				| undefined;
 			if (msg?.role !== "assistant") continue;
