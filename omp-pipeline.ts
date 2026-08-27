@@ -36,6 +36,9 @@ export interface OmpPipelineDeps {
 	modeAliases: ModeAliases;
 	/** Persist session-scoped rules as a journal entry for resume reconstruction. */
 	appendSessionRules?: (rules: Ruleset, cwd: string) => void;
+	/** Signal blocked/active state to external watchers (herdr). Emitted
+	 *  with `{ active, label }` on the `herdr:blocked` event-bus channel. */
+	signalBlocked?: (active: boolean, label?: string) => void;
 }
 
 export interface ResolveOpts {
@@ -161,15 +164,21 @@ export async function resolveOmpPermission(
 			display.push(opts.target);
 		}
 
-		const result = await showOmpPermissionPrompt(deps.ctx, {
-			permission: opts.permission,
-			target: opts.target,
-			unapproved: canonical,
-			unapprovedDisplay: display,
-			...(check.reason ? { reason: check.reason } : {}),
-			...(reprompt ? { reprompt: true } : {}),
-			keybindings: { denyAbort: "escape" },
-		});
+		deps.signalBlocked?.(true, `safetynet ${opts.permission} approval`);
+		let result: Awaited<ReturnType<typeof showOmpPermissionPrompt>>;
+		try {
+			result = await showOmpPermissionPrompt(deps.ctx, {
+				permission: opts.permission,
+				target: opts.target,
+				unapproved: canonical,
+				unapprovedDisplay: display,
+				...(check.reason ? { reason: check.reason } : {}),
+				...(reprompt ? { reprompt: true } : {}),
+				keybindings: { denyAbort: "escape" },
+			});
+		} finally {
+			deps.signalBlocked?.(false);
+		}
 
 		if (!result) {
 			// Esc / abort → deny and end the turn.

@@ -62,6 +62,9 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 			appendSessionRules: (rules: Ruleset, cwd: string) => {
 				pi.appendEntry(SESSION_RULES_CUSTOM_TYPE, { rules, cwd });
 			},
+			signalBlocked: (active: boolean, label?: string) => {
+				pi.events.emit("herdr:blocked", { active, label });
+			},
 		};
 	}
 
