@@ -86,10 +86,8 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		if (def) setCurrentProfile(def);
 		restoreProfile({ sessionManager: ctx.sessionManager });
 		restoreAutoEnabled({ sessionManager: ctx.sessionManager });
-		ctx.ui.setStatus(
-			"safetynet",
-			`${getCurrentProfile()}${isReadOnly(getCurrentProfile()) ? "" : " · rules on"}`,
-		);
+		const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
+		ctx.ui.setStatus("safetynet", label);
 	});
 
 	pi.on("session_shutdown", async () => {
