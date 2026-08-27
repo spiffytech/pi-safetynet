@@ -146,6 +146,16 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerShortcut("ctrl+shift+\\", {
+		description: "Toggle LLM auto-approval of low-risk actions",
+		handler: async (ctx) => {
+			const on = toggleAutoEnabled(pi);
+			ctx.ui.notify(`safetynet auto-approve: ${on ? "ON" : "OFF"}`, "info");
+			const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
+			ctx.ui.setStatus("safetynet", label);
+		},
+	});
+
 	// ── Ephemeral mode context (KV-cache-friendly suffix swap) ──────────────
 
 	pi.on("context", async (event) => {
