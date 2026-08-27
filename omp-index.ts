@@ -69,6 +69,10 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		setCurrentProfile(normalizeProfile(profile));
 		persistProfile(pi);
 		ctx?.ui.notify(`safetynet: ${getCurrentProfile()} mode`, "info");
+		if (ctx) {
+			const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
+			ctx.ui.setStatus("safetynet", label);
+		}
 	}
 
 	// ── Lifecycle ────────────────────────────────────────────────────────────
