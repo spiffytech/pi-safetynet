@@ -131,7 +131,13 @@ export async function resolveOmpPermission(
 						return { block: true, reason: `Auto-review denied: ${verdict.assessment.rationale}` };
 					}
 				}
-				// stale / transient / fatal → fall through to the interactive prompt
+				// stale / transient / fatal → fall through to the interactive prompt.
+				// Surface WHY auto-review didn't approve so it doesn look dead.
+				if (verdict.kind !== "assessment") {
+					deps.ctx.ui.notify(`safetynet auto-review unavailable (${verdict.kind}: ${verdict.message}); asking you instead.`, "warning");
+				} else if (token !== reviewTurnToken()) {
+					deps.ctx.ui.notify("safetynet auto-review verdict arrived after turn end; discarded.", "warning");
+				}
 			} finally {
 				reviewSetActive(false);
 			}
