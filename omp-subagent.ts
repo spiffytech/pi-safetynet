@@ -20,6 +20,9 @@ export interface OmpSpawnOpts {
 	systemPrompt?: string;
 	timeoutMs?: number;
 	cwd: string;
+	/** Reviewer model pattern (provider/model or model id). Falls back to
+	 *  SAFENET_REVIEWER_MODEL env, then omp defaults. */
+	modelPattern?: string;
 }
 
 /** Spawn an isolated read-only session and return its final assistant text. */
@@ -35,9 +38,11 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 			toolNames: ["read", "grep", "glob"],
 			...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
 			...(opts.timeoutMs ? { deadline: Date.now() + opts.timeoutMs } : {}),
-			...(process.env.SAFENET_REVIEWER_MODEL
-				? { modelPattern: process.env.SAFENET_REVIEWER_MODEL }
-				: {}),
+			...(opts.modelPattern
+				? { modelPattern: opts.modelPattern }
+				: process.env.SAFENET_REVIEWER_MODEL
+					? { modelPattern: process.env.SAFENET_REVIEWER_MODEL }
+					: {}),
 		});
 
 		await session.prompt(opts.prompt);

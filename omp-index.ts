@@ -16,6 +16,7 @@ import {
 	loadTrustExternalPaths,
 	loadDefaultProfile,
 	loadParadigm,
+	loadToggleModeKey,
 } from "./core/global-config.ts";
 import { checkBashPermission, checkFileTarget } from "./core/check.ts";
 import {
@@ -125,6 +126,17 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		description: "Show current safetynet mode",
 		handler: async (_args, ctx) => {
 			ctx.ui.notify(`safetynet mode: ${getCurrentProfile()} (${getParadigm()})`, "info");
+		},
+	});
+
+	// ── Mode toggle shortcut (default Ctrl-\, configurable via toggleModeKey) ─
+
+	pi.registerShortcut(loadToggleModeKey() as "ctrl+\\", {
+		description: "Toggle between read-only and read-write mode",
+		handler: async (ctx) => {
+			const { read, write } = paradigmModes();
+			const next: ProfileName = getCurrentProfile() === read ? write : read;
+			switchProfile(next, ctx);
 		},
 	});
 

@@ -110,7 +110,7 @@ export async function resolveOmpPermission(
 						profile: deps.profile,
 						timeoutMs: config.timeoutMs ?? 90000,
 					},
-					{ spawn: (o) => spawnReviewer({ ...o, cwd: deps.ctx.cwd }) },
+					{ spawn: (o) => spawnReviewer({ ...o, cwd: deps.ctx.cwd, ...(config.model ? { modelPattern: config.model } : {}) }) },
 				);
 				// Discard stale verdicts (their turn already ended).
 				if (token === reviewTurnToken() && verdict.kind === "assessment") {
