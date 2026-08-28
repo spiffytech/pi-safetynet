@@ -59,7 +59,10 @@ export interface SpawnOpts {
   systemPrompt?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
-  parentCtx: SessionEntriesSource & { cwd?: string };
+  parentCtx: SessionEntriesSource & {
+    cwd?: string;
+    modelRegistry?: { getAll(): Array<{ id: string }> };
+  };
   parentStorage?: any;
   initialRules?: any[];
   promptKeybindings?: any;
@@ -81,12 +84,17 @@ export interface ReviewCallOpts {
   check: PermissionCheck;
   cwd: string;
   /** Parent session's context — used for transcript. */
-  parentCtx: SessionEntriesSource & { cwd?: string };
+  parentCtx: SessionEntriesSource & {
+    cwd?: string;
+    modelRegistry?: { getAll(): Array<{ id: string }> };
+  };
   /** Profile string for action JSON (plan/build). */
   profile: string;
   signal?: AbortSignal;
   timeoutMs: number;
   retryReason?: string;
+  /** Model id override (autoApprove.model from config), resolved against the parent registry. */
+  model?: string;
 }
 
 /** Run a permission review and classify the result. */
@@ -140,6 +148,17 @@ export async function runPermissionReview(
     taskPrompt = `## Retry reason\n${opts.retryReason}\n\n${taskPrompt}`;
   }
 
+  // Resolve the autoApprove.model id (a string from config) against the parent
+  // session's model registry. Unresolvable ids fall back silently to the parent
+  // model rather than erroring the review.
+  let modelOverride: { id: string } | undefined;
+  if (opts.model && opts.parentCtx.modelRegistry) {
+    modelOverride = opts.parentCtx.modelRegistry.getAll().find((m) => m.id === opts.model);
+    if (!modelOverride) {
+      console.warn(`safetynet: autoApprove.model "${opts.model}" not found in registry; reviewer will use the parent model.`);
+    }
+  }
+
   // Run the reviewer subagent
   const result = await deps.spawn({
     taskType: "explore",
@@ -150,6 +169,7 @@ export async function runPermissionReview(
     parentCtx: opts.parentCtx,
     cwd: opts.cwd,
     trustExternalPaths: true,
+    ...(modelOverride ? { model: modelOverride } : {}),
   });
 
   // Classify the result

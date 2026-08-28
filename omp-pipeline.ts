@@ -142,17 +142,17 @@ export async function resolveOmpPermission(
 						target: opts.target,
 						check,
 						cwd: deps.ctx.cwd,
-						parentCtx: { sessionManager: deps.ctx.sessionManager },
+						parentCtx: { sessionManager: deps.ctx.sessionManager, modelRegistry: deps.ctx.modelRegistry },
 						profile: deps.profile,
 						timeoutMs: config.timeoutMs ?? 90000,
 						signal: capController.signal,
+						...(config.model ? { model: config.model } : {}),
 					},
 					{ spawn: (o) =>
 						spawnReviewer({
 							...o,
 							cwd: deps.ctx.cwd,
 							...(o.signal ? { signal: o.signal } : {}),
-							...resolveReviewerModel(deps.ctx, config.model),
 						}) },
 				);
 				// Discard stale verdicts (their turn already ended).
