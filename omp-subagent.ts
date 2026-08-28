@@ -21,6 +21,8 @@ export interface OmpSpawnOpts {
 	prompt: string;
 	systemPrompt?: string;
 	timeoutMs?: number;
+	/** External abort (e.g. our auto-review cap). Aborts the session on fire. */
+	signal?: AbortSignal;
 	cwd: string;
 	/** Resolved reviewer model object (from the parent, where provider
 	 *  extensions are loaded). Passing the object — not a deferred
@@ -61,7 +63,23 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 						: {}),
 		});
 
-		await session.prompt(opts.prompt);
+		// Abort the reviewer session when the external cap signal fires (the
+		// auto-review time budget in omp-pipeline). Otherwise a slow TTFT
+		// would let the review outlive our 20s cap and keep burning tokens.
+		const onAbort = () => {
+			void session.abort().catch(() => {});
+		};
+		if (opts.signal?.aborted) {
+			onAbort();
+			return { content: [{ type: "text", text: "" }], details: { aborted: true } };
+		}
+		opts.signal?.addEventListener("abort", onAbort, { once: true });
+
+		try {
+			await session.prompt(opts.prompt);
+		} finally {
+			opts.signal?.removeEventListener("abort", onAbort);
+		}
 
 		// Extract final assistant text from the session journal.
 		// omp's SessionMessageEntry stores the message in `entry.message`

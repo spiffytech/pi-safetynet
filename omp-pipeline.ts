@@ -19,6 +19,13 @@ import type { PermissionCheck } from "./core/check.ts";
 import { showOmpPermissionPrompt } from "./omp-permission-prompt.ts";
 import { spawnReviewer } from "./omp-subagent.ts";
 
+/** Hard cap on one auto-review attempt. The reviewer runs inside the
+ *  tool_call handler, which omp bounds at extensionHandlers.toolCallTimeoutMs
+ *  (default 30s, fail-closed on expiry). We race it ourselves at a lower
+ *  bound so a slow first-token degrades to the interactive prompt instead
+ *  of omp silently blocking the tool call with a timeout error. */
+const AUTO_REVIEW_CAP_MS = 20_000;
+
 /** Resolve the reviewer model in the parent session (where provider
  *  extensions like hyper are loaded and authenticated) so the child
  *  session can select it via the resolved Model object instead of a
@@ -122,6 +129,12 @@ export async function resolveOmpPermission(
 			const config = loadAutoApproveConfig();
 			const token = reviewTurnToken();
 			reviewSetActive(true);
+			const capController = new AbortController();
+			let capped = false;
+			const capTimer = setTimeout(() => {
+				capped = true;
+				capController.abort(new DOMException("Auto-review exceeded time budget", "TimeoutError"));
+			}, AUTO_REVIEW_CAP_MS);
 			try {
 				const verdict = await runPermissionReview(
 					{
@@ -132,11 +145,13 @@ export async function resolveOmpPermission(
 						parentCtx: { sessionManager: deps.ctx.sessionManager },
 						profile: deps.profile,
 						timeoutMs: config.timeoutMs ?? 90000,
+						signal: capController.signal,
 					},
 					{ spawn: (o) =>
 						spawnReviewer({
 							...o,
 							cwd: deps.ctx.cwd,
+							...(o.signal ? { signal: o.signal } : {}),
 							...resolveReviewerModel(deps.ctx, config.model),
 						}) },
 				);
@@ -160,12 +175,15 @@ export async function resolveOmpPermission(
 				}
 				// stale / transient / fatal → fall through to the interactive prompt.
 				// Surface WHY auto-review didn't approve so it doesn look dead.
-				if (verdict.kind !== "assessment") {
+				if (capped) {
+					deps.ctx.ui.notify("safetynet auto-review exceeded its time budget; asking you instead.", "warning");
+				} else if (verdict.kind !== "assessment") {
 					deps.ctx.ui.notify(`safetynet auto-review unavailable (${verdict.kind}: ${verdict.message}); asking you instead.`, "warning");
 				} else if (token !== reviewTurnToken()) {
 					deps.ctx.ui.notify("safetynet auto-review verdict arrived after turn end; discarded.", "warning");
 				}
 			} finally {
+				clearTimeout(capTimer);
 				reviewSetActive(false);
 			}
 		}
