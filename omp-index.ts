@@ -204,8 +204,16 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 			return resolved;
 		}
 
-		// ── read / edit / write ──────────────────────────────────────────────
-		const perm = event.toolName === "read" ? "read" : "edit";
+		// ── read / glob / grep / edit / write ───────────────────────────────
+		// glob and grep are read-only search tools: they never mutate files,
+		// so they classify as "read" — not the generic fallback to "edit".
+		const perm =
+			event.toolName === "edit" || event.toolName === "write"
+				? "edit"
+				: event.toolName === "read" || event.toolName === "glob" || event.toolName === "grep"
+					? "read"
+					: undefined;
+		if (!perm) return; // not a file tool we gate
 		const input = event.input as Record<string, unknown>;
 		const paths: string[] = [];
 		if (typeof input.path === "string") paths.push(input.path);
