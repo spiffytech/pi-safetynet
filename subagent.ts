@@ -13,10 +13,10 @@ import {
 	type CreateAgentSessionResult,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
-import type { AutoDenyConfig, Paradigm, ProfileName, ModeAliases, Ruleset } from "./types.ts";
-import type { PromptKeybindings } from "./prompts.ts";
-import type { PermissionStorage } from "./permissions/index.ts";
-import { toDisplayPath } from "./project.ts";
+import type { AutoDenyConfig, Paradigm, ProfileName, ModeAliases, Ruleset } from "./core/types.ts";
+import type { PromptKeybindings } from "./core/types.ts";
+import type { PermissionStorage } from "./core/permissions/index.ts";
+import { toDisplayPath } from "./core/project.ts";
 import { createSubagentSafetynetExtension } from "./subagent-safetynet.ts";
 
 /** Extension factory that overrides the system prompt via before_agent_start return. */

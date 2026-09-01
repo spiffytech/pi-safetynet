@@ -10,14 +10,15 @@
 
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Rule, Ruleset, TempRule, ProfileName, Paradigm, ModeAliases, AutoDenyConfig } from "./types.ts";
-import type { PermissionPromptOptions, PromptKeybindings } from "./prompts.ts";
+import type { Rule, Ruleset, TempRule, ProfileName, Paradigm, ModeAliases, AutoDenyConfig } from "./core/types.ts";
+import type { PermissionPromptOptions } from "./prompts.ts";
+import type { PromptKeybindings } from "./core/types.ts";
 import { showPermissionPrompt } from "./prompts.ts";
 import {
   PermissionStorage,
-} from "./permissions/index.ts";
-import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./check.ts";
-import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
+} from "./core/permissions/index.ts";
+import { checkBashPermission, checkFileTarget, type PermissionCheck } from "./core/check.ts";
+import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import { resolvePermission as resolvePermissionShared, makeTempRule, resolveDeny, type HazardousDenyState } from "./pipeline.ts";
 
 export interface SubagentSafetynetOpts {
@@ -112,8 +113,8 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 		let subagentStorage: PermissionStorage;
 
 		pi.on("session_start", async (_event, ctx) => {
-			subagentStorage = new PermissionStorage(pi, cwd);
-			await subagentStorage.init(ctx);
+			subagentStorage = new PermissionStorage(cwd);
+			await subagentStorage.init();
 			if (initialRules && initialRules.length > 0) {
 				subagentStorage.addSessionRules(initialRules);
 			}

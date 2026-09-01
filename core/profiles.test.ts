@@ -15,7 +15,7 @@ import {
   getModeAliases,
   isReadOnly,
   paradigmModes,
-} from "./profiles/index.ts";
+} from "./profiles.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 describe("profiles", () => {

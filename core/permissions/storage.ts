@@ -1,7 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Rule, Ruleset, TempRule, ProfileName } from "../types.ts";
+import type { Rule, Ruleset, TempRule, ProfileName, SessionJournalSource } from "../types.ts";
 import { findPiConfigDir } from "../project.ts";
 import { loadGlobalRules, addGlobalRules as addGlobalRulesToConfig } from "../global-config.ts";
 import baselineData from "./baseline.json" with { type: "json" };
@@ -149,7 +148,7 @@ export class PermissionStorage {
   temp: TempRuleStore;
   private cwd: string;
 
-  constructor(_pi: ExtensionAPI, cwd: string) {
+  constructor(cwd: string) {
     this.cwd = cwd;
     this.session = new SessionRuleStore();
     this.persisted = new PersistedRuleStore(cwd);
@@ -158,7 +157,7 @@ export class PermissionStorage {
     this.temp = new TempRuleStore();
   }
 
-  async init(_ctx: ExtensionContext): Promise<void> {
+  async init(): Promise<void> {
     this.persisted.load();
     this.global.load();
   }
@@ -189,18 +188,18 @@ export class PermissionStorage {
 }
 
 export function reconstructSessionRules(
-  ctx: ExtensionContext,
+  journal: SessionJournalSource,
   currentCwd: string,
 ): { rules: Ruleset; skippedCount: number } {
-  const entries = ctx.sessionManager.getBranch();
+  const entries = journal.sessionManager.getBranch();
   const rules: Ruleset = [];
   let skippedCount = 0;
   for (const entry of entries) {
     if (
       entry.type === "custom" &&
-      (entry as { customType?: string }).customType === "safetynet:session-rules"
+      entry.customType === "safetynet:session-rules"
     ) {
-      const data = (entry as { data?: { rules?: Ruleset; cwd?: string } }).data;
+      const data = entry.data as { rules?: Ruleset; cwd?: string } | undefined;
       if (data?.rules) {
         if (data.cwd && data.cwd !== currentCwd) {
           skippedCount++;

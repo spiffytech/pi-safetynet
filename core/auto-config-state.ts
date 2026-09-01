@@ -2,9 +2,8 @@
  * Auto-approve toggle state persistence.
  * Mirrors the profiles persistence pattern (per-session custom entries).
  */
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AutoApproveConfig } from "./types.ts";
-import { getLatestCustomEntry } from "./profiles/index.ts";
+import type { AutoApproveConfig, AppendEntrySink, SessionEntriesSource } from "./types.ts";
+import { getLatestCustomEntry } from "./profiles.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -15,18 +14,18 @@ export function isAutoEnabled(): boolean {
   return autoEnabled;
 }
 
-export function setAutoEnabled(enabled: boolean, pi: ExtensionAPI): void {
+export function setAutoEnabled(enabled: boolean, pi: AppendEntrySink): void {
   autoEnabled = enabled;
   pi.appendEntry("safetynet:auto", { enabled });
 }
 
-export function toggleAutoEnabled(pi: ExtensionAPI): boolean {
+export function toggleAutoEnabled(pi: AppendEntrySink): boolean {
   autoEnabled = !autoEnabled;
   pi.appendEntry("safetynet:auto", { enabled: autoEnabled });
   return autoEnabled;
 }
 
-export function restoreAutoEnabled(ctx: ExtensionContext): void {
+export function restoreAutoEnabled(ctx: SessionEntriesSource): void {
   const entry = getLatestCustomEntry<{ enabled: boolean }>(ctx, "safetynet:auto");
   if (entry?.data?.enabled !== undefined) autoEnabled = entry.data.enabled;
 }

@@ -6,7 +6,7 @@ import {
   formatActionJson,
   compactTranscript,
 } from "./reviewer-prompt.ts";
-import { runPermissionReview } from "./reviewer.ts";
+import { runPermissionReview } from "./reviewer-state.ts";
 
 // ─── Policy prompt content ──────────────────────────────────────────────────
 

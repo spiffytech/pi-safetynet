@@ -14,15 +14,16 @@ import { Type } from "typebox";
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction, KeybindingsConfig, AutoDenyConfig } from "./types.ts";
+import type { PromptKeybindings } from "./core/types.ts";
+import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction, KeybindingsConfig, AutoDenyConfig } from "./core/types.ts";
 import questionnaire from "./questionnaire.ts";
-import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile, loadParadigm, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./global-config.ts";
+import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile, loadParadigm, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./core/global-config.ts";
 import { runSubagent, addUsage, formatSubagentUsage, ZERO_USAGE, type SubagentUsage } from "./subagent.ts";
 import {
   getBaselineRules,
   PermissionStorage,
   reconstructSessionRules,
-} from "./permissions/index.ts";
+} from "./core/permissions/index.ts";
 import {
   getCurrentProfile,
   setCurrentProfile,
@@ -39,17 +40,16 @@ import {
   normalizeProfile,
   isReadOnly,
   paradigmModes,
-} from "./profiles/index.ts";
+} from "./core/profiles.ts";
 import {
   showPermissionPrompt,
-  type PromptKeybindings,
   type PermissionPromptResult,
 } from "./prompts.ts";
-import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./check.ts";
-import { normalizePathForMatching, toRecursiveGlob } from "./project.ts";
+import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./core/check.ts";
+import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, type HazardousDenyState } from "./pipeline.ts";
-import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./auto-config.ts";
-import { reviewBumpTurnToken, reviewResetDenies } from "./reviewer.ts";
+import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./core/auto-config-state.ts";
+import { reviewBumpTurnToken, reviewResetDenies } from "./core/reviewer-state.ts";
 /** Re-exported pure seams for test compatibility. */
 export const headlessDeny = hd;
 export const denyResultFromPrompt = drfp;
@@ -822,7 +822,7 @@ interface RestoreOpts {
 }
 
 async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): Promise<void> {
-  if (opts?.init) await storage.init(ctx);
+  if (opts?.init) await storage.init();
   restoreProfile(ctx);
   restoreSubagentUsage(ctx);
   restoreAutoEnabled(ctx);
@@ -850,7 +850,7 @@ async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): P
 export default function safetynetExtension(api: ExtensionAPI) {
   pi = api;
 
-  storage = new PermissionStorage(pi, process.cwd());
+  storage = new PermissionStorage(process.cwd());
 
   // Load configurable prompt keybindings + auto-deny behaviour from global config.
   promptKeybindings = loadKeybindings();

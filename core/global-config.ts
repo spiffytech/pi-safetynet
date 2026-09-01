@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { AutoDenyConfig, KeybindingsConfig, Paradigm, ProfileName, Ruleset } from "./types.ts";
-import type { PromptKeybindings } from "./prompts.ts";
+import type { PromptKeybindings } from "./types.ts";
 import { sanitizeRules } from "./permissions/storage.ts";
 
 /** Directory for global config — `~/.config/pi-safetynet/` */

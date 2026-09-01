@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createSubagentSafetynetExtension } from "./subagent-safetynet.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Rule, Ruleset, TempRule } from "./types.ts";
+import type { Rule, Ruleset, TempRule } from "./core/types.ts";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 

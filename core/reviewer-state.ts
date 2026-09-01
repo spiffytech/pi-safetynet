@@ -1,9 +1,8 @@
 /**
- * reviewer.ts — spawns a permission-review subagent and classifies the result.
+ * reviewer-state.ts — permission-review circuit-breaker state and review
+ * execution. Harness-free: transcript source and subagent spawn are injected.
  */
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Model } from "@earendil-works/pi-ai";
-import type { ReviewVerdict, ReviewerAssessment } from "./types.ts";
+import type { ReviewVerdict, ReviewerAssessment, SessionEntriesSource } from "./types.ts";
 import type { PermissionCheck } from "./check.ts";
 import {
   REVIEWER_SYSTEM_PROMPT,
@@ -60,7 +59,10 @@ export interface SpawnOpts {
   systemPrompt?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
-  parentCtx: ExtensionContext;
+  parentCtx: SessionEntriesSource & {
+    cwd?: string;
+    modelRegistry?: { getAll(): Array<{ id: string; provider?: string }> };
+  };
   parentStorage?: any;
   initialRules?: any[];
   promptKeybindings?: any;
@@ -82,7 +84,10 @@ export interface ReviewCallOpts {
   check: PermissionCheck;
   cwd: string;
   /** Parent session's context — used for transcript. */
-  parentCtx: ExtensionContext;
+  parentCtx: SessionEntriesSource & {
+    cwd?: string;
+    modelRegistry?: { getAll(): Array<{ id: string; provider?: string }> };
+  };
   /** Profile string for action JSON (plan/build). */
   profile: string;
   signal?: AbortSignal;
@@ -146,9 +151,14 @@ export async function runPermissionReview(
   // Resolve the autoApprove.model id (a string from config) against the parent
   // session's model registry. Unresolvable ids fall back silently to the parent
   // model rather than erroring the review.
-  let modelOverride: Model<any> | undefined;
-  if (opts.model) {
-    modelOverride = opts.parentCtx.modelRegistry.getAll().find((m) => m.id === opts.model);
+  // omp compatibility: registries are inconsistent about whether `id` carries
+  // the provider prefix (hyper stores id="qwen3.8-flash" + provider="hyper";
+  // other catalogs store id="alibaba/qwen3.8-flash"). Match both forms.
+  let modelOverride: { id: string; provider?: string } | undefined;
+  if (opts.model && opts.parentCtx.modelRegistry) {
+    modelOverride = opts.parentCtx.modelRegistry.getAll().find(
+      (m) => m.id === opts.model || `${m.provider}/${m.id}` === opts.model,
+    );
     if (!modelOverride) {
       console.warn(`safetynet: autoApprove.model "${opts.model}" not found in registry; reviewer will use the parent model.`);
     }

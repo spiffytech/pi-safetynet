@@ -1,6 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Paradigm, ProfileName, ModeAliases } from "../types.ts";
-import { loadDefaultProfile, loadParadigm } from "../global-config.ts";
+import type { Paradigm, ProfileName, ModeAliases, AppendEntrySink, SessionEntriesSource } from "./types.ts";
+import { loadDefaultProfile, loadParadigm } from "./global-config.ts";
 
 let currentParadigm: Paradigm = loadParadigm();
 
@@ -66,8 +65,8 @@ export function paradigmModes(paradigm: Paradigm = currentParadigm): { read: Pro
 	return paradigm === "ro-rw" ? { read: "ro", write: "rw" } : { read: "plan", write: "build" };
 }
 
-export function getLatestCustomEntry<T>(ctx: ExtensionContext, customType: string): { data?: T } | undefined {
-	const entries = ctx.sessionManager.getEntries();
+export function getLatestCustomEntry<T>(journal: SessionEntriesSource, customType: string): { data?: T } | undefined {
+	const entries = journal.sessionManager.getEntries();
 	return entries
 		.filter((e) =>
 			e.type === "custom" && e.customType === customType,
@@ -75,13 +74,13 @@ export function getLatestCustomEntry<T>(ctx: ExtensionContext, customType: strin
 		.pop() as { data?: T } | undefined;
 }
 
-export function persistProfile(pi: ExtensionAPI): void {
+export function persistProfile(pi: AppendEntrySink): void {
 	pi.appendEntry("safetynet:profile", {
 		enabled: currentProfile,
 	});
 }
 
-export function restoreProfile(ctx: ExtensionContext): void {
+export function restoreProfile(ctx: SessionEntriesSource): void {
 	const entry = getLatestCustomEntry<{ enabled: ProfileName }>(ctx, "safetynet:profile");
 	if (entry?.data?.enabled) currentProfile = normalizeProfile(entry.data.enabled);
 }
