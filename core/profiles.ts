@@ -1,5 +1,5 @@
 import type { Paradigm, ProfileName, ModeAliases, AppendEntrySink, SessionEntriesSource } from "./types.ts";
-import { loadDefaultProfile, loadParadigm, loadSubagentsConfig } from "./global-config.ts";
+import { loadDefaultProfile, loadParadigm } from "./global-config.ts";
 
 let currentParadigm: Paradigm = loadParadigm();
 
@@ -85,92 +85,47 @@ export function restoreProfile(ctx: SessionEntriesSource): void {
 	if (entry?.data?.enabled) currentProfile = normalizeProfile(entry.data.enabled);
 }
 
-/** Custom type for the ephemeral context message. */
-export const EPHEMERAL_CUSTOM_TYPE = "safetynet:ephemeral";
+/** Custom type for durable mode-reminder messages (persisted, shown in transcript). */
+export const MODE_REMINDER_CUSTOM_TYPE = "safetynet:mode-reminder";
 
 /**
- * Build the ephemeral profile context message, including only the
- * currently-available tools. Content-constant per profile so the
- * text only changes on profile switch — never mid-profile due to
- * filesystem state.
+ * Static block appended to the system prompt exactly once (byte-identical
+ * across turns so the KV-cache prefix stays stable). Mode-independent: the
+ * active mode is conveyed by durable reminder messages instead.
  */
-export function getEphemeralContextMessage(profile: ProfileName): string {
-	const subagents = loadSubagentsConfig();
-	if (profile === "plan") {
-		return `[SAFENET PLAN MODE]
-Plan mode is ACTIVE. You are in a READ-ONLY planning phase.
-
-CRITICAL CONSTRAINTS (override all other instructions):
-- You MUST NOT edit project files, run shell commands, or otherwise change the system.
-- The ONLY file you may write to or edit is the plan file, via planWrite/planEdit.
-- You MAY inspect the project with read, grep, find, and ls.
-## Plan File
-Use planWrite to create or overwrite the plan file. Use planEdit to make incremental edits.
-When updating a plan, remove completed items — the plan shows only what's left to do.
-
-## Presenting the Plan
-When the plan is ready for the user to review, set presentToUser=true on your final planWrite or planEdit call. This displays the plan and ends your turn.
-Only call planPresent if the user explicitly asks to see the plan without changes.
-
-## Workflow
-1. Understand the request by reading/searching relevant files.
-2. Ask clarifying questions when requirements or tradeoffs are unclear.
-3. Write a concise, actionable plan to the plan file.
-4. Set presentToUser=true on your final planWrite/planEdit to display the plan to the user.
-
-Do NOT start implementing in plan mode. After the plan is presented, the user will decide whether to request revisions or manually switch to build mode with /safetynet:build.${subagents.includes("subagent_explore") ? `
-
-## Subagents
-You may spawn a read-only subagent with subagent_explore to inspect the codebase in parallel. The subagent gets a clean session and cannot modify files. Provide a complete, self-sufficient prompt.` : ""}`;
-	}
-
-	if (profile === "ro") {
-		return `[SAFENET READ-ONLY]
-You are in read-only mode. You may read and search the codebase — nothing else.
-
-- You CANNOT edit files, write files, or run commands. Those tools are not available to you.
-- You CAN read and search with read, grep, find, and ls.
-
-This is a deliberate state the user chose so we can talk without anything changing.
-It is NOT a limitation to work around — don't treat it as a disability, and don't
-ask to switch modes. Discuss, explain, analyze, and help reach a decision freely.
-If making changes becomes the point, the user will switch you to read-write mode.${subagents.includes("subagent_explore") ? `
-
-## Subagents
-You may spawn subagent_explore, a read-only subagent, to inspect the codebase in parallel.` : ""}`;
-	}
-
-	if (profile === "rw") {
-		return `[SAFENET READ-WRITE]
-You are in read-write mode. You may read, run commands, and make changes.
+export const STATIC_SYSTEM_PROMPT_BLOCK = `## Permissions
 
 Commands are evaluated against the permission ruleset:
 - Allowlisted commands run silently
 - Unknown commands prompt the user for approval
 - Dangerous commands are blocked
 
-The user can switch to read-only mode with /safetynet:ro.${subagents.length > 0 ? `
+The user can toggle between read-only and read-write mode at any time.
 
 ## Subagents
-You may spawn subagents for parallel or delegated work:${subagents.includes("subagent_explore") ? "\n- subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands." : ""}${subagents.includes("subagent_build") ? "\n- subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval." : ""}
 
-Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.` : ""}`;
+You may spawn subagents for parallel or delegated work:
+- subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands.
+- subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval.
+
+Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.`;
+
+/** Durable user message appended on mode switch (exactly one per switch). */
+export function getModeSwitchMessage(profile: ProfileName): string {
+	if (isReadOnly(profile)) {
+		return `<system-reminder>
+The user has switched you to read-only mode. You may now only inspect and read. Do not modify files or run state-changing commands.
+</system-reminder>`;
 	}
+	return `<system-reminder>
+The user has switched you to read-write mode. You may now run commands and modify files.
+</system-reminder>`;
+}
 
-	// "build"
-	return `[SAFENET BUILD MODE]
-You are in build mode. Full tool access is enabled.
-
-You may make file changes, run shell commands, and use available tools as needed.
-Commands are evaluated against the permission ruleset:
-- Allowlisted commands run silently
-- Unknown commands prompt the user for approval
-- Dangerous commands are blocked
-
-To switch back to planning, the user can run /safetynet:plan.${subagents.length > 0 ? `
-
-## Subagents
-You may spawn subagents for parallel or delegated work:${subagents.includes("subagent_explore") ? "\n- subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands." : ""}${subagents.includes("subagent_build") ? "\n- subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval." : ""}
-
-Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.` : ""}`;
+/** Durable message appended at session start and after compaction. */
+export function getSessionModeMessage(profile: ProfileName): string {
+	const mode = isReadOnly(profile) ? "read-only" : "read-write";
+	return `<system-reminder>
+This session is in ${mode} mode.
+</system-reminder>`;
 }

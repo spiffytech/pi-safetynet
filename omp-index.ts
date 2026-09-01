@@ -22,6 +22,10 @@ import { checkBashPermission, checkFileTarget } from "./core/check.ts";
 import {
 	getCurrentProfile,
 	setCurrentProfile,
+	MODE_REMINDER_CUSTOM_TYPE,
+	STATIC_SYSTEM_PROMPT_BLOCK,
+	getModeSwitchMessage,
+	getSessionModeMessage,
 	getParadigm,
 	setParadigm,
 	getModeAliases,
@@ -30,8 +34,6 @@ import {
 	paradigmModes,
 	persistProfile,
 	restoreProfile,
-	getEphemeralContextMessage,
-	EPHEMERAL_CUSTOM_TYPE,
 } from "./core/profiles.ts";
 import { resolveOmpPermission, type OmpPipelineDeps } from "./omp-pipeline.ts";
 import {
@@ -69,8 +71,17 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 	}
 
 	function switchProfile(profile: ProfileName, ctx?: ExtensionContext) {
+		const prev = getCurrentProfile();
 		setCurrentProfile(normalizeProfile(profile));
 		persistProfile(pi);
+		// One durable mode message per actual switch — persisted, not ephemeral.
+		if (prev !== getCurrentProfile()) {
+			pi.sendMessage({
+				customType: MODE_REMINDER_CUSTOM_TYPE,
+				content: getModeSwitchMessage(getCurrentProfile()),
+				display: true,
+			});
+		}
 		ctx?.ui.notify(`safetynet: ${getCurrentProfile()} mode`, "info");
 		if (ctx) {
 			const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
@@ -91,6 +102,17 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		restoreAutoEnabled({ sessionManager: ctx.sessionManager });
 		const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
 		ctx.ui.setStatus("safetynet", label);
+
+		// Session-start reminder (step 4): one durable message announcing the
+		// opening mode. Omp's session_start has no reason field, so a fresh
+		// session is detected by an empty journal.
+		if (ctx.sessionManager.getEntries().length === 0) {
+			pi.sendMessage({
+				customType: MODE_REMINDER_CUSTOM_TYPE,
+				content: getSessionModeMessage(getCurrentProfile()),
+				display: true,
+			});
+		}
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -157,18 +179,22 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── Ephemeral mode context (KV-cache-friendly suffix swap) ──────────────
+	// ── Mode messaging: on-switch/start/compact only — no per-turn injection ──
 
-	pi.on("context", async (event) => {
-		const messages = event.messages as Array<{ customType?: string }>;
-		const filtered = messages.filter((m) => m.customType !== EPHEMERAL_CUSTOM_TYPE);
-		filtered.push({
-			customType: EPHEMERAL_CUSTOM_TYPE,
-			content: getEphemeralContextMessage(getCurrentProfile()),
-			display: false,
-			timestamp: Date.now(),
-		} as never);
-		return { messages: filtered as typeof event.messages };
+	// Static permissions+subagents block appended to the system prompt once.
+	// Byte-identical every turn so the provider-side KV prefix stays cached.
+	pi.on("before_agent_start", async (event) => {
+		return { systemPrompt: [...event.systemPrompt, STATIC_SYSTEM_PROMPT_BLOCK] };
+	});
+
+	// Compaction purges history; re-append the current-mode reminder
+	// unconditionally so the mode survives the purge.
+	pi.on("session_compact", async () => {
+		pi.sendMessage({
+			customType: MODE_REMINDER_CUSTOM_TYPE,
+			content: getSessionModeMessage(getCurrentProfile()),
+			display: true,
+		});
 	});
 
 	// ── Tool-call interception ───────────────────────────────────────────────

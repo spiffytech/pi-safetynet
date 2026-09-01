@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   getCurrentProfile,
   setCurrentProfile,
-  getEphemeralContextMessage,
-  EPHEMERAL_CUSTOM_TYPE,
+  MODE_REMINDER_CUSTOM_TYPE,
+  STATIC_SYSTEM_PROMPT_BLOCK,
+  getModeSwitchMessage,
+  getSessionModeMessage,
   getLatestCustomEntry,
   restoreProfile,
   getParadigm,
@@ -112,85 +114,76 @@ describe("profiles", () => {
     });
   });
 
-  describe("getEphemeralContextMessage", () => {
-    it("plan message mentions read-only planning", () => {
-      const msg = getEphemeralContextMessage("plan");
-      assert.ok(msg.includes("plan"));
-      assert.ok(msg.includes("READ-ONLY") || msg.includes("planning-only"));
+  describe("STATIC_SYSTEM_PROMPT_BLOCK", () => {
+    it("is a non-empty string", () => {
+      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.length > 0);
     });
 
-    it("plan message mentions planPresent", () => {
-      const msg = getEphemeralContextMessage("plan");
-      assert.ok(msg.includes("planPresent"));
+    it("contains the Permissions section with the ruleset", () => {
+      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("## Permissions"));
+      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("Allowlisted commands run silently"));
+      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("Unknown commands prompt the user for approval"));
+      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("Dangerous commands are blocked"));
     });
 
-    it("plan message mentions planWrite", () => {
-      const msg = getEphemeralContextMessage("plan");
-      assert.ok(msg.includes("planWrite"));
+    it("mentions the mode toggle", () => {
+      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("toggle between read-only and read-write mode"));
     });
 
-    it("plan message explains user-controlled build transition", () => {
-      const msg = getEphemeralContextMessage("plan");
-      assert.ok(msg.includes("/safetynet:build"));
+    it("contains the Subagents section", () => {
+      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("## Subagents"));
+      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("subagent_explore"));
+      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("subagent_build"));
     });
 
-    it("plan message has no Available tools footer", () => {
-      const msg = getEphemeralContextMessage("plan");
-      assert.ok(!msg.includes("Available tools"));
+    it("is mode-independent and constant", () => {
+      assert.equal(STATIC_SYSTEM_PROMPT_BLOCK, STATIC_SYSTEM_PROMPT_BLOCK);
+      // Byte-identical across turns — no per-turn injection, no template state.
+      assert.ok(!STATIC_SYSTEM_PROMPT_BLOCK.includes("${profile}"));
+    });
+  });
+
+  describe("getModeSwitchMessage", () => {
+    it("read-only profiles get the read-only switch message", () => {
+      for (const p of ["ro", "plan"] as const) {
+        const msg = getModeSwitchMessage(p);
+        assert.ok(msg.includes("<system-reminder>"));
+        assert.ok(msg.includes("switched you to read-only mode"));
+        assert.ok(msg.includes("only inspect and read"));
+      }
     });
 
-    it("build message mentions full access", () => {
-      const msg = getEphemeralContextMessage("build");
-      assert.ok(msg.includes("build"));
-      assert.ok(msg.includes("full tool access") || msg.includes("Full tool access"));
+    it("write profiles get the read-write switch message", () => {
+      for (const p of ["rw", "build"] as const) {
+        const msg = getModeSwitchMessage(p);
+        assert.ok(msg.includes("<system-reminder>"));
+        assert.ok(msg.includes("switched you to read-write mode"));
+        assert.ok(msg.includes("run commands and modify files"));
+      }
+    });
+  });
+
+  describe("getSessionModeMessage", () => {
+    it("read-only profiles announce a read-only session", () => {
+      for (const p of ["ro", "plan"] as const) {
+        const msg = getSessionModeMessage(p);
+        assert.ok(msg.includes("<system-reminder>"));
+        assert.ok(msg.includes("This session is in read-only mode"));
+      }
     });
 
-    it("build message mentions /safetynet:plan", () => {
-      const msg = getEphemeralContextMessage("build");
-      assert.ok(msg.includes("/safetynet:plan"));
+    it("write profiles announce a read-write session", () => {
+      for (const p of ["rw", "build"] as const) {
+        const msg = getSessionModeMessage(p);
+        assert.ok(msg.includes("<system-reminder>"));
+        assert.ok(msg.includes("This session is in read-write mode"));
+      }
     });
+  });
 
-    it("build message has no Available tools footer", () => {
-      const msg = getEphemeralContextMessage("build");
-      assert.ok(!msg.includes("Available tools"));
-    });
-
-    it("ro message mentions read-only and has no Available tools footer", () => {
-      const msg = getEphemeralContextMessage("ro");
-      assert.ok(msg.includes("READ-ONLY") || msg.includes("read-only"));
-      assert.ok(!msg.includes("Available tools"));
-    });
-
-    it("ro message explains the state is deliberate (not a limitation)", () => {
-      const msg = getEphemeralContextMessage("ro");
-      assert.ok(msg.toLowerCase().includes("deliberate"));
-    });
-
-    it("rw message mentions read-write and has no Available tools footer", () => {
-      const msg = getEphemeralContextMessage("rw");
-      assert.ok(msg.includes("READ-WRITE") || msg.includes("read-write"));
-      assert.ok(!msg.includes("Available tools"));
-    });
-
-    it("rw message points to /safetynet:ro for read-only", () => {
-      const msg = getEphemeralContextMessage("rw");
-      assert.ok(msg.includes("/safetynet:ro"));
-    });
-
-    it("EPHEMERAL_CUSTOM_TYPE is defined", () => {
-      assert.ok(EPHEMERAL_CUSTOM_TYPE.length > 0);
-    });
-
-    it("plan and build messages are content-constant (no filesystem checks)", () => {
-      // The messages should NOT vary based on planPath — no existsSync checks
-      // So calling with and without a planPath should produce identical results
-      const msg1 = getEphemeralContextMessage("plan");
-      const msg2 = getEphemeralContextMessage("plan");
-      assert.equal(msg1, msg2);
-
-      const msg3 = getEphemeralContextMessage("build");
-      const msg4 = getEphemeralContextMessage("build");
-      assert.equal(msg3, msg4);
+  describe("MODE_REMINDER_CUSTOM_TYPE", () => {
+    it("is defined", () => {
+      assert.ok(MODE_REMINDER_CUSTOM_TYPE.length > 0);
     });
   });
 
