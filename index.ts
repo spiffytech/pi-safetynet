@@ -4,7 +4,6 @@ import type {
   ToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Markdown, Text } from "@earendil-works/pi-tui";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   createEditTool,
   createWriteTool,
@@ -27,8 +26,10 @@ import {
 import {
   getCurrentProfile,
   setCurrentProfile,
-  getEphemeralContextMessage,
-  EPHEMERAL_CUSTOM_TYPE,
+  MODE_REMINDER_CUSTOM_TYPE,
+  STATIC_SYSTEM_PROMPT_BLOCK,
+  getModeSwitchMessage,
+  getSessionModeMessage,
   persistProfile,
   restoreProfile,
   getLatestCustomEntry,
@@ -297,23 +298,6 @@ async function handleToolCall(
     ctx.ui.notify(`Permission check error: ${err}`, "warning");
     return undefined;
   }
-}
-
-/**
- * Swap the ephemeral context message in the message list.
- *
- * Removes any previous ephemeral message (identified by customType) and
- * appends the current one at the end. This ensures:
- * - Exactly one ephemeral message exists at any time
- * - It is always the last item before model generation (suffix position)
- * - All prior messages are an immutable, stable prefix for KV caching
- */
-function swapEphemeralMessage(messages: AgentMessage[], ephemeralMessage: AgentMessage): AgentMessage[] {
-  const filtered = messages.filter(
-    (m) => (m as AgentMessage & { customType?: string }).customType !== EPHEMERAL_CUSTOM_TYPE,
-  );
-  filtered.push(ephemeralMessage);
-  return filtered;
 }
 
 function formatPlanForDisplay(content: string): string {
@@ -595,6 +579,12 @@ function switchToProfile(ctx: ExtensionContext, profile: ProfileName): void {
   }
   setCurrentProfile(target);
   persistProfile(pi);
+  // One durable mode message per switch — persisted, not ephemeral.
+  pi.sendMessage({
+    customType: MODE_REMINDER_CUSTOM_TYPE,
+    content: getModeSwitchMessage(target),
+    display: true,
+  });
   ctx.ui.notify(`Switched from ${current} to ${target} mode`, "info");
   updateStatus(ctx);
 
@@ -972,6 +962,17 @@ export default function safetynetExtension(api: ExtensionAPI) {
         storage.addFlagRules(rules);
       }
     }
+
+    // Session-start reminder (step 4): one durable message announcing the
+    // opening mode. Sent after all mode resolution (default, --build flag,
+    // headless default) so it matches the actual mode.
+    if (isBrandNew) {
+      pi.sendMessage({
+        customType: MODE_REMINDER_CUSTOM_TYPE,
+        content: getSessionModeMessage(getCurrentProfile()),
+        display: true,
+      });
+    }
   });
 
   pi.on("tool_call", handleToolCall);
@@ -985,25 +986,24 @@ export default function safetynetExtension(api: ExtensionAPI) {
     hazardousDenyState.count = 0;
   });
 
-  // The context hook fires before every API call. We use it to swap the
-  // ephemeral profile-context message: remove the old one, append the
-  // current one. This keeps the message at the tail (suffix position),
-  // maximizing the shared KV-cached prefix.
-  pi.on("context", async (event) => {
-    const profile = getCurrentProfile();
-    const ephemeralMessage: AgentMessage & { customType: string; display: boolean } = {
-      role: "custom",
-      customType: EPHEMERAL_CUSTOM_TYPE,
-      content: getEphemeralContextMessage(profile),
-      display: false,
-      timestamp: Date.now(),
-    };
-    return { messages: swapEphemeralMessage(event.messages, ephemeralMessage) };
-  });
-
-  pi.on("before_agent_start", async (_event, ctx) => {
+  // Mode messaging is on-switch/start/compact only — no per-turn injection.
+  // The static permissions+subagents block is appended to the system prompt
+  // once (byte-identical every turn, so the provider-side KV prefix stays
+  // cached); durable reminders carry the active mode across turns.
+  pi.on("before_agent_start", async (event, ctx) => {
     // Clear stale plan widget from a previous turn
     ctx.ui.setWidget("plan", undefined);
+    return { systemPrompt: `${event.systemPrompt}\n\n${STATIC_SYSTEM_PROMPT_BLOCK}` };
+  });
+
+  // Compaction purges history; re-append the current-mode reminder
+  // unconditionally so the mode survives the purge.
+  pi.on("session_compact", async () => {
+    pi.sendMessage({
+      customType: MODE_REMINDER_CUSTOM_TYPE,
+      content: getSessionModeMessage(getCurrentProfile()),
+      display: true,
+    });
   });
 
 
