@@ -2,7 +2,7 @@
  * reviewer-state.ts — permission-review circuit-breaker state and review
  * execution. Harness-free: transcript source and subagent spawn are injected.
  */
-import type { ReviewVerdict, ReviewerAssessment, SessionEntriesSource } from "./types.ts";
+import type { ReviewVerdict, ReviewerAssessment, SessionEntriesSource, ProfileName } from "./types.ts";
 import type { PermissionCheck } from "./check.ts";
 import {
   REVIEWER_SYSTEM_PROMPT,
@@ -12,6 +12,7 @@ import {
   type ActionJsonOpts,
   type TranscriptEntry,
 } from "./reviewer-prompt.ts";
+import { isReadOnly } from "./profiles.ts";
 
 // ─── Module state (circuit breaker + turn token) ───────────────────────────
 
@@ -88,8 +89,8 @@ export interface ReviewCallOpts {
     cwd?: string;
     modelRegistry?: { getAll(): Array<{ id: string; provider?: string }> };
   };
-  /** Profile string for action JSON (plan/build). */
-  profile: string;
+  /** Profile string for action JSON (canonicalized to ro/rw below). */
+  profile: ProfileName;
   signal?: AbortSignal;
   timeoutMs: number;
   retryReason?: string;
@@ -131,14 +132,16 @@ export async function runPermissionReview(
     // If we can't build the transcript, proceed without one
   }
 
-  // Build action JSON
+  // Build action JSON. Canonicalize the mode to the ro/rw pair the reviewer
+  // prompt defines: plan→ro, build→rw, ro/rw pass through unchanged. The
+  // reviewer must not have to know which paradigm the session uses.
   const actionOpts: ActionJsonOpts = {
     permission: opts.permission,
     target: opts.target,
     cwd: opts.cwd,
     ...(opts.check.unapproved ? { subcommands: opts.check.unapproved } : {}),
     ...(opts.check.redirectTargets ? { redirectTargets: opts.check.redirectTargets } : {}),
-    profile: opts.profile,
+    profile: isReadOnly(opts.profile) ? "ro" : "rw",
   };
   const actionJson = formatActionJson(actionOpts);
 

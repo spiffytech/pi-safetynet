@@ -1,12 +1,36 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { checkBashPermission, checkFileTarget, checkToolPermission } from "./check.ts";
+import { checkBashPermission, checkFileTarget, checkToolPermission, actionWrites } from "./check.ts";
 import { parseCommand } from "./bash-parser.ts";
 import { getBaselineRules } from "./permissions/index.ts";
 import type { Ruleset } from "./types.ts";
 
 const RULES = getBaselineRules();
 const CWD = "/home/user/project";
+
+describe("actionWrites — mechanical write classification for mode enforcement", () => {
+  it("classifies the edit tool as a write", () => {
+    assert.equal(actionWrites("edit", { action: "ask" }), true);
+  });
+
+  it("classifies bash with an output redirect as a write", () => {
+    assert.equal(
+      actionWrites("bash", { action: "ask", redirectTargets: [{ permission: "edit", path: "/tmp/out.txt" }] }),
+      true,
+    );
+  });
+
+  it("does not classify bash with only input redirects as a write", () => {
+    assert.equal(
+      actionWrites("bash", { action: "ask", redirectTargets: [{ permission: "read", path: "/tmp/in.txt" }] }),
+      false,
+    );
+  });
+
+  it("does not classify reads as writes", () => {
+    assert.equal(actionWrites("read", { action: "ask" }), false);
+  });
+});
 
 describe("checkBashPermission cd auto-approve", () => {
   it("auto-approves cd to cwd", () => {

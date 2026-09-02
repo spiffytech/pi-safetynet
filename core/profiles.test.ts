@@ -4,7 +4,9 @@ import {
   getCurrentProfile,
   setCurrentProfile,
   MODE_REMINDER_CUSTOM_TYPE,
-  STATIC_SYSTEM_PROMPT_BLOCK,
+  READ_ONLY_SYSTEM_PROMPT_BLOCK,
+  READ_WRITE_SYSTEM_PROMPT_BLOCK,
+  getModeSystemPrompt,
   getModeSwitchMessage,
   getSessionModeMessage,
   getLatestCustomEntry,
@@ -114,32 +116,71 @@ describe("profiles", () => {
     });
   });
 
-  describe("STATIC_SYSTEM_PROMPT_BLOCK", () => {
-    it("is a non-empty string", () => {
-      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.length > 0);
+  describe("READ_WRITE_SYSTEM_PROMPT_BLOCK", () => {
+    it("is a non-empty string headed with the SAFETYNET READ-WRITE marker", () => {
+      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.length > 0);
+      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.startsWith("[SAFETYNET READ-WRITE]"));
     });
 
-    it("contains the Permissions section with the ruleset", () => {
-      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("## Permissions"));
-      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("Allowlisted commands run silently"));
-      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("Unknown commands prompt the user for approval"));
-      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("Dangerous commands are blocked"));
+    it("contains the ruleset and the switch hint", () => {
+      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("You are in read-write mode"));
+      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("Allowlisted commands run silently"));
+      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("Unknown commands prompt the user for approval"));
+      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("Dangerous commands are blocked"));
+      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("/safetynet:ro"));
     });
 
-    it("mentions the mode toggle", () => {
-      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("toggle between read-only and read-write mode"));
+    it("contains the Subagents section with both subagent types", () => {
+      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("## Subagents"));
+      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("subagent_explore"));
+      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("subagent_build"));
+    });
+  });
+
+  describe("READ_ONLY_SYSTEM_PROMPT_BLOCK", () => {
+    it("is a non-empty string headed with the SAFETYNET READ-ONLY marker", () => {
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.length > 0);
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.startsWith("[SAFETYNET READ-ONLY]"));
     });
 
-    it("contains the Subagents section", () => {
-      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("## Subagents"));
-      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("subagent_explore"));
-      assert.ok(STATIC_SYSTEM_PROMPT_BLOCK.includes("subagent_build"));
+    it("tells the model to honor the SPIRIT of read-only mode, not just its letter", () => {
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("You are in read-only mode"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("Honor the spirit of read-only mode"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("do not look for ways around it"));
     });
 
-    it("is mode-independent and constant", () => {
-      assert.equal(STATIC_SYSTEM_PROMPT_BLOCK, STATIC_SYSTEM_PROMPT_BLOCK);
-      // Byte-identical across turns — no per-turn injection, no template state.
-      assert.ok(!STATIC_SYSTEM_PROMPT_BLOCK.includes("${profile}"));
+    it("names bash workarounds that are prohibited (redirects, sed -i, tee, heredocs, interpreter one-liners)", () => {
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("redirects into files"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("sed -i"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("tee"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("heredocs"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("interpreter one-liners"));
+    });
+
+    it("forbids delegating implementation to a subagent and points to the rw switch", () => {
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("delegating implementation to a subagent"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("Do not spawn subagent_build to implement changes while in read-only mode"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("/safetynet:rw"));
+    });
+
+    it("contains the ruleset and both subagent types like the rw stanza", () => {
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("Allowlisted commands run silently"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("Unknown commands prompt the user for approval"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("Dangerous commands are blocked"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("subagent_explore"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("subagent_build"));
+    });
+  });
+
+  describe("getModeSystemPrompt", () => {
+    it("returns the read-only stanza for plan and ro", () => {
+      assert.equal(getModeSystemPrompt("plan"), READ_ONLY_SYSTEM_PROMPT_BLOCK);
+      assert.equal(getModeSystemPrompt("ro"), READ_ONLY_SYSTEM_PROMPT_BLOCK);
+    });
+
+    it("returns the read-write stanza for build and rw", () => {
+      assert.equal(getModeSystemPrompt("build"), READ_WRITE_SYSTEM_PROMPT_BLOCK);
+      assert.equal(getModeSystemPrompt("rw"), READ_WRITE_SYSTEM_PROMPT_BLOCK);
     });
   });
 

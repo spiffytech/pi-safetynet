@@ -36,6 +36,19 @@ describe("REVIEWER_SYSTEM_PROMPT policy content", () => {
   it("contains the high-risk egress taxonomy entry", () => {
     assert.match(REVIEWER_SYSTEM_PROMPT, /deploying or sending data to an external destination the user never named/);
   });
+
+  it("defines session modes: ro read-only denies writes, rw normal policy", () => {
+    assert.match(REVIEWER_SYSTEM_PROMPT, /## Session mode/);
+    assert.match(REVIEWER_SYSTEM_PROMPT, /"ro" \(read-only\)/);
+    assert.match(REVIEWER_SYSTEM_PROMPT, /DENY every action with write or state-changing side effects/);
+    assert.match(REVIEWER_SYSTEM_PROMPT, /"rw" \(read-write\) — normal policy applies/);
+    assert.match(REVIEWER_SYSTEM_PROMPT, /no user message or transcript evidence licenses a write/);
+  });
+
+  it("lets read-only mode override risk and authorization in the outcome policy", () => {
+    assert.match(REVIEWER_SYSTEM_PROMPT, /Read-only session → deny any write action outright, before scoring/);
+    assert.match(REVIEWER_SYSTEM_PROMPT, /In read-only mode \(see Session mode\), write actions are denied outright regardless of level/);
+  });
 });
 
 // ─── parseAssessment: user_authorization defaulting ─────────────────────────
@@ -120,7 +133,50 @@ describe("compactTranscript", () => {
   });
 });
 
-// ─── Trajectory: runPermissionReview builds a user-only transcript ─────────
+describe("runPermissionReview — profile canonicalization to ro/rw", () => {
+  async function captureReviewProfile(profile: any): Promise<string> {
+    let captured = "";
+    await runPermissionReview(
+      {
+        permission: "bash",
+        target: "touch x",
+        check: { action: "ask" },
+        cwd: "/tmp",
+        parentCtx: { sessionManager: { getEntries: () => [] } } as any,
+        profile,
+        timeoutMs: 100,
+      },
+      {
+        spawn: async (opts: any) => {
+          captured = opts.prompt as string;
+          return {
+            content: [{ type: "text", text: JSON.stringify({ risk_level: "low", user_authorization: "high", outcome: "allow", rationale: "ok" }) }],
+            details: {},
+          };
+        },
+      },
+    );
+    const m = captured.match(/"profile": "([^"]+)"/);
+    return m?.[1] ?? "";
+  }
+
+  it("maps plan → ro", async () => {
+    assert.equal(await captureReviewProfile("plan"), "ro");
+  });
+
+  it("passes ro through unchanged", async () => {
+    assert.equal(await captureReviewProfile("ro"), "ro");
+  });
+
+  it("maps build → rw", async () => {
+    assert.equal(await captureReviewProfile("build"), "rw");
+  });
+
+  it("passes rw through unchanged", async () => {
+    assert.equal(await captureReviewProfile("rw"), "rw");
+  });
+});
+
 
 describe("runPermissionReview trajectory (user-messages-only transcript)", () => {
   function makeEntries() {

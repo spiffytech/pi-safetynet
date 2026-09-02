@@ -16,6 +16,8 @@ import type {
 import { PermissionStorage } from "./core/permissions/index.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import type { PermissionCheck } from "./core/check.ts";
+import { actionWrites } from "./core/check.ts";
+import { isReadOnly } from "./core/profiles.ts";
 import { showOmpPermissionPrompt } from "./omp-permission-prompt.ts";
 import { spawnReviewer } from "./omp-subagent.ts";
 
@@ -35,7 +37,7 @@ function resolveReviewerModel(
 	ctx: ExtensionContext,
 	configModel?: string,
 ): { model?: unknown; modelRegistry?: unknown; modelPattern?: string } {
-	const spec = configModel ?? process.env.SAFENET_REVIEWER_MODEL;
+	const spec = configModel ?? process.env.SAFETYNET_REVIEWER_MODEL;
 	if (spec) {
 		const resolved = ctx.models.resolve(spec);
 		if (resolved) {
@@ -126,6 +128,17 @@ export async function resolveOmpPermission(
 		// the risk policy before we bother the user. Circuit-breaker state and
 		// verdict classification live in core/reviewer-state.ts.
 		if (isAutoEnabled() && !reviewIsActive()) {
+			// Read-only mode enforcement: reject mechanically-classifiable
+			// writes outright — never hand a write to the reviewer, whose
+			// allow would mint temp write rules in a read-only session.
+			// Writes only the reviewer can spot (git commit, touch, mkdir)
+			// are covered by the prompt's Session-mode rule.
+			if (isReadOnly(deps.profile) && actionWrites(opts.permission, check)) {
+				return {
+					block: true,
+					reason: `Mode denied ${opts.permission}: ${opts.target} — read-only mode prevents writes; switch to ${deps.profile === "ro" ? "rw" : "build"} mode to implement`,
+				};
+			}
 			const config = loadAutoApproveConfig();
 			const token = reviewTurnToken();
 			reviewSetActive(true);
@@ -143,7 +156,7 @@ export async function resolveOmpPermission(
 						check,
 						cwd: deps.ctx.cwd,
 						parentCtx: { sessionManager: deps.ctx.sessionManager, modelRegistry: deps.ctx.modelRegistry },
-						profile: deps.profile,
+						profile: isReadOnly(deps.profile) ? "ro" : "rw",
 						timeoutMs: config.timeoutMs ?? 90000,
 						signal: capController.signal,
 						...(config.model ? { model: config.model } : {}),

@@ -401,6 +401,105 @@ describe("resolvePermission — headless deny", () => {
   });
 });
 
+// ─── ro/rw mode enforcement: auto reviewer must reject writes in ro mode ────
+
+// In a read-only session (plan/ro), the auto reviewer must never approve a
+// write. Mechanically-classifiable writes (edit tool, bash output redirects)
+// are denied outright before the reviewer runs — a reviewer hallucinate must
+// not mint temp write rules in ro mode. Semantic writers (git commit, touch,
+// mkdir) are covered by the reviewer prompt's Session-mode rule instead.
+
+describe("resolvePermission — auto reviewer honors read-only mode", () => {
+  it("denies an edit/write tool call in ro mode without invoking the reviewer", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const storage = makeStorage();
+    const denials: Array<[string, string]> = [];
+    let spawnCalls = 0;
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        storage,
+        cwd: "/tmp/ro-proj",
+        allowModes: ["plan", "build"], // read-only session (plan-build paradigm)
+        autoDeny: { continue: true },   // keep the turn alive for assertions
+        sendDenial: (t: string, m: string) => denials.push([t, m]),
+        reviewSpawn: async () => { spawnCalls++; return allowAssessment(); },
+      }),
+      {
+        permission: "edit",
+        target: "/tmp/ro-proj/package.json",
+        check: ASK_CHECK,
+        recheck: ASK_RECHECK,
+      },
+    );
+
+    assert.equal(spawnCalls, 0, "reviewer must not run for a write in ro mode");
+    assert.equal(ctx.aborted.value, false, "autoDeny.continue keeps the turn alive");
+    assert.equal(denials.length, 1, "single hidden nudge");
+    assert.equal(denials[0]![1], "hidden");
+    assert.match(denials[0]![0], /Mode denied edit:/, "labelled as mode-enforced");
+    assert.match(denials[0]![0], /read-only mode prevents writes/, "states the mode rule");
+    assert.ok(result, "blocked");
+    assert.equal(result!.block, true);
+    assert.equal(storage.temp.getRules().length, 0, "no temp allow rules minted in ro mode");
+  });
+
+  it("denies bash with an output redirect in ro mode without invoking the reviewer", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    let spawnCalls = 0;
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        cwd: "/tmp/ro-proj",
+        allowModes: ["ro", "rw"], // read-only session (ro-rw paradigm)
+        autoDeny: { continue: true },
+        sendDenial: () => {},
+        reviewSpawn: async () => { spawnCalls++; return allowAssessment(); },
+      }),
+      {
+        permission: "bash",
+        target: "echo hi > notes.txt",
+        check: { action: "ask", redirectTargets: [{ permission: "edit", path: "/tmp/ro-proj/notes.txt" }] },
+        recheck: ASK_RECHECK,
+      },
+    );
+    assert.equal(spawnCalls, 0, "reviewer must not run for a write in ro mode");
+    assert.ok(result);
+    assert.match(result!.reason, /read-only mode prevents writes/);
+  });
+
+  it("still routes pure reads through the reviewer in ro mode", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const storage = makeStorage();
+    let spawnCalls = 0;
+    const wrappedSpawn = async () => {
+      spawnCalls++;
+      return makeReviewSpawn([allowAssessment()])();
+    };
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        storage,
+        cwd: "/tmp/ro-proj",
+        allowModes: ["plan", "build"],
+        reviewSpawn: wrappedSpawn,
+        sendAutoApproval: () => {},
+      }),
+      {
+        permission: "read",
+        target: "/tmp/ro-proj/src/x.ts",
+        check: ASK_CHECK,
+        recheck: () => ({ action: "allow" as const }),
+      },
+    );
+    assert.equal(spawnCalls, 1, "reads are still auto-reviewable in ro mode");
+    assert.equal(result, undefined, "read auto-approval proceeds");
+  });
+});
+
 // ─── Regression: auto-approval must not abort the turn on write batches ─────
 //
 // Session 019fd4a1: with /safetynet:auto on, a batch of `write` tool calls

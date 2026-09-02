@@ -23,7 +23,7 @@ import {
 	getCurrentProfile,
 	setCurrentProfile,
 	MODE_REMINDER_CUSTOM_TYPE,
-	STATIC_SYSTEM_PROMPT_BLOCK,
+	getModeSystemPrompt,
 	getModeSwitchMessage,
 	getSessionModeMessage,
 	getParadigm,
@@ -181,10 +181,12 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 
 	// ── Mode messaging: on-switch/start/compact only — no per-turn injection ──
 
-	// Static permissions+subagents block appended to the system prompt once.
-	// Byte-identical every turn so the provider-side KV prefix stays cached.
+	// Mode-specific permissions+subagents stanza appended to the system prompt
+	// once per agent start, matching the CURRENT mode. Stable within a mode so
+	// the provider-side KV prefix stays cached; switches are reflected on the
+	// next turn plus a durable reminder (see switchProfile).
 	pi.on("before_agent_start", async (event) => {
-		return { systemPrompt: [...event.systemPrompt, STATIC_SYSTEM_PROMPT_BLOCK] };
+		return { systemPrompt: [...event.systemPrompt, getModeSystemPrompt(getCurrentProfile())] };
 	});
 
 	// Compaction purges history; re-append the current-mode reminder

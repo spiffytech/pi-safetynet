@@ -88,27 +88,54 @@ export function restoreProfile(ctx: SessionEntriesSource): void {
 /** Custom type for durable mode-reminder messages (persisted, shown in transcript). */
 export const MODE_REMINDER_CUSTOM_TYPE = "safetynet:mode-reminder";
 
-/**
- * Static block appended to the system prompt exactly once (byte-identical
- * across turns so the KV-cache prefix stays stable). Mode-independent: the
- * active mode is conveyed by durable reminder messages instead.
- */
-export const STATIC_SYSTEM_PROMPT_BLOCK = `## Permissions
+/** Mode-specific system-prompt stanza appended at agent start: read-write. */
+export const READ_WRITE_SYSTEM_PROMPT_BLOCK = `[SAFETYNET READ-WRITE]
+You are in read-write mode. You may read, run commands, and make changes.
 
 Commands are evaluated against the permission ruleset:
 - Allowlisted commands run silently
 - Unknown commands prompt the user for approval
 - Dangerous commands are blocked
 
-The user can toggle between read-only and read-write mode at any time.
+The user can switch to read-only mode with /safetynet:ro.
 
 ## Subagents
-
 You may spawn subagents for parallel or delegated work:
 - subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands.
 - subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval.
 
 Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.`;
+
+/** Mode-specific system-prompt stanza appended at agent start: read-only.
+ *  Tells the model to honor the spirit of the mode, not just its letter —
+ *  no workarounds through bash tricks or build subagents, propose instead. */
+export const READ_ONLY_SYSTEM_PROMPT_BLOCK = `[SAFETYNET READ-ONLY]
+You are in read-only mode. You may read and inspect, but you may NOT modify files or run state-changing commands.
+
+Honor the spirit of read-only mode — do not look for ways around it:
+- Do not attempt edits or writes, including through bash (redirects into files, sed -i, tee, heredocs, interpreter one-liners) or by delegating implementation to a subagent.
+- Read, search, analyze, and propose. If a change is needed, describe exactly what you would do and let the user switch to read-write mode with /safetynet:rw.
+
+Commands are evaluated against the permission ruleset:
+- Allowlisted commands run silently
+- Unknown commands prompt the user for approval
+- Dangerous commands are blocked
+
+The user can switch to read-write mode with /safetynet:rw.
+
+## Subagents
+You may spawn subagents for parallel or delegated work:
+- subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands.
+- subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval.
+
+Do not spawn subagent_build to implement changes while in read-only mode — propose the changes instead and let the user switch to read-write mode.
+
+Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.`;
+
+/** Pick the system-prompt stanza for the active mode. */
+export function getModeSystemPrompt(profile: ProfileName): string {
+	return isReadOnly(profile) ? READ_ONLY_SYSTEM_PROMPT_BLOCK : READ_WRITE_SYSTEM_PROMPT_BLOCK;
+}
 
 /** Durable user message appended on mode switch (exactly one per switch). */
 export function getModeSwitchMessage(profile: ProfileName): string {

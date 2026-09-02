@@ -35,7 +35,7 @@ export interface OmpSpawnOpts {
 	modelRegistry?: ModelRegistry;
 	/** Reviewer model pattern (provider/model or model id). Used only when
 	 *  no resolved model object was provided. Falls back to
-	 *  SAFENET_REVIEWER_MODEL env. */
+	 *  SAFETYNET_REVIEWER_MODEL env. */
 	modelPattern?: string;
 }
 
@@ -72,8 +72,8 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 				? {}
 				: opts.modelPattern
 					? { modelPattern: opts.modelPattern }
-					: process.env.SAFENET_REVIEWER_MODEL
-						? { modelPattern: process.env.SAFENET_REVIEWER_MODEL }
+					: process.env.SAFETYNET_REVIEWER_MODEL
+						? { modelPattern: process.env.SAFETYNET_REVIEWER_MODEL }
 						: {}),
 		});
 		session = created.session;

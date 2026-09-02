@@ -271,14 +271,14 @@ export function createSubagentSafetynetExtension(opts: SubagentSafetynetOpts): (
 
 function getSubagentContextMessage(taskType: "explore" | "build"): string {
 	if (taskType === "explore") {
-		return `[SAFENET SUBAGENT EXPLORE MODE]
+		return `[SAFETYNET SUBAGENT EXPLORE MODE]
 You are a read-only explore subagent. You can read files and search the codebase.
 
 You CANNOT modify files, run commands, or ask questions.
 Focus on completing the task you were given. Report your findings concisely.`;
 	}
 
-	return `[SAFENET SUBAGENT BUILD MODE]
+	return `[SAFETYNET SUBAGENT BUILD MODE]
 You are a subagent running in build mode. Permission prompts will be shown to the parent session's user for approval.
 
 Commands are evaluated against the permission ruleset:

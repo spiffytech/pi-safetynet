@@ -18,6 +18,7 @@ import { showPermissionPrompt } from "./prompts.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import { PermissionStorage } from "./core/permissions/index.ts";
 import type { PermissionCheck } from "./core/check.ts";
+import { actionWrites } from "./core/check.ts";
 import { isAutoEnabled, loadAutoApproveConfig, setAutoEnabled } from "./core/auto-config-state.ts";
 import {
   runPermissionReview, reviewConsecutiveDenies, reviewResetDenies,
@@ -145,7 +146,7 @@ export function denyResultFromPrompt(
 }
 
 /** Source of a denial, used to label the surfaced line. */
-export type DenialSource = "reviewer" | "ruleset" | "headless";
+export type DenialSource = "reviewer" | "ruleset" | "headless" | "mode";
 
 /** Build a self-contained, human-readable denial line: what was denied and why.
  *  risk_level / user_authorization stay internal to the reviewer decision —
@@ -158,7 +159,8 @@ export function denialDetail(
 ): string {
   const label =
     source === "reviewer" ? "Auto-denied" :
-    source === "ruleset" ? "Ruleset denied" : "Denied";
+    source === "ruleset" ? "Ruleset denied" :
+    source === "mode" ? "Mode denied" : "Denied";
   return `${label} ${permission}: ${target} — ${reason}`;
 }
 
@@ -214,6 +216,27 @@ export function buildApprovalRules(
   return rules;
 }
 
+/** Deny a mechanically-classifiable write in a read-only session: no reviewer
+ *  call, no temp rules. Mirrors resolveDeny's non-hazardous path but labels the
+ *  denial as mode-enforced ("Mode denied") and never counts toward the
+ *  reviewer circuit-breaker — a read-only session repeatedly attempting writes
+ *  must not disable auto-approve. */
+function readOnlyWriteDeny(
+  deps: PipelineDeps,
+  permission: "bash" | "read" | "edit",
+  target: string,
+): { block: true; reason: string } {
+  const reason = "read-only mode prevents writes — switch to write mode to implement";
+  const detail = denialDetail(permission, target, reason, "mode");
+  deps.sendDenial?.(detail, "hidden");
+  if (!deps.autoDeny.continue) {
+    deps.sendDenial?.(detail, "visible");
+    deps.displayCtx.abort();
+    deps.onDenied?.();
+  }
+  return { block: true, reason: detail };
+}
+
 // ─── Shared pipeline ───────────────────────────────────────────────────────
 
 export async function resolvePermission(
@@ -226,6 +249,24 @@ export async function resolvePermission(
   },
 ): Promise<{ block: boolean; reason: string } | undefined> {
   const { action } = opts.check;
+
+  /** Canonical ro/rw mode for the review profile. Read-only sessions (plan/ro)
+   *  always review as "ro" so the reviewer enforces its read-only rules. */
+  const reviewProfile =
+    deps.allowModes.includes("plan") || deps.allowModes.includes("ro") ? "ro" : "rw";
+
+  /** Read-only mode enforcement: never auto-approve a write in a read-only
+   *  session. Mechanically-classifiable writes (edit tool, output redirects)
+   *  are denied outright — no reviewer call, no temp rules (a reviewer
+   *  hallucinate must not mint a write allow in ro mode). Writes only the
+   *  reviewer can spot (git commit, touch, mkdir) are covered by the prompt's
+   *  Session-mode rule. */
+  const rejectWriteInReadOnly = (): { block: true; reason: string } | undefined => {
+    if (reviewProfile === "ro" && actionWrites(opts.permission, opts.check)) {
+      return readOnlyWriteDeny(deps, opts.permission, opts.target);
+    }
+    return undefined;
+  };
 
   // ── Allow / Deny short-circuits ──────────────────────────────────────────
   if (action === "allow") return undefined;
@@ -250,6 +291,10 @@ export async function resolvePermission(
 
   // ── Auto-review block (runs BEFORE headless check per T13) ───────────────
   if (action === "ask" && isAutoEnabled() && !reviewIsActive()) {
+    // Read-only mode short-circuit: reject writes before the reviewer runs.
+    const modeDenied = rejectWriteInReadOnly();
+    if (modeDenied) return modeDenied;
+
     const config = loadAutoApproveConfig();
     const timeoutMs = config.timeoutMs ?? 90000;
     const maxDenials = config.maxDenials ?? 3;
@@ -270,7 +315,7 @@ export async function resolvePermission(
             check: opts.check,
             cwd: deps.cwd,
             parentCtx: deps.displayCtx,
-            profile: deps.allowModes.includes("plan") || deps.allowModes.includes("ro") ? "ro" : "rw",
+            profile: reviewProfile,
             signal: ctl.signal,
             timeoutMs,
             ...(config.model ? { model: config.model } : {}),
@@ -336,7 +381,7 @@ export async function resolvePermission(
           if (retriesDone >= maxRetries) { clearInterval(retryInterval); return; }
           retriesDone++;
           const verdict = await runPermissionReview(
-            { permission: opts.permission, target: opts.target, check: opts.check, cwd: deps.cwd, parentCtx: deps.displayCtx, profile: deps.allowModes.includes("plan") || deps.allowModes.includes("ro") ? "ro" : "rw", timeoutMs, ...(config.model ? { model: config.model } : {}) },
+            { permission: opts.permission, target: opts.target, check: opts.check, cwd: deps.cwd, parentCtx: deps.displayCtx, profile: reviewProfile, timeoutMs, ...(config.model ? { model: config.model } : {}) },
             { spawn: deps.reviewSpawn ?? (await import("./subagent.ts").then((m) => m.runSubagent)) },
           ).catch(() => ({ kind: "transient" as const, message: "retry failed" }));
           if (verdict.kind === "assessment") {
@@ -400,6 +445,10 @@ export async function resolvePermission(
       if (pending && pending.kind === "assessment") {
         clearPendingAutoResult();
         if (pending.assessment.outcome === "allow") {
+          // A background-retry verdict can land after the session flipped to
+          // read-only; never mint write temp rules from it either.
+          const modeDenied = rejectWriteInReadOnly();
+          if (modeDenied) return modeDenied;
           reviewResetDenies();
           const tempRules = buildApprovalRules(opts.check, opts.permission, deps.cwd, deps.allowModes, opts.target);
           const allStorages = [deps.storage, ...(deps.dualWrite ?? [])];

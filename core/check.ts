@@ -31,6 +31,19 @@ export interface PermissionCheck {
   hazardous?: boolean;
 }
 
+/** True when the checked action has write side effects: an edit/write tool
+ *  call, or a bash command writing through an output redirect. Mechanical
+ *  classification — commands whose writing is only detectable semantically
+ *  (git commit, touch, mkdir) are NOT flagged here; the reviewer prompt's
+ *  Session-mode rule denies those in read-only sessions. */
+export function actionWrites(permission: "bash" | "read" | "edit", check: PermissionCheck): boolean {
+  if (permission === "edit") return true;
+  if (permission === "bash") {
+    return (check.redirectTargets ?? []).some((rt) => rt.permission === "edit");
+  }
+  return false;
+}
+
 export function checkFileTarget(
   filePath: string,
   permission: "read" | "edit",

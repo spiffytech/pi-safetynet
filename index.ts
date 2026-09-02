@@ -28,7 +28,7 @@ import {
   getCurrentProfile,
   setCurrentProfile,
   MODE_REMINDER_CUSTOM_TYPE,
-  STATIC_SYSTEM_PROMPT_BLOCK,
+  getModeSystemPrompt,
   getModeSwitchMessage,
   getSessionModeMessage,
   persistProfile,
@@ -986,14 +986,14 @@ export default function safetynetExtension(api: ExtensionAPI) {
     hazardousDenyState.count = 0;
   });
 
-  // Mode messaging is on-switch/start/compact only — no per-turn injection.
-  // The static permissions+subagents block is appended to the system prompt
-  // once (byte-identical every turn, so the provider-side KV prefix stays
-  // cached); durable reminders carry the active mode across turns.
+  // Mode messaging: per-turn mode-specific stanza in the system prompt.
+  // The active-mode stanza is appended on every agent start (matching the
+  // current profile), so after a mode switch the next turn's prompt already
+  // reflects the new mode; durable reminders carry the switch itself.
   pi.on("before_agent_start", async (event, ctx) => {
     // Clear stale plan widget from a previous turn
     ctx.ui.setWidget("plan", undefined);
-    return { systemPrompt: `${event.systemPrompt}\n\n${STATIC_SYSTEM_PROMPT_BLOCK}` };
+    return { systemPrompt: `${event.systemPrompt}\n\n${getModeSystemPrompt(getCurrentProfile())}` };
   });
 
   // Compaction purges history; re-append the current-mode reminder
