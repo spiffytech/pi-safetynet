@@ -68,6 +68,7 @@ export function loadAutoApproveConfig(): AutoApproveConfig {
       maxDenials: typeof raw.maxDenials === "number" ? raw.maxDenials : 3,
       retryIntervalMs: typeof raw.retryIntervalMs === "number" ? raw.retryIntervalMs : 30000,
       maxRetries: typeof raw.maxRetries === "number" ? raw.maxRetries : 2,
+      latencyWarnEmaMs: typeof raw.latencyWarnEmaMs === "number" ? raw.latencyWarnEmaMs : 8000,
     };
   } catch {
     return {};

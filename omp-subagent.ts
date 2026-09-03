@@ -48,7 +48,21 @@ export interface ReviewerSession {
 	sessionManager: SessionEntriesSource["sessionManager"];
 }
 
-/** Spawn an isolated read-only session and return its final assistant text. */
+/** Preloaded discovery pass-throughs for the reviewer session. The reviewer
+ *  needs read/grep/glob plus the injected review prompt — nothing discovered
+ *  from disk. Empty arrays skip the FS walks (TTSR rule compilation, skills
+ *  scan, AGENTS.md walk, prompt-template discovery) that dominated boot cost
+ *  when a review ran inside the parent's 30s tool_call budget. The
+ *  workspaceTree stub matches the SDK's own empty-scan sentinel shape. */
+const REVIEWER_SESSION_PRELOADS = {
+	rules: [],
+	skills: [],
+	contextFiles: [],
+	promptTemplates: [],
+	slashCommands: [],
+	workspaceTree: { rootPath: "", rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+};
+
 export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult> {
 	const details: Record<string, unknown> = {};
 	const reviewerT0 = Date.now();
@@ -85,6 +99,8 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 			enableMCP: false,
 			restrictToolNames: true,
 			toolNames: ["read", "grep", "glob"],
+			...REVIEWER_SESSION_PRELOADS,
+			workspaceTree: { ...REVIEWER_SESSION_PRELOADS.workspaceTree, rootPath: opts.cwd },
 			...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
 			...(opts.timeoutMs ? { deadline: Date.now() + opts.timeoutMs } : {}),
 			...(opts.model ? { model: opts.model } : {}),
@@ -125,8 +141,14 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 		} finally {
 			opts.signal?.removeEventListener("abort", onAbort);
 		}
+		const promptMs = Date.now() - reviewerT0 - bootMs;
 		details.bootMs = bootMs;
-		details.promptMs = Date.now() - reviewerT0 - bootMs;
+		details.promptMs = promptMs;
+		// Phase timings land in the omp debug log; correlated against
+		// ui.loop-blocked entries when a review stalls the UI.
+		if (promptMs > 3000) {
+			console.warn(`safetynet: reviewer slow — boot=${bootMs}ms prompt=${promptMs}ms total=${Date.now() - reviewerT0}ms`);
+		}
 
 		// Extract final assistant text from the reviewer's OWN in-memory
 		// session (entries live in `entry.message`, an AgentMessage).

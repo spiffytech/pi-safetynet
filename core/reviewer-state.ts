@@ -33,11 +33,27 @@ export function reviewBumpTurnToken(): void { turnToken++; }
 export function reviewIsActive(): boolean { return reviewActive; }
 export function reviewSetActive(v: boolean): void { reviewActive = v; }
 
+// ─── Reviewer latency EMA (sticky slow-reviewer warning) ───────────────────
+
+/** Exponential moving average of completed review wall-times, in ms.
+ *  Alpha 0.3: responsive enough to flag a slow model within ~3 reviews,
+ *  stable enough not to flap on one outlier. */
+let latencyEmaMs: number | null = null;
+
+/** Record a completed review's wall time and return the current EMA. */
+export function reviewRecordLatency(ms: number): number {
+  latencyEmaMs = latencyEmaMs === null ? ms : Math.round(latencyEmaMs * 0.7 + ms * 0.3);
+  return latencyEmaMs;
+}
+
+export function reviewLatencyEma(): number | null { return latencyEmaMs; }
+
 /** Reset all state for tests. */
 export function resetReviewStateForTests(): void {
   consecutiveDenies = 0;
   turnToken = 0;
   reviewActive = false;
+  latencyEmaMs = null;
   pendingAutoResult = null;
 }
 

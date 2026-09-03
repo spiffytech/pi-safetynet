@@ -9,7 +9,7 @@
  * Not yet ported (Phase 4): LLM auto-approve reviewer, subagent bridging.
  */
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { ProfileName, Ruleset } from "./core/types.ts";
+import { resolveOmpPermission, type OmpPipelineDeps } from "./omp-pipeline.ts";
 import { PermissionStorage } from "./core/permissions/index.ts";
 import {
 	loadSubagentsConfig,
@@ -18,6 +18,7 @@ import {
 	loadParadigm,
 	loadToggleModeKey,
 } from "./core/global-config.ts";
+import type { ProfileName, Ruleset } from "./core/types.ts";
 import { checkBashPermission, checkFileTarget } from "./core/check.ts";
 import {
 	getCurrentProfile,
@@ -35,7 +36,6 @@ import {
 	persistProfile,
 	restoreProfile,
 } from "./core/profiles.ts";
-import { resolveOmpPermission, type OmpPipelineDeps } from "./omp-pipeline.ts";
 import {
 	isAutoEnabled,
 	toggleAutoEnabled,
@@ -195,7 +195,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		pi.sendMessage({
 			customType: MODE_REMINDER_CUSTOM_TYPE,
 			content: getSessionModeMessage(getCurrentProfile()),
-			display: true,
+				display: true,
 		});
 	});
 

@@ -57,6 +57,8 @@ import {
 	reviewTurnToken,
 	reviewIncrementDenies,
 	reviewResetDenies,
+	reviewRecordLatency,
+	reviewLatencyEma,
 } from "./core/reviewer-state.ts";
 import { loadAutoApproveConfig, isAutoEnabled } from "./core/auto-config-state.ts";
 
@@ -107,6 +109,22 @@ function buildApprovalTempRules(
 	return rules;
 }
 
+/** Sticky reviewer-health widget. Renders whenever the EMA has crossed the
+ *  configured threshold; clears when the EMA recovers below it. The widget
+ *  survives redraws because setWidget content is declarative. */
+function updateLatencyWidget(deps: OmpPipelineDeps, emaMs: number, thresholdMs: number): void {
+	const ui = deps.ctx.ui;
+	if (emaMs > thresholdMs) {
+		ui.setWidget(
+			"safetynet-reviewer-latency",
+			[`⚠ safetynet reviewer slow: EMA ${(emaMs / 1000).toFixed(1)}s > ${(thresholdMs / 1000).toFixed(1)}s budget (autoApprove.latencyWarnEmaMs)`],
+			{ placement: "belowEditor" },
+		);
+	} else {
+		ui.setWidget("safetynet-reviewer-latency", undefined);
+	}
+}
+
 export async function resolveOmpPermission(
 	deps: OmpPipelineDeps,
 	opts: ResolveOpts,
@@ -153,6 +171,7 @@ export async function resolveOmpPermission(
 				capController.abort(new DOMException("Auto-review exceeded time budget", "TimeoutError"));
 			}, AUTO_REVIEW_CAP_MS);
 			try {
+				const reviewT0 = Date.now();
 				const verdict = await runPermissionReview(
 					{
 						permission: opts.permission,
@@ -172,6 +191,7 @@ export async function resolveOmpPermission(
 							...(o.signal ? { signal: o.signal } : {}),
 						}) },
 				);
+				updateLatencyWidget(deps, reviewRecordLatency(Date.now() - reviewT0), config.latencyWarnEmaMs ?? 8000);
 				// Discard stale verdicts (their turn already ended).
 				if (token === reviewTurnToken() && verdict.kind === "assessment") {
 					if (verdict.assessment.outcome === "allow") {

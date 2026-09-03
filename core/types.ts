@@ -76,6 +76,9 @@ export interface AutoApproveConfig {
   maxDenials?: number;
   retryIntervalMs?: number;
   maxRetries?: number;
+  /** Warn (sticky UI widget) when the reviewer-latency EMA exceeds this many
+   *  milliseconds. Default 8000. */
+  latencyWarnEmaMs?: number;
 }
 
 /** Configurable prompt keybindings (key identifiers as understood by
