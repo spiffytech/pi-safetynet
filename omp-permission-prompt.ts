@@ -21,7 +21,7 @@ import {
 	visibleWidth,
 	type KeyId,
 } from "@oh-my-pi/pi-tui";
-import { DynamicBorder, getEditorTheme, type Theme, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { DynamicBorder, getEditorTheme, Settings, type Theme, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { toDisplayPath } from "./core/project.ts";
 import type { PromptKeybindings, PermissionDuration } from "./core/types.ts";
 
@@ -68,9 +68,21 @@ type FocusZone = "commands" | "duration" | "deny";
 
 const MAX_DISPLAY_CHARS = 280;
 
+/**
+ * True when omp's `display.hideToolActivity` is hiding tool calls from the
+ * transcript. Read live per prompt via omp's Settings singleton — the same
+ * object the TUI reads — so the /settings toggle is reflected immediately.
+ * Display-only: never consulted by parsing or permission checks. Throws when
+ * settings aren't initialized (this module only ever renders inside omp).
+ */
+export function isToolActivityHidden(): boolean {
+	return Settings.instance.get("display.hideToolActivity") === true;
+}
+
 function displayText(item: CommandListItem): string {
 	if (item.isFile) return toDisplayPath(item.text);
 	const firstNewline = item.text.indexOf("\n");
+
 	const firstLine = firstNewline >= 0 ? item.text.slice(0, firstNewline) : item.text;
 	if (firstLine.length <= MAX_DISPLAY_CHARS) return firstLine;
 	return firstLine.slice(0, MAX_DISPLAY_CHARS - 1) + "…";
@@ -524,6 +536,12 @@ export async function showOmpPermissionPrompt(
 	const extraHeader: string[] = [];
 	if (opts.reprompt) {
 		extraHeader.push("ℹ️ Rules were added but still insufficient — additional approval needed.");
+	}
+	// When omp hides tool activity, the transcript shows no record of this
+	// call — surface the raw tool target here so the prompt is self-describing.
+	// Display only; the permission decision below is unaffected.
+	if (isToolActivityHidden()) {
+		extraHeader.push(`raw: ${opts.target}`);
 	}
 
 	const headerText = isFile
