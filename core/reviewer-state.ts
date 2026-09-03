@@ -93,18 +93,45 @@ export interface ReviewCallOpts {
   profile: ProfileName;
   signal?: AbortSignal;
   timeoutMs: number;
+  /** Retry reason injected at the top of the task prompt (background-retry path). */
   retryReason?: string;
-  /** Model id override (autoApprove.model from config), resolved against the parent registry. */
-  model?: string;
+  /** Reviewer model spec (or fallback list, tried in order). */
+  model?: string | string[];
 }
 
-/** Run a permission review and classify the result. */
+/** Run a permission review and classify the result. When `opts.model` is a
+ *  list, each spec is tried in order until one produces a usable verdict;
+ *  the last failure is returned otherwise. */
 export async function runPermissionReview(
   opts: ReviewCallOpts,
   deps: ReviewDeps,
 ): Promise<ReviewVerdict> {
+  const specs = Array.isArray(opts.model) ? opts.model : opts.model ? [opts.model] : [];
+  // No model configured → single attempt on the parent model (historical default).
+  if (specs.length === 0) return runPermissionReviewWithModel(opts, deps, "");
+  let lastVerdict: ReviewVerdict | undefined;
+  for (let i = 0; i < specs.length; i++) {
+    const spec = specs[i]!;
+    const verdict = await runPermissionReviewWithModel(opts, deps, spec);
+    if (verdict.kind === "assessment") return verdict;
+    lastVerdict = verdict;
+    if (i < specs.length - 1) {
+      console.warn(`safetynet: reviewer model "${spec}" failed (${verdict.message}); falling back to next model.`);
+    }
+  }
+  return lastVerdict ?? { kind: "transient", message: "No reviewer model configured" };
+}
+
+/** Run a single review attempt against one resolved model spec. */
+async function runPermissionReviewWithModel(
+  opts: ReviewCallOpts,
+  deps: ReviewDeps,
+  modelSpec: string,
+): Promise<ReviewVerdict> {
   // Build transcript from parent session entries
+  const reviewT0 = Date.now();
   let transcriptStr = "(no transcript available)";
+  let transcriptMs = 0;
   try {
     const entries = opts.parentCtx.sessionManager.getEntries();
     const transcriptEntries: TranscriptEntry[] = [];
@@ -128,6 +155,7 @@ export async function runPermissionReview(
       }
     }
     transcriptStr = compactTranscript(transcriptEntries);
+    transcriptMs = Date.now() - reviewT0;
   } catch {
     // If we can't build the transcript, proceed without one
   }
@@ -151,23 +179,24 @@ export async function runPermissionReview(
     taskPrompt = `## Retry reason\n${opts.retryReason}\n\n${taskPrompt}`;
   }
 
-  // Resolve the autoApprove.model id (a string from config) against the parent
-  // session's model registry. Unresolvable ids fall back silently to the parent
-  // model rather than erroring the review.
-  // omp compatibility: registries are inconsistent about whether `id` carries
+  // Resolve the model spec against the parent session's model registry.
+  // Unresolvable ids fall back silently to the parent model rather than
+  // erroring the review.
+  // Harness compatibility: registries disagree about whether `id` carries
   // the provider prefix (hyper stores id="qwen3.8-flash" + provider="hyper";
   // other catalogs store id="alibaba/qwen3.8-flash"). Match both forms.
   let modelOverride: { id: string; provider?: string } | undefined;
-  if (opts.model && opts.parentCtx.modelRegistry) {
+  if (modelSpec && opts.parentCtx.modelRegistry) {
     modelOverride = opts.parentCtx.modelRegistry.getAll().find(
-      (m) => m.id === opts.model || `${m.provider}/${m.id}` === opts.model,
+      (m) => m.id === modelSpec || `${m.provider}/${m.id}` === modelSpec,
     );
     if (!modelOverride) {
-      console.warn(`safetynet: autoApprove.model "${opts.model}" not found in registry; reviewer will use the parent model.`);
+      console.warn(`safetynet: autoApprove.model "${modelSpec}" not found in registry; reviewer will use the parent model.`);
     }
   }
 
   // Run the reviewer subagent
+  const spawnT0 = Date.now();
   const result = await deps.spawn({
     taskType: "explore",
     prompt: taskPrompt,
@@ -179,6 +208,11 @@ export async function runPermissionReview(
     trustExternalPaths: true,
     ...(modelOverride ? { model: modelOverride } : {}),
   });
+  if (typeof console !== "undefined") {
+    console.warn(
+      `safetynet: review timing — model="${modelSpec}" transcript=${transcriptMs}ms resolve=${spawnT0 - reviewT0 - transcriptMs}ms spawn=${Date.now() - spawnT0}ms total=${Date.now() - reviewT0}ms`,
+    );
+  }
 
   // Classify the result
   const text = result.content.map((c) => c.text).join("\n").trim();

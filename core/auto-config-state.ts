@@ -36,6 +36,24 @@ export function resetAutoEnabledForNewSession(): void {
 }
 
 /** Load the auto-approve config from the global config file. */
+/** Normalize the autoApprove.model config value. Accepts a single spec or an
+ *  array (fallback chain, tried in order). Strings are trimmed; empties are
+ *  dropped; a single-element array collapses to the bare string so existing
+ *  single-model consumers see an unchanged shape. */
+export function parseModelSpec(raw: unknown): string | string[] | undefined {
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    return s === "" ? undefined : s;
+  }
+  if (Array.isArray(raw)) {
+    const list = raw.filter((m): m is string => typeof m === "string" && m.trim() !== "").map((m) => m.trim());
+    if (list.length === 0) return undefined;
+    if (list.length === 1) return list[0]!;
+    return list;
+  }
+  return undefined;
+}
+
 export function loadAutoApproveConfig(): AutoApproveConfig {
   const configPath = join(homedir(), ".config", "pi-safetynet", "config.json");
   if (!existsSync(configPath)) return {};
@@ -43,8 +61,9 @@ export function loadAutoApproveConfig(): AutoApproveConfig {
     const data = JSON.parse(readFileSync(configPath, "utf-8"));
     const raw = data.autoApprove;
     if (!raw || typeof raw !== "object") return {};
+    const model = parseModelSpec(raw.model);
     return {
-      model: typeof raw.model === "string" ? raw.model : undefined,
+      ...(model !== undefined ? { model } : {}),
       timeoutMs: typeof raw.timeoutMs === "number" ? raw.timeoutMs : 90000,
       maxDenials: typeof raw.maxDenials === "number" ? raw.maxDenials : 3,
       retryIntervalMs: typeof raw.retryIntervalMs === "number" ? raw.retryIntervalMs : 30000,

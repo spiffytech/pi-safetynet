@@ -202,6 +202,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 	// ── Tool-call interception ───────────────────────────────────────────────
 
 	pi.on("tool_call", async (event, ctx) => {
+		const handlerT0 = Date.now();
 		if (!storage) return; // no session yet
 
 		const profile = getCurrentProfile();
@@ -229,6 +230,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 				check: runCheck(),
 				recheck: runCheck,
 			});
+			console.warn(`safetynet: bash resolve=${Date.now() - handlerT0}ms since-handler-entry`);
 			return resolved;
 		}
 

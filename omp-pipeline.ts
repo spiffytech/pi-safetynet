@@ -32,19 +32,23 @@ const AUTO_REVIEW_CAP_MS = 20_000;
  *  extensions like hyper are loaded and authenticated) so the child
  *  session can select it via the resolved Model object instead of a
  *  deferred modelPattern that fails without provider plugins loaded.
- *  Returns an object fit for spreading into OmpSpawnOpts. */
+ *  Accepts a single spec or a fallback chain — the first spec that
+ *  resolves wins. Returns an object fit for spreading into OmpSpawnOpts. */
 function resolveReviewerModel(
 	ctx: ExtensionContext,
-	configModel?: string,
+	configModel?: string | string[],
 ): { model?: unknown; modelRegistry?: unknown; modelPattern?: string } {
-	const spec = configModel ?? process.env.SAFETYNET_REVIEWER_MODEL;
-	if (spec) {
+	const specs = Array.isArray(configModel) ? configModel : configModel ? [configModel] : [];
+	const env = process.env.SAFETYNET_REVIEWER_MODEL;
+	if (env) specs.push(env);
+	if (specs.length === 0) return {};
+	for (const spec of specs) {
 		const resolved = ctx.models.resolve(spec);
 		if (resolved) {
 			return { model: resolved, modelRegistry: ctx.modelRegistry };
 		}
 	}
-	return spec ? { modelPattern: spec } : {};
+	return { modelPattern: specs[0]! };
 }
 import {
 	runPermissionReview,
@@ -159,12 +163,12 @@ export async function resolveOmpPermission(
 						profile: isReadOnly(deps.profile) ? "ro" : "rw",
 						timeoutMs: config.timeoutMs ?? 90000,
 						signal: capController.signal,
-						...(config.model ? { model: config.model } : {}),
 					},
 					{ spawn: (o) =>
 						spawnReviewer({
 							...o,
 							cwd: deps.ctx.cwd,
+							...resolveReviewerModel(deps.ctx, config.model),
 							...(o.signal ? { signal: o.signal } : {}),
 						}) },
 				);

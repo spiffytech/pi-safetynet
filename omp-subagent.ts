@@ -39,13 +39,35 @@ export interface OmpSpawnOpts {
 	modelPattern?: string;
 }
 
+/** The live session handle returned by `createAgentSession`. Named here so
+ *  spawnReviewer's local doesn't couple to SDK implementation generics. */
+export interface ReviewerSession {
+	abort(options?: { reason?: string }): Promise<void>;
+	prompt(text: string): Promise<boolean>;
+	dispose(): Promise<void> | void;
+	sessionManager: SessionEntriesSource["sessionManager"];
+}
+
 /** Spawn an isolated read-only session and return its final assistant text. */
 export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult> {
 	const details: Record<string, unknown> = {};
-	let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+	const reviewerT0 = Date.now();
+	let bootMs = 0;
+	let session: ReviewerSession | undefined;
 
 	try {
-		const created = await createAgentSession({
+		// Abort the reviewer session when the external cap signal fires (the
+		// auto-review time budget in omp-pipeline). Otherwise a slow TTFT
+		// would let the review outlive our 20s cap and keep burning tokens.
+		const onAbort = () => {
+			void session?.abort().catch(() => {});
+		};
+
+		// The cap can fire while `createAgentSession` is still in flight
+		// (cold-boot discovery, hydrate, skills scanning). Race the boot
+		// against the signal so a slow boot is actually cancelled instead
+		// of silently running to completion and wasting the budget.
+		const bootPromise = createAgentSession({
 			// Isolation: without a unique agentId, omp defaults the reviewer to
 			// MAIN_AGENT_ID — claiming the parent's registry identity, opening
 			// the real on-disk session for cwd, and hijacking TUI focus. That
@@ -76,16 +98,24 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 						? { modelPattern: process.env.SAFETYNET_REVIEWER_MODEL }
 						: {}),
 		});
+		const created = opts.signal
+			? await Promise.race([
+					bootPromise,
+					new Promise<never>((_, reject) => {
+						opts.signal!.addEventListener("abort", () => {
+							// The boot may still be in flight; dispose the session it
+							// eventually creates so it can't leak registry/LLM state.
+							void bootPromise
+								.then((lost) => lost.session.dispose().catch(() => {}))
+								.catch(() => {});
+							reject(new DOMException("Auto-review exceeded time budget", "TimeoutError"));
+						}, { once: true });
+					}),
+				])
+			: await bootPromise;
 		session = created.session;
-
-		// Abort the reviewer session when the external cap signal fires (the
-		// auto-review time budget in omp-pipeline). Otherwise a slow TTFT
-		// would let the review outlive our 20s cap and keep burning tokens.
-		const onAbort = () => {
-			void session?.abort().catch(() => {});
-		};
+		bootMs = Date.now() - reviewerT0;
 		if (opts.signal?.aborted) {
-			onAbort();
 			return { content: [{ type: "text", text: "" }], details: { aborted: true } };
 		}
 		opts.signal?.addEventListener("abort", onAbort, { once: true });
@@ -95,6 +125,8 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 		} finally {
 			opts.signal?.removeEventListener("abort", onAbort);
 		}
+		details.bootMs = bootMs;
+		details.promptMs = Date.now() - reviewerT0 - bootMs;
 
 		// Extract final assistant text from the reviewer's OWN in-memory
 		// session (entries live in `entry.message`, an AgentMessage).

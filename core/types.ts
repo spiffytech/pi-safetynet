@@ -69,7 +69,9 @@ export type ReviewVerdict =
   | { kind: "fatal"; message: string };
 
 export interface AutoApproveConfig {
-  model?: string;
+  /** Reviewer model. Single spec or a fallback list — tried in order until
+   *  one produces a verdict. Kept as `model` for backward compatibility. */
+  model?: string | string[];
   timeoutMs?: number;
   maxDenials?: number;
   retryIntervalMs?: number;
