@@ -47,4 +47,50 @@ d("isToolActivityHidden (Bun-only: omp TS-source deps)", () => {
 		Settings.instance.clearOverride("display.hideToolActivity");
 		assert.equal(isToolActivityHidden(), false);
 	});
+
+	it("renders a multi-line bash target as one physical line when tool activity is hidden", async () => {
+		const { Settings } = await import("@oh-my-pi/pi-coding-agent");
+		Settings.instance.override("display.hideToolActivity", true);
+		const { showOmpPermissionPrompt } = await import("./omp-permission-prompt.ts");
+
+		let comp: { render(width: number): readonly string[] } | undefined;
+		const theme = { fg: (_k: string, s: string) => s, bold: (s: string) => s, dim: (s: string) => s };
+		const ctx = {
+			hasUI: true,
+			cwd: "/tmp",
+			ui: {
+				custom: (fn: (...args: unknown[]) => unknown) =>
+					new Promise((resolve) => {
+						comp = fn(
+							{ requestRender() {} },
+							theme,
+							undefined,
+							() => {},
+						) as { render(width: number): readonly string[] };
+						resolve(undefined);
+					}),
+			},
+		};
+
+		void showOmpPermissionPrompt(ctx as never, {
+			permission: "bash",
+			target: "npm test\n# runs the suite\n\n# second chunk",
+			unapproved: ["npm test"],
+			unapprovedDisplay: ["npm test"],
+			keybindings: { denyAbort: "escape" },
+		});
+
+		assert.ok(comp, "prompt component should mount");
+		const lines = comp!.render(100);
+		// The bordered widget must never emit a bare newline inside a line —
+		// embedded newlines escape the box rendering.
+		for (const line of lines) {
+			assert.ok(!line.includes("\n"), `line escaped the box: ${JSON.stringify(line)}`);
+		}
+		const rawLine = lines.find((l) => l.includes("raw: npm test"));
+		assert.ok(rawLine, "raw target line is present when hideToolActivity is on");
+		assert.match(rawLine!, /npm test ↵ # runs the suite/);
+		// Consecutive blank lines collapse into a single marker, not two.
+		assert.match(rawLine!, /suite ↵ # second chunk/);
+	});
 });

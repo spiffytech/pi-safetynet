@@ -541,7 +541,12 @@ export async function showOmpPermissionPrompt(
 	// call — surface the raw tool target here so the prompt is self-describing.
 	// Display only; the permission decision below is unaffected.
 	if (isToolActivityHidden()) {
-		extraHeader.push(`raw: ${opts.target}`);
+		// Collapse embedded newlines to one physical line: the bordered widget
+		// can't render a multi-line header (continuation lines would escape the
+		// box), and the hidden transcript means the popup is the only place the
+		// command is visible.
+		const raw = opts.target.replace(/[ \t]*\r?\n+[ \t]*/g, " ↵ ");
+		extraHeader.push(`raw: ${raw}`);
 	}
 
 	const headerText = isFile

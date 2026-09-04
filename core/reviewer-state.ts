@@ -234,6 +234,12 @@ async function runPermissionReviewWithModel(
   const text = result.content.map((c) => c.text).join("\n").trim();
   if (result.details.error) {
     const errMsg = String(result.details.error);
+    // A session that boots without a model is a transient state (model/auth
+    // config can change). It must NOT hit the "create" match below, which is
+    // an accident of the /login hint text in omp's error message.
+    if (errMsg.includes("No model selected")) {
+      return { kind: "transient", message: errMsg };
+    }
     // Fatal only when recovery in-session is impossible (structural/session
     // creation failures). Auth/credential failures are transient: an expired or
     // rejected token can refresh on a later retry, so they must flow to the

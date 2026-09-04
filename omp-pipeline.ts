@@ -5,6 +5,7 @@
  * hazardous nudge-and-abort arrive with Phase 4.
  */
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type {
 	ModeAliases,
 	PermissionDuration,
@@ -28,27 +29,43 @@ import { spawnReviewer } from "./omp-subagent.ts";
  *  of omp silently blocking the tool call with a timeout error. */
 const AUTO_REVIEW_CAP_MS = 20_000;
 
-/** Resolve the reviewer model in the parent session (where provider
- *  extensions like hyper are loaded and authenticated) so the child
- *  session can select it via the resolved Model object instead of a
- *  deferred modelPattern that fails without provider plugins loaded.
- *  Accepts a single spec or a fallback chain — the first spec that
- *  resolves wins. Returns an object fit for spreading into OmpSpawnOpts. */
-function resolveReviewerModel(
+/** Translate a registry-resolved partial model (`{ id, provider }` — the
+ *  shape core/reviewer-state hands down for the current chain spec) into the
+ *  full Model object the isolated reviewer session needs: it disables
+ *  extension discovery, so a bare id or deferred pattern cannot be
+ *  re-resolved there and would boot the session model-less. Lookup order:
+ *  full-catalog registry `find` first (covers models that are temporarily
+ *  absent from the "available" set, e.g. after a failed runtime refresh),
+ *  then the facade's provider/id and bare-id forms. Returns undefined when
+ *  the spec is not in the parent catalog at all. */
+export function resolveReviewerSpawnModel(
 	ctx: ExtensionContext,
-	configModel?: string | string[],
-): { model?: unknown; modelRegistry?: unknown; modelPattern?: string } {
-	const specs = Array.isArray(configModel) ? configModel : configModel ? [configModel] : [];
-	const env = process.env.SAFETYNET_REVIEWER_MODEL;
-	if (env) specs.push(env);
-	if (specs.length === 0) return {};
-	for (const spec of specs) {
-		const resolved = ctx.models.resolve(spec);
-		if (resolved) {
-			return { model: resolved, modelRegistry: ctx.modelRegistry };
-		}
+	partial: { id: string; provider?: string } | undefined,
+): Model | undefined {
+	if (!partial?.id) return undefined;
+	if (partial.provider) {
+		const found = ctx.modelRegistry.find(partial.provider, partial.id);
+		if (found) return found;
 	}
-	return { modelPattern: specs[0]! };
+	const spec = partial.provider ? `${partial.provider}/${partial.id}` : partial.id;
+	return ctx.models.resolve(spec) ?? ctx.models.resolve(partial.id);
+}
+
+/** Pick the spawn model for ONE review attempt. `partial` is the current
+ *  chain spec resolved by core against the parent registry; translate it to
+ *  a full Model. When it can't be resolved (spec absent from the catalog, e.g.
+ *  stale cache after a rate-limited refresh), degrade to the parent session's
+ *  own model — it is running, so it is guaranteed present — rather than a
+ *  modelPattern the isolated child cannot resolve. Returns an object fit for
+ *  spreading into OmpSpawnOpts. */
+function reviewerSpawnModelOpts(
+	deps: OmpPipelineDeps,
+	partial: { id: string; provider?: string } | undefined,
+): { model?: Model; modelRegistry?: typeof deps.ctx.modelRegistry } {
+	const resolved =
+		partial?.id ? resolveReviewerSpawnModel(deps.ctx, partial) ?? deps.ctx.model : deps.ctx.model;
+	if (!resolved) return {};
+	return { model: resolved, modelRegistry: deps.ctx.modelRegistry };
 }
 import {
 	runPermissionReview,
@@ -172,6 +189,14 @@ export async function resolveOmpPermission(
 			}, AUTO_REVIEW_CAP_MS);
 			try {
 				const reviewT0 = Date.now();
+				// Full reviewer-model fallback chain: config list first, then the
+				// SAFETYNET_REVIEWER_MODEL env override (lowest priority), deduped
+				// order-preserving. core/reviewer-state tries each spec until one
+				// produces a verdict, so a rate-limited or unresolvable first model
+				// degrades to the next instead of failing the whole review.
+				const modelSpecs = Array.isArray(config.model) ? [...config.model] : config.model ? [config.model] : [];
+				const envModel = process.env.SAFETYNET_REVIEWER_MODEL?.trim();
+				if (envModel && !modelSpecs.includes(envModel)) modelSpecs.push(envModel);
 				const verdict = await runPermissionReview(
 					{
 						permission: opts.permission,
@@ -182,12 +207,17 @@ export async function resolveOmpPermission(
 						profile: isReadOnly(deps.profile) ? "ro" : "rw",
 						timeoutMs: config.timeoutMs ?? 90000,
 						signal: capController.signal,
+						...(modelSpecs.length > 0 ? { model: modelSpecs } : {}),
 					},
 					{ spawn: (o) =>
 						spawnReviewer({
 							...o,
 							cwd: deps.ctx.cwd,
-							...resolveReviewerModel(deps.ctx, config.model),
+							// `o.model` is core's registry-resolved partial for the CURRENT
+							// chain spec; translate it to a full Model the isolated child
+							// can use, falling back to the parent session's own model when
+							// the spec isn't in the catalog at all.
+							...reviewerSpawnModelOpts(deps, o.model),
 							...(o.signal ? { signal: o.signal } : {}),
 						}) },
 				);
