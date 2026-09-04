@@ -10,7 +10,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { resolveOmpPermission, type OmpPipelineDeps } from "./omp-pipeline.ts";
-import { PermissionStorage } from "./core/permissions/index.ts";
+import { PermissionStorage, reconstructSessionRules } from "./core/permissions/index.ts";
 import {
 	loadSubagentsConfig,
 	loadTrustExternalPaths,
@@ -125,11 +125,49 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		reviewBumpTurnToken(); // invalidate in-flight auto-review verdicts
 	});
 
+	// ── Session switches (/new, /resume, /fork, tree navigation) ─────────────
+	// omp emits session_switch (not a fresh session_start) when /new creates a
+	// session in-process, so module state must be reset or re-read here or it
+	// leaks across sessions: profile, auto-approve, and in-memory session rules.
+	pi.on("session_switch", async (event, ctx) => {
+		if (!storage) return; // no session yet
+		if (event.reason === "new") {
+			// Brand-new session: reset to defaults.
+			setCurrentProfile(normalizeProfile(loadDefaultProfile() ?? paradigmModes().read));
+			resetAutoEnabledForNewSession();
+			storage.session.clear();
+			persistProfile(pi);
+			pi.sendMessage({
+				customType: MODE_REMINDER_CUSTOM_TYPE,
+				content: getSessionModeMessage(getCurrentProfile()),
+				display: true,
+			});
+		} else {
+			// Resume/fork/tree: restore state from the target session's journal.
+			restoreProfile(ctx);
+			restoreAutoEnabled(ctx);
+			const { rules } = reconstructSessionRules(ctx, ctx.cwd);
+			storage.session.clear();
+			if (rules.length > 0) storage.addSessionRules(rules);
+		}
+		const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
+		ctx.ui.setStatus("safetynet", label);
+	});
 	// ── Auto-approve toggle ──────────────────────────────────────────────────
 
 	pi.registerCommand("safetynet:auto", {
 		description: "Toggle LLM auto-approval of low-risk actions",
 		handler: async (_args, ctx) => {
+			const on = toggleAutoEnabled(pi);
+			ctx.ui.notify(`safetynet auto-approve: ${on ? "ON" : "OFF"}`, "info");
+			const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
+			ctx.ui.setStatus("safetynet", label);
+		},
+	});
+
+	pi.registerShortcut("ctrl+shift+\\", {
+		description: "Toggle LLM auto-approval of low-risk actions",
+		handler: async (ctx) => {
 			const on = toggleAutoEnabled(pi);
 			ctx.ui.notify(`safetynet auto-approve: ${on ? "ON" : "OFF"}`, "info");
 			const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
@@ -166,16 +204,6 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 			const { read, write } = paradigmModes();
 			const next: ProfileName = getCurrentProfile() === read ? write : read;
 			switchProfile(next, ctx);
-		},
-	});
-
-	pi.registerShortcut("ctrl+shift+\\", {
-		description: "Toggle LLM auto-approval of low-risk actions",
-		handler: async (ctx) => {
-			const on = toggleAutoEnabled(pi);
-			ctx.ui.notify(`safetynet auto-approve: ${on ? "ON" : "OFF"}`, "info");
-			const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
-			ctx.ui.setStatus("safetynet", label);
 		},
 	});
 

@@ -802,8 +802,12 @@ function registerShortcuts(pi: ExtensionAPI) {
   });
 
   pi.registerShortcut("ctrl+shift+\\", {
-    description: "Show the current plan",
-    handler: async (ctx) => showCurrentPlan(ctx),
+    description: "Toggle LLM auto-approval of low-risk actions",
+    handler: async (ctx) => {
+      const enabled = toggleAutoEnabled(pi);
+      ctx.ui.notify(`safetynet auto-approve: ${enabled ? "ON" : "OFF"}`, "info");
+      updateStatus(ctx);
+    },
   });
 }
 
@@ -925,6 +929,8 @@ export default function safetynetExtension(api: ExtensionAPI) {
     if (isBrandNew) {
       const defaultProfile = normalizeProfile(loadDefaultProfile() ?? paradigmModes().read);
       setCurrentProfile(defaultProfile);
+      resetAutoEnabledForNewSession();
+      storage.session.clear();
       persistProfile(pi);
       updateStatus(ctx);
       if (ctx.hasUI) {
