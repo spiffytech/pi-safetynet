@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import type { PromptKeybindings } from "./core/types.ts";
 import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction, KeybindingsConfig, AutoDenyConfig } from "./core/types.ts";
 import questionnaire from "./questionnaire.ts";
+import { renderCustomFooter } from "./footer.ts";
 import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile, loadParadigm, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./core/global-config.ts";
 import { runSubagent, addUsage, formatSubagentUsage, ZERO_USAGE, type SubagentUsage } from "./subagent.ts";
 import {
@@ -117,6 +118,10 @@ let autoDenyConfig: AutoDenyConfig = { continue: false };
 
 /** Current model display string (provider/model-id), updated via model_select events. */
 let currentModelDisplay: string = "";
+/** Current model id (without provider), for the custom footer. */
+let currentModelId: string = "";
+/** Current model provider id, for the custom footer's "(provider)" prefix. */
+let currentModelProvider: string = "";
 /** Whether the current model supports extended thinking. */
 let currentModelSupportsReasoning: boolean = false;
 /** Current thinking level, updated via thinking_level_select events. */
@@ -140,8 +145,8 @@ function restoreSubagentUsage(ctx: ExtensionContext): void {
 function refreshSubagentStatus(ctx: ExtensionContext) {
 	const formatted = formatSubagentUsage(subagentUsage);
 	if (formatted.length > 0) {
-		// Key "_cost" sorts before "safetynet" so it appears first in the footer line,
-		// immediately beside the built-in cost data.
+		// Key order is defined in footer.ts SAFETYNET_STATUS_KEYS: the mode label
+		// renders first on our dedicated footer line, subagent cost second.
 		ctx.ui.setStatus("\x00", ctx.ui.theme.fg("dim", `subagents +${formatted}`));
 	}
 }
@@ -809,6 +814,44 @@ function updateStatus(ctx: ExtensionContext) {
   ctx.ui.setStatus("safetynet", label);
 }
 
+/**
+ * Install the custom footer: pwd/stats/model lines render like the built-in
+ * footer, but OUR status entries (mode label + subagent usage) get a dedicated
+ * line of their own, so other extensions' statuses can never crowd them out or
+ * truncate the read-only indicator away.
+ */
+function installFooter(ctx: ExtensionContext) {
+  if (!ctx.hasUI) return;
+  ctx.ui.setFooter((tui, theme, footerData) => {
+    const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
+    return {
+      dispose: unsubBranch,
+      invalidate() {},
+      render(width: number): string[] {
+        const model = ctx.model;
+        return renderCustomFooter({
+          width,
+          theme,
+          entries: ctx.sessionManager.getEntries(),
+          contextUsage: ctx.getContextUsage(),
+          modelId: currentModelId || model?.id || "no-model",
+          modelProvider: currentModelProvider || model?.provider || undefined,
+          modelSupportsReasoning: currentModelSupportsReasoning,
+          thinkingLevel: currentThinkingLevel,
+          providerCount: footerData.getAvailableProviderCount(),
+          usingSubscription: model ? ctx.modelRegistry.isUsingOAuth(model) : false,
+          cwd: ctx.sessionManager.getCwd(),
+          home: process.env.HOME || process.env.USERPROFILE,
+          gitBranch: footerData.getGitBranch(),
+          sessionName: ctx.sessionManager.getSessionName(),
+          autoCompact: true,
+          extensionStatuses: footerData.getExtensionStatuses(),
+        });
+      },
+    };
+  });
+}
+
 let pi: ExtensionAPI;
 
 interface RestoreOpts {
@@ -885,6 +928,8 @@ export default function safetynetExtension(api: ExtensionAPI) {
 
   pi.on("model_select", async (event) => {
     currentModelDisplay = `${event.model.provider}/${event.model.id}`;
+    currentModelId = event.model.id;
+    currentModelProvider = event.model.provider;
     currentModelSupportsReasoning = event.model.reasoning ?? false;
   });
 
@@ -895,9 +940,12 @@ export default function safetynetExtension(api: ExtensionAPI) {
   pi.on("session_start", async (event, ctx) => {
     if (ctx.model) {
       currentModelDisplay = `${ctx.model.provider}/${ctx.model.id}`;
+      currentModelId = ctx.model.id;
+      currentModelProvider = ctx.model.provider;
       currentModelSupportsReasoning = ctx.model.reasoning ?? false;
     }
     currentThinkingLevel = pi.getThinkingLevel();
+    installFooter(ctx);
 
     // Apply the paradigm FIRST, before profile restore/brand-new default above,
     // so restoreProfile and the default profile normalize against the correct
