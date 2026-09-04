@@ -156,7 +156,44 @@ describe("normalizePathForMatching", () => {
     const result = normalizePathForMatching("~/foo", "/project");
     assert.ok(result.startsWith(home));
   });
-});
+
+  it("strips trailing read-tool line/range selectors", () => {
+    assert.equal(
+      normalizePathForMatching("/project/src/main.ts:241-462", "/project"),
+      "src/main.ts",
+    );
+    assert.equal(
+      normalizePathForMatching("/project/src/main.ts:241", "/project"),
+      "src/main.ts",
+    );
+    assert.equal(
+      normalizePathForMatching("/project/src/main.ts:50+150", "/project"),
+      "src/main.ts",
+    );
+  });
+
+  it("strips raw/img and compound selectors", () => {
+    assert.equal(
+      normalizePathForMatching("/project/src/main.ts:raw", "/project"),
+      "src/main.ts",
+    );
+    assert.equal(
+      normalizePathForMatching("/project/logo.svg:img", "/project"),
+      "logo.svg",
+    );
+    assert.equal(
+      normalizePathForMatching("/project/src/main.ts:raw:2-4", "/project"),
+      "src/main.ts",
+    );
+  });
+
+  it("keeps paths that merely contain colons", () => {
+    assert.equal(
+      normalizePathForMatching("https://example.com/page", "/project"),
+      "https://example.com/page",
+    );
+  });
+  });
 
 describe("toRecursiveGlob", () => {
   it("converts bare * to **", () => {

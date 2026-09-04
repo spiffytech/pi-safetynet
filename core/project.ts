@@ -118,6 +118,11 @@ export function fromDisplayPath(displayPath: string, opts?: { cwd?: string; home
 export function normalizePathForMatching(filePath: string, cwd: string): string {
   let normalized = expandHome(filePath);
 
+  // read-tool line/range selectors (:241, :241-462, :50+150, :raw, :img) are
+  // not part of the file path: strip any trailing run of them so a permission
+  // approval for a path also covers selector-qualified reads of it.
+  normalized = normalized.replace(/(?::(?:\d+(?:-\d+|\+\d+)?|raw|img))+$/, "");
+
   if (normalized.startsWith("/")) {
     const absCwd = cwd.startsWith("/") ? cwd : join(process.cwd(), cwd);
     if (normalized.startsWith(absCwd + "/") || normalized === absCwd) {
