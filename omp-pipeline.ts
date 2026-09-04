@@ -324,18 +324,21 @@ export async function resolveOmpPermission(
 		// Build rules from approved items (mirrors pi pipeline semantics).
 		const redirectOriginals = new Set((check.redirectTargets ?? []).map((rt) => rt.path));
 		const patterns: Array<{ permission: "bash" | "read" | "edit"; pattern: string }> = [];
-		for (const [original] of approved) {
+		for (const [original, edited] of approved) {
 			if (redirectOriginals.has(original)) continue;
 			patterns.push({
 				permission: opts.permission,
-				pattern: isFile ? toRecursiveGlob(normalizePathForMatching(original, deps.ctx.cwd)) : original,
+				pattern: isFile
+					? toRecursiveGlob(normalizePathForMatching(edited ?? original, deps.ctx.cwd))
+					: (edited ?? original),
 			});
 		}
 		for (const rt of check.redirectTargets ?? []) {
+			const editedPath = approved.get(rt.path) ?? rt.path;
 			if (approved.has(rt.path)) {
 				patterns.push({
 					permission: rt.permission,
-					pattern: toRecursiveGlob(normalizePathForMatching(rt.path, deps.ctx.cwd)),
+					pattern: toRecursiveGlob(normalizePathForMatching(editedPath, deps.ctx.cwd)),
 				});
 			}
 		}
