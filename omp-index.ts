@@ -79,7 +79,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 			pi.sendMessage({
 				customType: MODE_REMINDER_CUSTOM_TYPE,
 				content: getModeSwitchMessage(getCurrentProfile()),
-				display: true,
+				display: false,
 			});
 		}
 		ctx?.ui.notify(`safetynet: ${getCurrentProfile()} mode`, "info");
@@ -110,7 +110,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 			pi.sendMessage({
 				customType: MODE_REMINDER_CUSTOM_TYPE,
 				content: getSessionModeMessage(getCurrentProfile()),
-				display: true,
+				display: false,
 			});
 		}
 	});
@@ -140,7 +140,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 			pi.sendMessage({
 				customType: MODE_REMINDER_CUSTOM_TYPE,
 				content: getSessionModeMessage(getCurrentProfile()),
-				display: true,
+				display: false,
 			});
 		} else {
 			// Resume/fork/tree: restore state from the target session's journal.
@@ -223,7 +223,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		pi.sendMessage({
 			customType: MODE_REMINDER_CUSTOM_TYPE,
 			content: getSessionModeMessage(getCurrentProfile()),
-				display: true,
+			display: false,
 		});
 	});
 

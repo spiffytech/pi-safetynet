@@ -580,22 +580,14 @@ function switchToProfile(ctx: ExtensionContext, profile: ProfileName): void {
   setCurrentProfile(target);
   persistProfile(pi);
   // One durable mode message per switch — persisted, not ephemeral.
+  // display: false — the model needs the reminder; the user sees the toast.
   pi.sendMessage({
     customType: MODE_REMINDER_CUSTOM_TYPE,
     content: getModeSwitchMessage(target),
-    display: true,
+    display: false,
   });
   ctx.ui.notify(`Switched from ${current} to ${target} mode`, "info");
   updateStatus(ctx);
-
-  // Leave a permanent mode-switch marker in the session.
-  // This is NOT the ephemeral context — it's a tiny permanent record
-  // that stays in the conversation prefix forever.
-  pi.sendMessage({
-    customType: "safetynet:mode-switch",
-    content: `Switched to ${target} mode`,
-    display: true,
-  });
 }
 
 function formatRules(rules: Ruleset): string[] {
@@ -976,7 +968,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
       pi.sendMessage({
         customType: MODE_REMINDER_CUSTOM_TYPE,
         content: getSessionModeMessage(getCurrentProfile()),
-        display: true,
+        display: false,
       });
     }
   });
@@ -1008,7 +1000,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
     pi.sendMessage({
       customType: MODE_REMINDER_CUSTOM_TYPE,
       content: getSessionModeMessage(getCurrentProfile()),
-      display: true,
+      display: false,
     });
   });
 
