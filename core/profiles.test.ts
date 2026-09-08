@@ -149,6 +149,13 @@ describe("profiles", () => {
       assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("do not look for ways around it"));
     });
 
+    it("frames read-only mode as a research and discussion phase, not a work phase", () => {
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("research-and-discussion phase"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("not a work phase"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("not ready for changes yet"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes('done "anyway."'));
+    });
+
     it("names bash workarounds that are prohibited (redirects, sed -i, tee, heredocs, interpreter one-liners)", () => {
       assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("redirects into files"));
       assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("sed -i"));
@@ -190,6 +197,7 @@ describe("profiles", () => {
         const msg = getModeSwitchMessage(p);
         assert.ok(msg.includes("<system-reminder>"));
         assert.ok(msg.includes("switched you to read-only mode"));
+        assert.ok(msg.includes("research and discussion only"));
         assert.ok(msg.includes("only inspect and read"));
       }
     });
@@ -210,6 +218,7 @@ describe("profiles", () => {
         const msg = getSessionModeMessage(p);
         assert.ok(msg.includes("<system-reminder>"));
         assert.ok(msg.includes("This session is in read-only mode"));
+        assert.ok(msg.includes("research and discussion only"));
       }
     });
 

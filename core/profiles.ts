@@ -107,10 +107,12 @@ You may spawn subagents for parallel or delegated work:
 Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.`;
 
 /** Mode-specific system-prompt stanza appended at agent start: read-only.
- *  Tells the model to honor the spirit of the mode, not just its letter —
- *  no workarounds through bash tricks or build subagents, propose instead. */
+ *  Frames the mode as a research-and-discussion phase — the user is not ready
+ *  for changes yet — and tells the model to honor the spirit of the mode,
+ *  not just its letter: no workarounds through bash tricks or build
+ *  subagents, propose instead. */
 export const READ_ONLY_SYSTEM_PROMPT_BLOCK = `[SAFETYNET READ-ONLY]
-You are in read-only mode. You may read and inspect, but you may NOT modify files or run state-changing commands.
+You are in read-only mode. This is a research-and-discussion phase, not a work phase: the user is not ready for changes yet and switched here to inspect, analyze, and plan. Treat that as the point of the mode, not a hurdle to work around — do not try to get the underlying task done "anyway."
 
 Honor the spirit of read-only mode — do not look for ways around it:
 - Do not attempt edits or writes, including through bash (redirects into files, sed -i, tee, heredocs, interpreter one-liners) or by delegating implementation to a subagent.
@@ -141,7 +143,7 @@ export function getModeSystemPrompt(profile: ProfileName): string {
 export function getModeSwitchMessage(profile: ProfileName): string {
 	if (isReadOnly(profile)) {
 		return `<system-reminder>
-The user has switched you to read-only mode. You may now only inspect and read. Do not modify files or run state-changing commands.
+The user has switched you to read-only mode: research and discussion only, not work — the user is not ready for changes yet. You may only inspect and read; do not modify files or run state-changing commands, and do not try to get the task done anyway.
 </system-reminder>`;
 	}
 	return `<system-reminder>
@@ -151,8 +153,12 @@ The user has switched you to read-write mode. You may now run commands and modif
 
 /** Durable message appended at session start and after compaction. */
 export function getSessionModeMessage(profile: ProfileName): string {
-	const mode = isReadOnly(profile) ? "read-only" : "read-write";
+	if (isReadOnly(profile)) {
+		return `<system-reminder>
+This session is in read-only mode: research and discussion only — the user is not ready for changes yet.
+</system-reminder>`;
+	}
 	return `<system-reminder>
-This session is in ${mode} mode.
+This session is in read-write mode.
 </system-reminder>`;
 }
