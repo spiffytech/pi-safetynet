@@ -132,7 +132,7 @@ d("safetynet omp session_switch isolation (Bun-only: omp TS-source deps)", () =>
 		await emitSwitch(api, { reason: "new" }, makeCtx(entries, tmpCwd));
 
 		assert.equal(profiles.getCurrentProfile(), profiles.paradigmModes().read, "profile must reset to paradigm read mode");
-		assert.equal(autoState.isAutoEnabled(), false, "auto-approve must reset to off");
+		assert.equal(autoState.isAutoEnabled(), false, "auto-approve must reset to the config default (off without a reviewer model)");
 	});
 
 	it("session_switch new persists the reset profile and sends a mode reminder", async () => {

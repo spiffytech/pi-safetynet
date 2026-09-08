@@ -158,8 +158,9 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 	pi.registerCommand("safetynet:auto", {
 		description: "Toggle LLM auto-approval of low-risk actions",
 		handler: async (_args, ctx) => {
-			const on = toggleAutoEnabled(pi);
-			ctx.ui.notify(`safetynet auto-approve: ${on ? "ON" : "OFF"}`, "info");
+			const r = toggleAutoEnabled(pi);
+			if (r.blockedReason) ctx.ui.notify(`safetynet auto-approve unavailable: ${r.blockedReason}`, "warning");
+			else ctx.ui.notify(`safetynet auto-approve: ${r.enabled ? "ON" : "OFF"}`, "info");
 			const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
 			ctx.ui.setStatus("safetynet", label);
 		},
@@ -168,8 +169,9 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 	pi.registerShortcut("ctrl+shift+\\", {
 		description: "Toggle LLM auto-approval of low-risk actions",
 		handler: async (ctx) => {
-			const on = toggleAutoEnabled(pi);
-			ctx.ui.notify(`safetynet auto-approve: ${on ? "ON" : "OFF"}`, "info");
+			const r = toggleAutoEnabled(pi);
+			if (r.blockedReason) ctx.ui.notify(`safetynet auto-approve unavailable: ${r.blockedReason}`, "warning");
+			else ctx.ui.notify(`safetynet auto-approve: ${r.enabled ? "ON" : "OFF"}`, "info");
 			const label = isAutoEnabled() ? `${getCurrentProfile()} auto` : getCurrentProfile();
 			ctx.ui.setStatus("safetynet", label);
 		},

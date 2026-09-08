@@ -618,8 +618,9 @@ function registerCommands(pi: ExtensionAPI) {
   pi.registerCommand("safetynet:auto", {
     description: "Toggle auto-approve mode",
     handler: async (_args, ctx) => {
-      const enabled = toggleAutoEnabled(pi);
-      ctx.ui.notify(`Auto-approve ${enabled ? "enabled" : "disabled"}`, "info");
+      const r = toggleAutoEnabled(pi);
+      if (r.blockedReason) ctx.ui.notify(`Auto-approve unavailable: ${r.blockedReason}`, "warning");
+      else ctx.ui.notify(`Auto-approve ${r.enabled ? "enabled" : "disabled"}`, "info");
       updateStatus(ctx);
     },
   });
@@ -801,8 +802,9 @@ function registerShortcuts(pi: ExtensionAPI) {
   pi.registerShortcut("ctrl+shift+\\", {
     description: "Toggle LLM auto-approval of low-risk actions",
     handler: async (ctx) => {
-      const enabled = toggleAutoEnabled(pi);
-      ctx.ui.notify(`safetynet auto-approve: ${enabled ? "ON" : "OFF"}`, "info");
+      const r = toggleAutoEnabled(pi);
+      if (r.blockedReason) ctx.ui.notify(`safetynet auto-approve unavailable: ${r.blockedReason}`, "warning");
+      else ctx.ui.notify(`safetynet auto-approve: ${r.enabled ? "ON" : "OFF"}`, "info");
       updateStatus(ctx);
     },
   });

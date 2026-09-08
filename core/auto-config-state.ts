@@ -8,7 +8,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-let autoEnabled = false;
+/** Auto-approve defaults ON only when a reviewer model is configured;
+ *  without one the reviewer would run against a fallback model. */
+export function hasReviewerModel(): boolean {
+  return loadAutoApproveConfig().model !== undefined;
+}
+
+let autoEnabled = hasReviewerModel();
 
 export function isAutoEnabled(): boolean {
   return autoEnabled;
@@ -19,10 +25,18 @@ export function setAutoEnabled(enabled: boolean, pi: AppendEntrySink): void {
   pi.appendEntry("safetynet:auto", { enabled });
 }
 
-export function toggleAutoEnabled(pi: AppendEntrySink): boolean {
+export function toggleAutoEnabled(pi: AppendEntrySink): { enabled: boolean; blockedReason?: string } {
+  // off→on requires a reviewer model; on→off is always allowed.
+  if (!autoEnabled && !hasReviewerModel()) {
+    return {
+      enabled: false,
+      blockedReason:
+        "no autoApprove.model configured in ~/.config/pi-safetynet/config.json — auto-approve needs a reviewer model to judge actions",
+    };
+  }
   autoEnabled = !autoEnabled;
   pi.appendEntry("safetynet:auto", { enabled: autoEnabled });
-  return autoEnabled;
+  return { enabled: autoEnabled };
 }
 
 export function restoreAutoEnabled(ctx: SessionEntriesSource): void {
@@ -30,9 +44,10 @@ export function restoreAutoEnabled(ctx: SessionEntriesSource): void {
   if (entry?.data?.enabled !== undefined) autoEnabled = entry.data.enabled;
 }
 
-/** Reset auto to OFF for brand-new sessions (mirrors profile's isBrandNew reset). */
+/** Reset auto to the config default for brand-new sessions: ON only when a
+ *  reviewer model is configured (mirrors profile's isBrandNew reset). */
 export function resetAutoEnabledForNewSession(): void {
-  autoEnabled = false;
+  autoEnabled = hasReviewerModel();
 }
 
 /** Load the auto-approve config from the global config file. */
