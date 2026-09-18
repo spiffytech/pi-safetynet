@@ -99,38 +99,104 @@ export function shapeKeyOf(tokens: string[]): string | null {
 // Every entry here must be covered by tests in shapes.test.ts (both the
 // block direction and a harmless-flag negative).
 
-/** (program, flag) pairs whose following token is code — the token after
- *  may never be a slot. Only dangerous pairs listed; `-c` on head/grep/cut
- *  etc. is deliberately absent. */
-const EVAL_FLAG_PAIRS: Record<string, Set<string>> = {
-  python: new Set(["-c"]),
-  python3: new Set(["-c"]),
-  node: new Set(["-e", "--eval", "-p"]),
-  bun: new Set(["-e"]),
-  ruby: new Set(["-e"]),
-  perl: new Set(["-e", "-E", "-x"]),
-  php: new Set(["-r"]),
+// Sourcing: every entry below was checked against the tool's own man page or
+// `--help` output (audit 2026). Three deliberate exclusions, recorded so the
+// tables stay defensible rather than aspirational:
+//   1. Load-path flags (`-I`, `-pa`, `--classpath`, `NODE_PATH`) are not
+//      boundaries. A slotted search path can redirect module resolution, but
+//      these do not occupy the "what runs next" position — locked in as a
+//      residual by the `java -cp` case in shapes.test.ts.
+//   2. Scaffolding verbs (`nest generate`, `rails generate`) select a template
+//      inside a pinned program, not a program. `go generate` is the arguable
+//      one and is excluded on that same reading.
+//   3. Multi-token selectors (`erl -s Mod Func`, `elixir -S script`) protect
+//      only their immediate token; the one after it can still slot. Residual,
+//      not per-tool grammar.
+// Families with no upstream man page reachable from here — pwsh,
+// clickhouse-client, trino, vagrant, and mongosh beyond `--eval` — are NOT yet
+// audited; they are absent rather than guessed at.
+
+/** (program, flag) pairs whose following token decides what runs next: code
+ *  (`python -c`), a script or program file (`sed -f`, `make -f`), a module to
+ *  load (`perl -M`, `python -m`), a shell (`su -s`), or a package (`npx -p`).
+ *  The token after one of these may never become a slot.
+ *
+ *  Only such pairs belong here. `-c` on head/grep/cut/wc/tr counts lines,
+ *  `-d foo=bar` defines an INI entry, `-o file` says “assume old” — none of
+ *  those pick what executes, and slotting their argument is fine. */
+export const CODE_FLAG_PAIRS: Record<string, Set<string>> = {
+  // Interpreters: statement text; module selector; startup file
+  python: new Set(["-c", "-m"]),
+  python3: new Set(["-c", "-m"]),
+  node: new Set(["-e", "--eval", "-p", "--print", "-r", "--require", "--import", "--loader", "--experimental-loader"]),
+  bun: new Set(["-e", "--eval", "-p", "--print", "-r", "--preload", "--require", "--import"]),
+  bunx: new Set(["-p", "--package"]),
+  npx: new Set(["-p", "--package", "-c", "--call"]),
+  ruby: new Set(["-e", "-r", "-S", "-C", "-X", "-x"]),
+  perl: new Set(["-e", "-E", "-M", "-m", "-x", "-d"]),
+  php: new Set(["-r", "-B", "--process-begin", "-R", "--process-code", "-E", "-f", "-F", "--process-file"]),
+  lua: new Set(["-e", "-l"]),
+  R: new Set(["-e", "-f", "--file"]),
   Rscript: new Set(["-e"]),
-  R: new Set(["-e"]),
+  julia: new Set(["-e", "--eval", "-E", "--print", "-L", "--load"]),
+  elixir: new Set(["-e", "--eval", "-r", "-S", "--erl", "--erl-config"]),
+  erl: new Set(["-eval", "-run", "-s"]),
   osascript: new Set(["-e"]),
-  mysql: new Set(["-e"]),
-  psql: new Set(["-c"]),
+  expect: new Set(["-c", "-f"]),
+  // Shells: command string; file of startup commands the shell executes
+  bash: new Set(["-c", "--init-file", "--rcfile"]),
+  sh: new Set(["-c"]),
+  dash: new Set(["-c"]),
+  ksh: new Set(["-c"]),
+  zsh: new Set(["-c"]),
+  fish: new Set(["-c", "--command"]),
+  // Identity switches: command string; the shell that will run it
+  su: new Set(["-c", "--command", "-s", "--shell"]),
+  runuser: new Set(["-c", "--command", "-s", "--shell"]),
+  // Debuggers, stream editors, script-file hosts
+  gdb: new Set(["-ex", "--eval-command", "-x", "--command", "-iex", "--init-eval-command", "-ix", "--init-command"]),
+  sed: new Set(["-e", "--expression", "-f", "--file"]),
+  awk: new Set(["-f", "--file", "-e", "--source"]),
+  gawk: new Set(["-f", "--file", "-e", "--source"]),
+  // Build/automation: which script or recipe source gets loaded and from where
+  make: new Set(["-f", "--file", "--makefile", "-C", "--directory"]),
+  just: new Set(["-f", "--justfile", "-d", "--working-directory", "--shell", "--shell-arg", "--chooser"]),
+  cargo: new Set(["-C"]),
+  // Remote transport: the program run on the far side
+  rsync: new Set(["-e", "--rsh", "--rsync-path"]),
+  // Runtimes that select the program to start
+  java: new Set(["-jar", "-m", "--module"]),
+  uv: new Set(["--from", "--with", "--with-editable", "--with-requirements", "-p", "--python"]),
+  uvx: new Set(["--from", "--with", "--with-editable", "--with-requirements", "-p", "--python"]),
+  // SQL clients whose code goes in a flag (positional-SQL clients are OPAQUE)
+  mysql: new Set(["-e", "--execute", "--init-command"]),
+  psql: new Set(["-c", "--command", "-f", "--file"]),
   mongosh: new Set(["--eval"]),
   mongo: new Set(["--eval"]),
-  lua: new Set(["-e"]),
-  julia: new Set(["-e"]),
-  elixir: new Set(["-e"]),
-  erl: new Set(["-eval"]),
-  gdb: new Set(["-ex", "-ix"]),
-  sed: new Set(["-e", "-f"]),
+  // Session muxers: the command handed to the other side
+  screen: new Set(["-X"]),
 };
 
-/** Bare or flag tokens after which no slot may appear (the following token
- *  would be arbitrary code or an arbitrary command). */
-const RUNNER_VERBS = new Set([
+/** Bare or flag tokens after which no slot may appear, because the following
+ *  token is a program, module, package, or code text rather than data.
+ *
+ *  Package verbs (`install`, `add`, `dlx`, …) are global on purpose: precise
+ *  per-manager scoping would be the per-command grammar this file refuses to
+ *  grow. The cost is over-blocking — `apt install <pkg>` and `cargo add
+ *  <crate>` never generalize, which is the designed failure mode — and the
+ *  slot one token further along still merges (`git remote add origin <arg>`). */
+export const RUNNER_VERBS = new Set([
   "run", "exec", "xargs", "watch", "env", "nohup", "timeout", "nice",
   "strace", "setsid", "stdbuf", "ionice", "parallel", "foreach",
   "-exec", "-execdir", "-ok", "--exec",
+  // Fetch-and-run / package selection: the next token chooses remote code
+  "install", "uninstall", "add", "remove", "dlx", "create", "init",
+  // Code text or literal keystrokes destined for another process
+  "eval", "send-keys", "send", "stuff",
+  // Toolchain entry points that take the name of the thing to run
+  "tool",
+  // gdb: everything after this is the inferior program and its arguments
+  "--args",
 ]);
 
 /** Rejection-taught boundaries (see learned.ts): tokens the user's drops
@@ -165,20 +231,34 @@ function isRunnerVerb(token: string): boolean {
 }
 
 /** Programs where no free slot may appear anywhere after the program
- *  position (remote/shell targets make every later argument code). */
-const OPAQUE_PROGRAMS = new Set(["ssh"]);
+ *  position: every later argument is a command, or is itself code, on the far
+ *  side of a boundary the checker cannot see across.
+ *
+ *  - remote shells and launchers: ssh/mosh run `host COMMAND`, nsenter /
+ *    unshare / bwrap / systemd-run / chroot all take `[options] COMMAND [ARGS]`
+ *  - positional-SQL clients: `sqlite3 db.sqlite "SQL"` / `duckdb file "SQL"`
+ *    put arbitrary code after a pinned path, and their own `-c`/`-f` flags
+ *    then need no separate entry
+ *  - socat: `EXEC:<command-line>` is an address, so a slotted address can be
+ *    an arbitrary command */
+export const OPAQUE_PROGRAMS = new Set([
+  "ssh", "mosh", "chroot", "nsenter", "unshare", "bwrap", "systemd-run",
+  "sqlite3", "duckdb", "socat",
+]);
 
 /** Program + subcommand pairs after which every remaining argument stays
  *  literal (the subcommand's later args are arbitrary exec against the
- *  chosen image/target). */
-const SUB_OPAQUE: Record<string, Set<string>> = {
-  docker: new Set(["run", "exec", "create"]),
-  podman: new Set(["run", "exec", "create"]),
+ *  chosen image/target). `compose`/`container` cover the two-token forms —
+ *  `docker compose run SERVICE COMMAND`, `docker container exec ID CMD` —
+ *  whose exec subcommand never sits at position 1. */
+export const SUB_OPAQUE: Record<string, Set<string>> = {
+  docker: new Set(["run", "exec", "create", "compose", "container"]),
+  podman: new Set(["run", "exec", "create", "compose", "container"]),
   kubectl: new Set(["exec", "apply", "run", "create", "patch", "debug"]),
 };
 
-function isEvalFlag(program: string, tok: ClassToken): boolean {
-  const flags = EVAL_FLAG_PAIRS[program];
+function isCodeFlag(program: string, tok: ClassToken): boolean {
+  const flags = CODE_FLAG_PAIRS[program];
   return !!flags && tok.cls === "flag" && flags.has(tok.text);
 }
 
@@ -305,10 +385,10 @@ export function mergeExemplars(exemplars: string[][]): MergeResult {
       if (!texts.every((t) => t.cls === "assign" && t.key === key)) {
         return { ok: false, failure: { why: "assign-key-mismatch", position: i } };
       }
-      const evalFlag = isEvalFlag(program, t0);
+      const codeFlag = isCodeFlag(program, t0);
       if (!allSame) {
-        if (evalFlag) {
-          // eval flag assignment (--eval=<code>): value is code, never slot
+        if (codeFlag) {
+          // --eval=<code>: the value is code, never slot
           return { ok: false, failure: { why: "boundary", position: i, boundary: t0.key! } };
         }
         pattern.push({ kind: "assign", key });
@@ -340,10 +420,10 @@ export function mergeExemplars(exemplars: string[][]): MergeResult {
     const pt = pattern[i]!;
     if (pt.kind !== "slot") continue;
     const prev = pattern[i - 1]!;
-    // Slot directly after an eval flag = the code position.
+    // Slot directly after a code flag = the code / script / program position.
     if (prev.kind === "lit") {
       const prevCls = classifyToken(prev.text);
-      if (isEvalFlag(program, prevCls)) {
+      if (isCodeFlag(program, prevCls)) {
         return { ok: false, failure: { why: "boundary", position: i, boundary: prev.text } };
       }
       if (prevCls.cls === "bare" && isRunnerVerb(prev.text)) {

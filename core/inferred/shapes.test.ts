@@ -23,6 +23,10 @@ import {
   patternMatches,
   renderPattern,
   shapeKeyOf,
+  CODE_FLAG_PAIRS,
+  OPAQUE_PROGRAMS,
+  RUNNER_VERBS,
+  SUB_OPAQUE,
 } from "./shapes.ts";
 
 /** Tokens for a command string via the real parser. */
@@ -256,4 +260,137 @@ describe("property: merged patterns reject fuzzed outsiders", () => {
       }
     }
   }
+});
+
+// ─── Boundary tables: the audit of 2026 ─────────────────────────────────────
+//
+// The tables are enforced table-driven rather than case by case: every entry
+// in CODE_FLAG_PAIRS / RUNNER_VERBS / OPAQUE_PROGRAMS / SUB_OPAQUE is fed a
+// synthetic pair whose varying token sits immediately after the boundary, so
+// adding a row without real coverage is impossible — the row IS the test.
+// A `zz`/`.`/`image` literal keeps the boundary token off the first-bare-word
+// pin, which otherwise protects many real shapes for a different reason (that
+// is why the realistic cases below assert whichever reason actually fires).
+
+describe("boundary tables — every entry refuses the token that follows it", () => {
+  it("code flags never slot the code, script, module, or package after them", () => {
+    for (const [program, flags] of Object.entries(CODE_FLAG_PAIRS)) {
+      for (const flag of flags) {
+        assertNoMerge(`${program} zz ${flag} x1`, `${program} zz ${flag} x2`, "boundary");
+      }
+    }
+  });
+
+  it("runner verbs never slot the program, package, or code after them", () => {
+    for (const verb of RUNNER_VERBS) {
+      // -exec / -execdir never reach the merge as tokens: the bash parser
+      // splits them into a nested subcommand (asserted below). They stay in the
+      // table as defense-in-depth for parsers that flatten the same command.
+      if (verb === "-exec" || verb === "-execdir") continue;
+      // flag verbs (find --exec) get their first bare word from the path; bare
+      // verbs need a flag so the verb itself is not the pinned first bare word
+      const prefix = verb.startsWith("-") ? "find ." : "npm -g";
+      assertNoMerge(`${prefix} ${verb} x1`, `${prefix} ${verb} x2`, "boundary");
+    }
+  });
+
+  it("find's exec flags are split off by the parser, one layer earlier", () => {
+    for (const verb of ["-exec", "-execdir"]) {
+      const command = `find . ${verb} x1`;
+      // the parser folds the flag into the subcommand name (find:exec) and the
+      // nested command keeps its own token list, so x1 is never a token that
+      // could follow -exec inside one list
+      assert.ok(
+        parseCommand(command).subcommands.some((s) => s.includes("exec")),
+        `${verb}: the flag must be folded into the subcommand name`,
+      );
+      const flat = subcommandTokenLists(command).flat();
+      assert.ok(
+        flat.indexOf("x1") !== flat.indexOf(verb) + 1,
+        `${verb}: no slot-able token may follow the raw flag`,
+      );
+    }
+  });
+
+  it("opaque programs never slot anywhere after the program", () => {
+    for (const program of OPAQUE_PROGRAMS) {
+      assertNoMerge(`${program} target x1`, `${program} target x2`, "boundary");
+    }
+  });
+
+  it("opaque subcommands never slot after the image or target", () => {
+    for (const [program, subs] of Object.entries(SUB_OPAQUE)) {
+      for (const sub of subs) {
+        assertNoMerge(`${program} ${sub} image x1`, `${program} ${sub} image x2`, "boundary");
+      }
+    }
+  });
+});
+
+describe("audit 2026 — holes the expanded tables close", () => {
+  it("SQL and build scripts that sit behind a pinned path", () => {
+    assertNoMerge("sqlite3 db.sqlite 'SELECT a'", "sqlite3 db.sqlite 'SELECT b'", "boundary");
+    assertNoMerge("duckdb db.duckdb 'SELECT a'", "duckdb db.duckdb 'SELECT b'", "boundary");
+    // the script file is the first bare word, so the pin is what refuses these
+    assertNoMerge("make -f a.mk t x", "make -f b.mk t x", "subcommand-mismatch");
+    assertNoMerge("just -f a.just t x", "just -f b.just t x", "subcommand-mismatch");
+  });
+
+  it("code in a flag value that is not the first bare word", () => {
+    assertNoMerge("mysql -u root -e 'SELECT a'", "mysql -u root -e 'SELECT b'", "boundary");
+    assertNoMerge("psql -h host -c 'SELECT a'", "psql -h host -c 'SELECT b'", "boundary");
+    assertNoMerge("su deploy -c 'cmd1'", "su deploy -c 'cmd2'", "boundary");
+    assertNoMerge("bash -o pipefail -c 'cmd1'", "bash -o pipefail -c 'cmd2'", "boundary");
+    assertNoMerge("java --module-path mods -m app1/App", "java --module-path mods -m app2/App", "boundary");
+  });
+
+  it("two-token docker/podman forms whose exec subcommand is not at position 1", () => {
+    assertNoMerge("docker compose run svc cmd1", "docker compose run svc cmd2", "boundary");
+    assertNoMerge("podman container exec c1 ls a", "podman container exec c1 ls b", "boundary");
+  });
+
+  it("keystrokes destined for another process, and address-based exec", () => {
+    assertNoMerge("tmux send-keys cmd1", "tmux send-keys cmd2", "boundary");
+    assertNoMerge("screen -X stuff cmd1", "screen -X stuff cmd2", "boundary");
+    assertNoMerge("socat TCP:host:1 EXEC:a", "socat TCP:host:1 EXEC:b", "boundary");
+  });
+
+  it("launchers that take a command as a positional argument", () => {
+    assertNoMerge("nsenter -t 1 -m cmd1", "nsenter -t 1 -m cmd2", "boundary");
+    assertNoMerge("chroot /mnt cmd1", "chroot /mnt cmd2", "boundary");
+    assertNoMerge("mosh host cmd1", "mosh host cmd2", "boundary");
+  });
+
+  it("package verbs select remote code, not data", () => {
+    assertNoMerge("pnpm dlx pkg1", "pnpm dlx pkg2", "boundary");
+    assertNoMerge("npm install pkg1", "npm install pkg2", "boundary");
+    assertNoMerge("cargo add crate1", "cargo add crate2", "boundary");
+    // the package name here is the first bare word, so the pin refuses it
+    assertNoMerge("npx -p pkg1 cmd x", "npx -p pkg2 cmd x", "subcommand-mismatch");
+  });
+});
+
+describe("audit 2026 — data flags are still not boundaries", () => {
+  it("counts, encodings, defines, and load paths keep slotting", () => {
+    assertMerges("python -O script.py a", "python -O script.py b", "python -O script.py <arg>");
+    assertMerges("ruby -w script.rb a", "ruby -w script.rb b", "ruby -w script.rb <arg>");
+    assertMerges("perl -w script.pl a", "perl -w script.pl b", "perl -w script.pl <arg>");
+    assertMerges("lua -W script.lua a", "lua -W script.lua b", "lua -W script.lua <arg>");
+    assertMerges("php -d memory_limit=1G a.php x", "php -d memory_limit=1G a.php y", "php -d memory_limit=1G a.php <arg>");
+    assertMerges("make -o a.o target x", "make -o a.o target y", "make -o a.o target <arg>");
+    assertMerges("just --dry-run build x", "just --dry-run build y", "just --dry-run build <arg>");
+  });
+
+  it("a load path is deliberately not a boundary (locked-in residual)", () => {
+    // `-cp` decides where classes are found, which can redirect resolution to
+    // an arbitrary jar. Recorded as a residual: it is not the "what runs next"
+    // position, so it stays slot-able and this test freezes that decision.
+    assertMerges("java -cp a.jar Main x", "java -cp a.jar Main y", "java -cp a.jar Main <arg>");
+  });
+
+  it("package verbs over-block on purpose — the designed failure mode", () => {
+    assertNoMerge("dnf install pkg1", "dnf install pkg2", "boundary");
+    // …but the slot one token further along is data and still merges
+    assertMerges("git remote add origin https://a", "git remote add origin https://b", "git remote add origin <arg>");
+  });
 });
