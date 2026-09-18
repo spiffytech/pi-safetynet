@@ -956,6 +956,23 @@ export function parseCommand(command: string): ParsedCommand {
   }
 }
 
+/** Per-subcommand canonical token lists for a command string. Parallel to
+ *  `parseCommand().subcommands` (modulo words that have no canonical form,
+ *  which are skipped the same way `commandToString` skips them). This is the
+ *  token source for inferred-rule shape analysis — tokens may contain
+ *  spaces (quoted words), so consumers must never re-split on whitespace. */
+export function subcommandTokenLists(command: string): string[][] {
+  const parsed = parseCommand(command);
+  return parsed.subcommandWords.map((words) => {
+    const toks: string[] = [];
+    for (const w of words) {
+      const s = wordToString(w);
+      if (s !== null) toks.push(s);
+    }
+    return toks;
+  });
+}
+
 export function isHazardousFile(filePath: string): boolean {
   const basename = filePath.split("/").pop() ?? filePath;
 

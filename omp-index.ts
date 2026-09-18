@@ -42,8 +42,15 @@ import {
 	restoreAutoEnabled,
 	resetAutoEnabledForNewSession,
 	setAutoEnabled,
+	loadAutoApproveConfig,
 } from "./core/auto-config-state.ts";
 import { reviewBumpTurnToken } from "./core/reviewer-state.ts";
+import { InferredEngine } from "./core/inferred/engine.ts";
+import { uiArbiter } from "./core/ui-arbiter.ts";
+import { JUDGE_SYSTEM_PROMPT } from "./core/inferred/judge.ts";
+import { evaluatePermission } from "./core/permissions/ruleset.ts";
+import { spawnReviewer } from "./omp-subagent.ts";
+import { reviewerSpawnModelOpts } from "./omp-pipeline.ts";
 
 const SESSION_RULES_CUSTOM_TYPE = "safetynet:session-rules";
 
@@ -52,6 +59,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 
 	let storage: PermissionStorage | undefined;
 	let trustExternalPaths = false;
+	let inferred: InferredEngine | undefined;
 
 	function deps(ctx: ExtensionContext): OmpPipelineDeps | undefined {
 		if (!storage) return undefined;
@@ -61,13 +69,80 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 			profile: getCurrentProfile(),
 			trustExternalPaths,
 			modeAliases: getModeAliases(),
+			...(inferred ? { inferred: wireInferred(ctx) } : {}),
 			appendSessionRules: (rules: Ruleset, cwd: string) => {
 				pi.appendEntry(SESSION_RULES_CUSTOM_TYPE, { rules, cwd });
 			},
-			signalBlocked: (active: boolean, label?: string) => {
-				pi.events.emit("herdr:blocked", { active, label });
+		};
+	}
+
+	/** Bind the inferred engine to the live session context: judge spawn
+	 *  adapter (reviewer model chain), suppression predicate (existing rules
+	 *  already allow an exemplar → don't offer), and UI hooks (badge widget
+	 *  + toast; the review popup opens itself when a proposal ripens). */
+	function wireInferred(ctx: ExtensionContext): InferredEngine {
+		if (!inferred || !storage) return inferred!; // unreachable: caller guards
+		const eng = inferred;
+		inferred.judgeDeps = {
+			ask: (prompt: string) => {
+				// Same model chain the reviewer uses (autoApprove.model), resolved
+				// against the parent catalog; degrade to the session model.
+				const config = loadAutoApproveConfig();
+				const first = Array.isArray(config.model) ? config.model[0] : config.model;
+				return spawnReviewer({
+					taskType: "explore",
+					prompt,
+					systemPrompt: JUDGE_SYSTEM_PROMPT,
+					cwd: ctx.cwd,
+					timeoutMs: 30_000,
+					...reviewerSpawnModelOpts(ctx, first ? { id: first } : undefined),
+				}).then((r) => r.content.map((c) => c.text).join("\n"));
 			},
 		};
+		inferred.suppressIfAllowed = (exemplar: string) =>
+			evaluatePermission(
+				"bash",
+				exemplar,
+				getCurrentProfile(),
+				storage!.getAllRules(),
+				undefined,
+				getModeAliases(),
+			).action === "allow";
+		inferred.hooks = {
+			onProposalQueued: (proposal) => {
+				const n = inferred!.listProposals().length;
+				ctx.ui.setWidget(
+					"safetynet-inferred",
+					[`${n} inferred-rule proposal${n === 1 ? "" : "s"} waiting — /safetynet:inferred to review`],
+					{ placement: "belowEditor" },
+				);
+				ctx.ui.notify(`safetynet: inferred rule proposal — ${proposal.render}`, "info");
+			},
+			openReviewPopup: () => {
+				// Fire-and-forget: owns input while up, Esc defers to the queue,
+				// never gates the agent. Rendered by the popup module.
+				import("./inferred-popup.ts").then((m) =>
+					m.openInferredReview(ctx, inferred!, {
+						modes: [getCurrentProfile()],
+						onQueueChange: (n) => updateInferredBadge(ctx),
+					}),
+				).catch(() => {});
+			},
+		};
+		return inferred;
+	}
+
+	function updateInferredBadge(ctx: ExtensionContext): void {
+		const n = inferred?.listProposals().length ?? 0;
+		if (n > 0) {
+			ctx.ui.setWidget(
+				"safetynet-inferred",
+				[`${n} inferred-rule proposal${n === 1 ? "" : "s"} waiting — /safetynet:inferred to review`],
+				{ placement: "belowEditor" },
+			);
+		} else {
+			ctx.ui.setWidget("safetynet-inferred", undefined);
+		}
 	}
 
 	function switchProfile(profile: ProfileName, ctx?: ExtensionContext) {
@@ -94,6 +169,8 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		storage = new PermissionStorage(ctx.cwd);
 		await storage.init();
+		inferred = new InferredEngine(ctx.cwd);
+		uiArbiter.reset(); // no stale surface may block a fresh session's prompts
 		trustExternalPaths = loadTrustExternalPaths();
 		setParadigm(loadParadigm());
 		const def = loadDefaultProfile();
@@ -117,6 +194,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		storage = undefined;
+		inferred = undefined;
 	});
 
 	// Turn-scoped approvals expire when the agent finishes.
@@ -125,12 +203,35 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		reviewBumpTurnToken(); // invalidate in-flight auto-review verdicts
 	});
 
+	// Review the pending inferred-rule queue (also reachable via widget hint).
+	pi.registerCommand("safetynet:inferred", {
+		description: "Review pending inferred-rule proposals",
+		handler: async (_args, ctx) => {
+			const eng = wireInferred(ctx);
+			if (!eng) {
+				ctx.ui.notify("safetynet: no session — nothing to review", "warning");
+				return;
+			}
+			const { openInferredReview } = await import("./inferred-popup.ts");
+			const result = await openInferredReview(ctx, eng, {
+				modes: [getCurrentProfile()],
+				onQueueChange: (n) => updateInferredBadge(ctx),
+			});
+			if (result === "empty") ctx.ui.notify("safetynet: no pending inferred-rule proposals", "info");
+			else if (result === "busy") ctx.ui.notify("safetynet: another prompt is open — review when it closes", "warning");
+			updateInferredBadge(ctx);
+		},
+	});
+
 	// ── Session switches (/new, /resume, /fork, tree navigation) ─────────────
 	// omp emits session_switch (not a fresh session_start) when /new creates a
 	// session in-process, so module state must be reset or re-read here or it
 	// leaks across sessions: profile, auto-approve, and in-memory session rules.
 	pi.on("session_switch", async (event, ctx) => {
 		if (!storage) return; // no session yet
+		// Counters are session evidence — never leak across sessions.
+		inferred = new InferredEngine(ctx.cwd);
+		uiArbiter.reset();
 		if (event.reason === "new") {
 			// Brand-new session: reset to defaults.
 			setCurrentProfile(normalizeProfile(loadDefaultProfile() ?? paradigmModes().read));
@@ -253,7 +354,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		if (event.toolName === "bash") {
 			const command = typeof event.input.command === "string" ? event.input.command : "";
 			if (!command) return;
-			const runCheck = () => checkBashPermission(command, profile, storage!.getAllRules(), ctx.cwd, trustExternalPaths, getModeAliases());
+			const runCheck = () => checkBashPermission(command, profile, storage!.getAllRules(), ctx.cwd, trustExternalPaths, getModeAliases(), inferred?.rulesForProfile(profile, getModeAliases()));
 			const resolved = await resolveOmpPermission(d, {
 				permission: "bash",
 				target: command,

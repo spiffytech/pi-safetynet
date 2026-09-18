@@ -21,6 +21,7 @@ import { actionWrites } from "./core/check.ts";
 import { isReadOnly } from "./core/profiles.ts";
 import { showOmpPermissionPrompt } from "./omp-permission-prompt.ts";
 import { spawnReviewer } from "./omp-subagent.ts";
+import type { InferredEngine } from "./core/inferred/engine.ts";
 
 /** Hard cap on one auto-review attempt. The reviewer runs inside the
  *  tool_call handler, which omp bounds at extensionHandlers.toolCallTimeoutMs
@@ -58,14 +59,14 @@ export function resolveReviewerSpawnModel(
  *  own model — it is running, so it is guaranteed present — rather than a
  *  modelPattern the isolated child cannot resolve. Returns an object fit for
  *  spreading into OmpSpawnOpts. */
-function reviewerSpawnModelOpts(
-	deps: OmpPipelineDeps,
+export function reviewerSpawnModelOpts(
+	ctx: ExtensionContext,
 	partial: { id: string; provider?: string } | undefined,
-): { model?: Model; modelRegistry?: typeof deps.ctx.modelRegistry } {
+): { model?: Model; modelRegistry?: typeof ctx.modelRegistry } {
 	const resolved =
-		partial?.id ? resolveReviewerSpawnModel(deps.ctx, partial) ?? deps.ctx.model : deps.ctx.model;
+		partial?.id ? resolveReviewerSpawnModel(ctx, partial) ?? ctx.model : ctx.model;
 	if (!resolved) return {};
-	return { model: resolved, modelRegistry: deps.ctx.modelRegistry };
+	return { model: resolved, modelRegistry: ctx.modelRegistry };
 }
 import {
 	runPermissionReview,
@@ -87,9 +88,9 @@ export interface OmpPipelineDeps {
 	modeAliases: ModeAliases;
 	/** Persist session-scoped rules as a journal entry for resume reconstruction. */
 	appendSessionRules?: (rules: Ruleset, cwd: string) => void;
-	/** Signal blocked/active state to external watchers (herdr). Emitted
-	 *  with `{ active, label }` on the `herdr:blocked` event-bus channel. */
-	signalBlocked?: (active: boolean, label?: string) => void;
+	/** Inferred-rules engine (bash shape counters → judge → proposal queue).
+	 *  Optional; absent when the feature has no session to bind to. */
+	inferred?: InferredEngine;
 }
 
 export interface ResolveOpts {
@@ -217,7 +218,7 @@ export async function resolveOmpPermission(
 							// chain spec; translate it to a full Model the isolated child
 							// can use, falling back to the parent session's own model when
 							// the spec isn't in the catalog at all.
-							...reviewerSpawnModelOpts(deps, o.model),
+							...reviewerSpawnModelOpts(deps.ctx, o.model),
 							...(o.signal ? { signal: o.signal } : {}),
 						}) },
 				);
@@ -229,6 +230,7 @@ export async function resolveOmpPermission(
 						// Turn-scoped rules so the approval dies with the turn.
 						const tempRules = buildApprovalTempRules(opts.permission, check, opts.target, deps.ctx.cwd, [deps.profile]);
 						deps.storage.addTempRules(tempRules);
+						if (opts.permission === "bash") deps.inferred?.recordApproval(opts.target, [deps.profile]);
 						const recheckResult = opts.recheck();
 						if (recheckResult.action === "allow") return undefined;
 					} else if (verdict.assessment.outcome === "deny") {
@@ -273,21 +275,15 @@ export async function resolveOmpPermission(
 			display.push(opts.target);
 		}
 
-		deps.signalBlocked?.(true, `safetynet ${opts.permission} approval`);
-		let result: Awaited<ReturnType<typeof showOmpPermissionPrompt>>;
-		try {
-			result = await showOmpPermissionPrompt(deps.ctx, {
-				permission: opts.permission,
-				target: opts.target,
-				unapproved: canonical,
-				unapprovedDisplay: display,
-				...(check.reason ? { reason: check.reason } : {}),
-				...(reprompt ? { reprompt: true } : {}),
-				keybindings: { denyAbort: "escape" },
-			});
-		} finally {
-			deps.signalBlocked?.(false);
-		}
+		const result = await showOmpPermissionPrompt(deps.ctx, {
+			permission: opts.permission,
+			target: opts.target,
+			unapproved: canonical,
+			unapprovedDisplay: display,
+			...(check.reason ? { reason: check.reason } : {}),
+			...(reprompt ? { reprompt: true } : {}),
+			keybindings: { denyAbort: "escape" },
+		});
 
 		if (!result) {
 			// Esc / abort → deny and end the turn.
@@ -358,6 +354,12 @@ export async function resolveOmpPermission(
 			await deps.storage.addPersistedRules(newRules);
 		} else if (duration === "global") {
 			await deps.storage.addGlobalRules(newRules);
+		}
+		// Counters only consume durable approvals — "once" explicitly declined
+		// persistence, so it is not evidence of a wanted rule. (Unreachable for
+		// "once": that branch continues or returns above.)
+		if (opts.permission === "bash") {
+			deps.inferred?.recordApproval(opts.target, [deps.profile]);
 		}
 
 		// Recheck after rule creation.

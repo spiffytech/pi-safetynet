@@ -115,6 +115,29 @@ export interface ReviewCallOpts {
   model?: string | string[];
 }
 
+/** Resolve an `autoApprove.model` spec against the parent session's model
+ *  registry. Unresolvable ids fall back silently to the parent model rather
+ *  than erroring the caller. Harness compatibility: registries disagree about
+ *  whether `id` carries the provider prefix (hyper stores id="qwen3.8-flash" +
+ *  provider="hyper"; other catalogs store id="alibaba/qwen3.8-flash") — both
+ *  forms match. Generic in M so a catalog Model instance survives the trip to
+ *  runSubagent's `model` param. */
+export function resolveModelSpec<M extends { id: string; provider?: string }>(
+  ctx: { modelRegistry?: { getAll(): M[] } },
+  modelSpec: string | undefined,
+  /** Who is falling back — only used in the warning text. */
+  label = "reviewer",
+): M | undefined {
+  if (!modelSpec || !ctx.modelRegistry) return undefined;
+  const found = ctx.modelRegistry
+    .getAll()
+    .find((m) => m.id === modelSpec || `${m.provider}/${m.id}` === modelSpec);
+  if (!found) {
+    console.warn(`safetynet: autoApprove.model "${modelSpec}" not found in registry; ${label} will use the parent model.`);
+  }
+  return found;
+}
+
 /** Run a permission review and classify the result. When `opts.model` is a
  *  list, each spec is tried in order until one produces a usable verdict;
  *  the last failure is returned otherwise. */
@@ -195,21 +218,9 @@ async function runPermissionReviewWithModel(
     taskPrompt = `## Retry reason\n${opts.retryReason}\n\n${taskPrompt}`;
   }
 
-  // Resolve the model spec against the parent session's model registry.
-  // Unresolvable ids fall back silently to the parent model rather than
-  // erroring the review.
-  // Harness compatibility: registries disagree about whether `id` carries
-  // the provider prefix (hyper stores id="qwen3.8-flash" + provider="hyper";
-  // other catalogs store id="alibaba/qwen3.8-flash"). Match both forms.
-  let modelOverride: { id: string; provider?: string } | undefined;
-  if (modelSpec && opts.parentCtx.modelRegistry) {
-    modelOverride = opts.parentCtx.modelRegistry.getAll().find(
-      (m) => m.id === modelSpec || `${m.provider}/${m.id}` === modelSpec,
-    );
-    if (!modelOverride) {
-      console.warn(`safetynet: autoApprove.model "${modelSpec}" not found in registry; reviewer will use the parent model.`);
-    }
-  }
+  // Resolve the configured reviewer model against the parent catalog (falls
+  // back to the parent model when unset or unresolvable).
+  const modelOverride = resolveModelSpec(opts.parentCtx, modelSpec);
 
   // Run the reviewer subagent
   const spawnT0 = Date.now();

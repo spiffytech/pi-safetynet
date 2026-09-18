@@ -28,6 +28,7 @@ export interface DenyEditor {
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { toDisplayPath } from "./core/project.ts";
 import type { PromptKeybindings, PermissionDuration } from "./core/types.ts";
+import { uiArbiter } from "./core/ui-arbiter.ts";
 
 export type { PermissionDuration };
 
@@ -652,7 +653,12 @@ export async function showPermissionPrompt(
 
   const durationOptions = getDurationOptions();
 
-  return withToolsExpanded(ctx, () =>
+  // Arbiter P0: gating prompt — preempts any showing P1 (proposal popup
+  // defers to its persistent queue; nothing is lost).
+  const arbiterEntry = { priority: "p0" as const, dismiss: () => {} };
+  uiArbiter.acquire(arbiterEntry);
+  try {
+    return await withToolsExpanded(ctx, () =>
     ctx.ui.custom<PermissionPromptResult | null>((tui, theme, _keybindings, done) => {
       const denyEditor = new Editor(tui, {
         borderColor: (s: string) => theme.fg("accent", s),
@@ -705,6 +711,9 @@ export async function showPermissionPrompt(
       return wrapper;
     }),
   );
+  } finally {
+    uiArbiter.release(arbiterEntry);
+  }
 }
 
 // ─── Public: showRulesEditor ────────────────────────────────────────────────

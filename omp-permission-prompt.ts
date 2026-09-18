@@ -24,6 +24,7 @@ import {
 import { DynamicBorder, getEditorTheme, Settings, type Theme, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { toDisplayPath } from "./core/project.ts";
 import type { PromptKeybindings, PermissionDuration } from "./core/types.ts";
+import { uiArbiter } from "./core/ui-arbiter.ts";
 
 export type OmpPermissionPromptResult =
 	| {
@@ -555,7 +556,12 @@ export async function showOmpPermissionPrompt(
 
 	const durationOptions = getDurationOptions();
 
-	return ctx.ui.custom<OmpPermissionPromptResult | null>((tui, theme, _keybindings, done) => {
+	// Arbiter P0: gating prompt — preempts any showing P1 (proposal popup
+	// defers to its persistent queue; nothing is lost).
+	const arbiterEntry = { priority: "p0" as const, dismiss: () => {} };
+	uiArbiter.acquire(arbiterEntry);
+	try {
+		return await ctx.ui.custom<OmpPermissionPromptResult | null>((tui, theme, _keybindings, done) => {
 		const denyEditor = new Editor(getEditorTheme());
 		// We bind submission ourselves (Enter on the deny row submits the whole
 		// buffer); the editor's native Enter behaviour is disabled.
@@ -595,5 +601,8 @@ export async function showOmpPermissionPrompt(
 		};
 
 		return wrapper;
-	});
+		});
+	} finally {
+		uiArbiter.release(arbiterEntry);
+	}
 }

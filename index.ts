@@ -19,6 +19,7 @@ import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction, Keybinding
 import questionnaire from "./questionnaire.ts";
 import { renderCustomFooter } from "./footer.ts";
 import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile, loadParadigm, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./core/global-config.ts";
+import { evaluatePermission } from "./core/permissions/ruleset.ts";
 import { runSubagent, addUsage, formatSubagentUsage, ZERO_USAGE, type SubagentUsage } from "./subagent.ts";
 import {
   getBaselineRules,
@@ -49,8 +50,12 @@ import {
 import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./core/check.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, type HazardousDenyState } from "./pipeline.ts";
-import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./core/auto-config-state.ts";
-import { reviewBumpTurnToken, reviewResetDenies } from "./core/reviewer-state.ts";
+import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled, loadAutoApproveConfig } from "./core/auto-config-state.ts";
+import { InferredEngine } from "./core/inferred/engine.ts";
+import { uiArbiter } from "./core/ui-arbiter.ts";
+import { JUDGE_SYSTEM_PROMPT } from "./core/inferred/judge.ts";
+import { loadLearnedBoundaries } from "./core/inferred/learned.ts";
+import { reviewBumpTurnToken, reviewResetDenies, resolveModelSpec } from "./core/reviewer-state.ts";
 /** Re-exported pure seams for test compatibility. */
 export const headlessDeny = hd;
 export const denyResultFromPrompt = drfp;
@@ -79,6 +84,7 @@ async function resolvePermission(
       keybindings: promptKeybindings,
       autoDeny: autoDenyConfig,
       hazardousDenyState,
+      ...(inferredEngine ? { inferred: wireInferred(ctx) } : {}),
       sendManualApproval: () => {
         pi.sendMessage({
           customType: "safetynet:manual-approval",
@@ -95,6 +101,53 @@ async function resolvePermission(
   );
 }
 
+/** Bind the inferred engine to the live session context (judge adapter on
+ *  runSubagent, suppression predicate, UI hooks). Cheap per call. */
+function wireInferred(ctx: ExtensionContext): InferredEngine {
+	const engine = inferredEngine!; // caller guards
+	engine.judgeDeps = {
+		ask: (prompt: string) => {
+			// Judge uses the same autoApprove.model key as the reviewer (plan
+			// decision #13), resolved against the parent catalog; degrades to the
+			// session model when unset or unresolvable.
+			const spec = loadAutoApproveConfig().model;
+			const first = Array.isArray(spec) ? spec[0] : spec;
+			return runSubagent({
+				taskType: "explore",
+				prompt,
+				systemPrompt: JUDGE_SYSTEM_PROMPT,
+				cwd: ctx.cwd,
+				parentCtx: ctx,
+				parentStorage: storage,
+				initialRules: [],
+				promptKeybindings: promptKeybindings,
+				autoDenyConfig: autoDenyConfig,
+				timeoutMs: 30_000,
+				...(first ? { model: resolveModelSpec(ctx, first, "judge") ?? ctx.model } : {}),
+			}).then((r) => r.content.map((c) => c.text).join("\n"));
+		},
+	};
+	engine.suppressIfAllowed = (exemplar: string) =>
+		evaluatePermission(
+			"bash",
+			exemplar,
+			getCurrentProfile(),
+			storage.getAllRules(),
+			undefined,
+			getModeAliases(),
+		).action === "allow";
+	engine.hooks = {
+		onProposalQueued: () => updateInferredBadge(ctx),
+		openReviewPopup: () => {
+			// Fire-and-forget: owns input while up, Esc defers, never gates.
+			import("./inferred-popup-pi.ts")
+				.then((m) => m.openInferredReview(ctx, engine, { modes: [getCurrentProfile()], onQueueChange: () => updateInferredBadge(ctx) }))
+				.catch(() => {});
+		},
+	};
+	return engine;
+}
+
 /** Deliver an auto/ruleset denial to the session model: a display:false nudge
  *  that survives aborts, plus (when visible) a display:true transcript entry
  *  for abort paths where the harness swallows the block reason. */
@@ -106,6 +159,7 @@ function sendDenial(text: string, mode: "hidden" | "visible"): void {
   });
 }
 let storage: PermissionStorage;
+let inferredEngine: InferredEngine | undefined;
 
 /** Per-scope hazardous-deny counter for the main session. Resets on agent_end. */
 const hazardousDenyState: HazardousDenyState = { count: 0 };
@@ -131,6 +185,20 @@ let currentThinkingLevel: string = "off";
 let subagentUsage: SubagentUsage = { ...ZERO_USAGE };
 
 const SUBAGENT_USAGE_TYPE = "safetynet:subagent-usage";
+
+/** Update the inferred-proposals badge widget (P2, never takes focus). */
+function updateInferredBadge(ctx: ExtensionContext): void {
+	const n = inferredEngine?.listProposals().length ?? 0;
+	if (n > 0) {
+		ctx.ui.setWidget(
+			"safetynet-inferred",
+			[`${n} inferred-rule proposal${n === 1 ? "" : "s"} waiting — /safetynet:inferred to review`],
+			{ placement: "belowEditor" },
+		);
+	} else {
+		ctx.ui.setWidget("safetynet-inferred", undefined);
+	}
+}
 
 function persistSubagentUsage(): void {
 	pi.appendEntry(SUBAGENT_USAGE_TYPE, { ...subagentUsage });
@@ -211,7 +279,7 @@ async function handleToolCall(
     if (event.toolName === "bash") {
       const command = event.input.command as string;
       const rules = storage.getAllRules();
-      const check = checkBashPermission(command, profile, rules, cwd, trustExternal, modeAliases);
+      const check = checkBashPermission(command, profile, rules, cwd, trustExternal, modeAliases, inferredEngine?.rulesForProfile(profile, modeAliases));
 
       if (check.action === "deny") {
         // Per-rule reason wins over configured auto-deny reason; default
@@ -237,7 +305,7 @@ async function handleToolCall(
         permission: "bash",
         target: command,
         check,
-        recheck: () => checkBashPermission(command, profile, storage.getAllRules(), cwd, trustExternal, modeAliases),
+        recheck: () => checkBashPermission(command, profile, storage.getAllRules(), cwd, trustExternal, modeAliases, inferredEngine?.rulesForProfile(profile, modeAliases)),
         cwd,
       });
     }
@@ -625,6 +693,24 @@ function registerCommands(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("safetynet:inferred", {
+    description: "Review pending inferred-rule proposals",
+    handler: async (_args, ctx) => {
+      if (!inferredEngine) {
+        ctx.ui.notify("safetynet: no session — nothing to review", "warning");
+        return;
+      }
+      const { openInferredReview } = await import("./inferred-popup-pi.ts");
+      const result = await openInferredReview(ctx, inferredEngine, {
+        modes: [getCurrentProfile()],
+        onQueueChange: () => updateInferredBadge(ctx),
+      });
+      if (result === "empty") ctx.ui.notify("safetynet: no pending inferred-rule proposals", "info");
+      else if (result === "busy") ctx.ui.notify("safetynet: another prompt is open — review when it closes", "warning");
+      updateInferredBadge(ctx);
+    },
+  });
+
   pi.registerCommand("safetynet:plan", {
     description: "Switch to plan mode",
     handler: async (_args, ctx) => switchToProfile(ctx, "plan"),
@@ -948,6 +1034,9 @@ export default function safetynetExtension(api: ExtensionAPI) {
     }
     currentThinkingLevel = pi.getThinkingLevel();
     installFooter(ctx);
+    inferredEngine = new InferredEngine(ctx.cwd);
+    loadLearnedBoundaries();
+    uiArbiter.reset(); // no stale surface may block a fresh session's prompts
 
     // Apply the paradigm FIRST, before profile restore/brand-new default above,
     // so restoreProfile and the default profile normalize against the correct
@@ -1032,6 +1121,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
     reviewBumpTurnToken();
     reviewResetDenies();
     hazardousDenyState.count = 0;
+    if (inferredEngine) updateInferredBadge(ctx);
   });
 
   // Mode messaging: per-turn mode-specific stanza in the system prompt.
@@ -1058,5 +1148,10 @@ export default function safetynetExtension(api: ExtensionAPI) {
 
   pi.on("session_tree", async (_event, ctx) => {
     await restoreSessionState(ctx, { replaceSession: true });
+    // Counters are session evidence — a tree switch is a new context.
+    inferredEngine = new InferredEngine(ctx.cwd);
+    loadLearnedBoundaries();
+    uiArbiter.reset();
+    updateInferredBadge(ctx);
   });
 }

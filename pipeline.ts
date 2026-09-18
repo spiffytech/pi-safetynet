@@ -20,6 +20,7 @@ import { PermissionStorage } from "./core/permissions/index.ts";
 import type { PermissionCheck } from "./core/check.ts";
 import { actionWrites } from "./core/check.ts";
 import { isAutoEnabled, loadAutoApproveConfig, setAutoEnabled } from "./core/auto-config-state.ts";
+import type { InferredEngine } from "./core/inferred/engine.ts";
 import {
   runPermissionReview, reviewConsecutiveDenies, reviewResetDenies,
   reviewIncrementDenies, reviewTurnToken, reviewBumpTurnToken,
@@ -65,6 +66,9 @@ export interface PipelineDeps {
   promptAbortSignal?: AbortSignal;
   /** Optional reason text to show in the prompt header (auto escalation). */
   promptReason?: string;
+  /** Inferred-rules engine (bash shape counters → judge → proposal queue).
+   *  Absent in tests / when no session is bound. */
+  inferred?: InferredEngine;
 }
 
 // ─── Pure seams ────────────────────────────────────────────────────────────
@@ -340,6 +344,7 @@ export async function resolvePermission(
         const tempRules = buildApprovalRules(opts.check, opts.permission, deps.cwd, deps.allowModes, opts.target);
         const allStorages = [deps.storage, ...(deps.dualWrite ?? [])];
         for (const s of allStorages) s.addTempRules(tempRules);
+        if (opts.permission === "bash") deps.inferred?.recordApproval(opts.target, deps.allowModes);
 
         const recheckResult = opts.recheck();
         if (recheckResult.action === "allow") {
@@ -532,6 +537,10 @@ export async function resolvePermission(
       } else {
         patterns.push(edited);
       }
+    }
+    // Counters only consume durable bash approvals ("once" declined persistence).
+    if (opts.permission === "bash") {
+      deps.inferred?.recordApproval(opts.target, deps.allowModes);
     }
 
     const redirectPatterns: Array<{ permission: "read" | "edit"; pattern: string }> = [];

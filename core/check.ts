@@ -2,8 +2,10 @@ import { resolve } from "node:path";
 import type { ProfileName, PermissionAction, Ruleset, ModeAliases } from "./types.ts";
 import { evaluatePermission } from "./permissions/ruleset.ts";
 import { getBaselineRules } from "./permissions/index.ts";
-import { parseCommand, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
+import { parseCommand, subcommandTokenLists, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
 import { normalizePathForMatching, expandHome } from "./project.ts";
+import { patternMatches } from "./inferred/shapes.ts";
+import type { InferredBashRule } from "./inferred/store.ts";
 /** Device files that are always safe to use as redirect targets. */
 const SAFE_DEVICE_FILES = new Set([
   "/dev/null",
@@ -139,6 +141,20 @@ function isCdWithinProject(subcommand: string, cwd: string, trustExternalPaths =
   return trustExternalPaths || resolved.startsWith(cwd + "/") || resolved === cwd;
 }
 
+/** Does an inferred rule apply to this profile? Mirrors the alias-aware
+ *  matching of explicit rules. */
+function inferredRuleApplies(
+  rule: InferredBashRule,
+  profile: ProfileName,
+  modeAliases: ModeAliases,
+): boolean {
+  if (rule.modes.includes(profile)) return true;
+  for (const [from, to] of Object.entries(modeAliases)) {
+    if (to === profile && rule.modes.includes(from as ProfileName)) return true;
+  }
+  return false;
+}
+
 export function checkBashPermission(
   command: string,
   profile: ProfileName,
@@ -146,6 +162,9 @@ export function checkBashPermission(
   cwd?: string,
   trustExternalPaths = false,
   modeAliases: ModeAliases = {},
+  /** Accepted inferred rules (structural bash patterns). Consulted only
+   *  when the explicit ruleset says "ask" — an explicit deny always wins. */
+  inferred?: InferredBashRule[],
 ): PermissionCheck {
   const parsed = parseCommand(command);
 
@@ -193,10 +212,21 @@ export function checkBashPermission(
       const r = result.matchedRule?.reason ?? "Automatically denied";
       if (!denyReasons.includes(r)) denyReasons.push(r);
     } else if (result.action === "ask") {
-      if (worstAction !== "deny") worstAction = "ask";
-      if (!unapproved.includes(sub)) {
-        unapproved.push(sub);
-        unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
+      // Inferred rules may settle an ask (structural token match), but never
+      // override a deny above.
+      const inferredAllow = inferred?.length
+        ? inferred.some(
+            (r) =>
+              inferredRuleApplies(r, profile, modeAliases) &&
+              patternMatches(r.pattern, subcommandTokenLists(sub)[0] ?? []),
+          )
+        : false;
+      if (!inferredAllow) {
+        if (worstAction !== "deny") worstAction = "ask";
+        if (!unapproved.includes(sub)) {
+          unapproved.push(sub);
+          unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
+        }
       }
     }
   }
