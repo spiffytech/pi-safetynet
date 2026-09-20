@@ -19,7 +19,7 @@ import {
 	loadToggleModeKey,
 } from "./core/global-config.ts";
 import type { ProfileName, Ruleset } from "./core/types.ts";
-import { checkBashPermission, checkFileTarget } from "./core/check.ts";
+import { checkBashPermission, checkFileTarget, checkToolPermission } from "./core/check.ts";
 import {
 	getCurrentProfile,
 	setCurrentProfile,
@@ -33,6 +33,7 @@ import {
 	normalizeProfile,
 	isReadOnly,
 	paradigmModes,
+	acceptanceModes,
 	persistProfile,
 	restoreProfile,
 } from "./core/profiles.ts";
@@ -123,7 +124,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 				// never gates the agent. Rendered by the popup module.
 				import("./inferred-popup.ts").then((m) =>
 					m.openInferredReview(ctx, inferred!, {
-						modes: [getCurrentProfile()],
+						modes: acceptanceModes(),
 						onQueueChange: (n) => updateInferredBadge(ctx),
 					}),
 				).catch(() => {});
@@ -214,7 +215,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 			}
 			const { openInferredReview } = await import("./inferred-popup.ts");
 			const result = await openInferredReview(ctx, eng, {
-				modes: [getCurrentProfile()],
+				modes: acceptanceModes(),
 				onQueueChange: (n) => updateInferredBadge(ctx),
 			});
 			if (result === "empty") ctx.ui.notify("safetynet: no pending inferred-rule proposals", "info");
@@ -231,6 +232,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 		if (!storage) return; // no session yet
 		// Counters are session evidence — never leak across sessions.
 		inferred = new InferredEngine(ctx.cwd);
+		storage.persisted.setCwd(ctx.cwd); // project scope follows the session cwd
 		uiArbiter.reset();
 		if (event.reason === "new") {
 			// Brand-new session: reset to defaults.
@@ -374,7 +376,26 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 				: event.toolName === "read" || event.toolName === "glob" || event.toolName === "grep"
 					? "read"
 					: undefined;
-		if (!perm) return; // not a file tool we gate
+		if (!perm) {
+			// Unknown tools get the same affordances as bash in read-only sessions
+			// (pi parity): explicit rules, auto-review, and inferred `tool:<name>`
+			// rules. Read-write sessions leave unknown tools ungated.
+			if (!readOnly) return;
+			const runToolCheck = () =>
+				checkToolPermission(
+					event.toolName,
+					profile,
+					storage!.getAllRules(),
+					getModeAliases(),
+					inferred?.rulesForProfile(profile, getModeAliases()),
+				);
+			return await resolveOmpPermission(d, {
+				permission: "bash",
+				target: `tool:${event.toolName}`,
+				check: runToolCheck(),
+				recheck: runToolCheck,
+			});
+		}
 		const input = event.input as Record<string, unknown>;
 		const paths: string[] = [];
 		if (typeof input.path === "string") paths.push(input.path);

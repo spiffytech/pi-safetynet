@@ -50,7 +50,7 @@ export interface JudgeDeps {
   ask: (prompt: string) => Promise<string>;
 }
 
-export const JUDGE_SYSTEM_PROMPT = `You are a permission-rule safety judge. You review a proposed bash permission rule that was generalized from commands a user has manually approved during this session. Your verdict decides whether the user is shown an offer to add it permanently.
+export const JUDGE_SYSTEM_PROMPT = `You are a permission-rule safety judge. You review a proposed permission rule that was generalized from actions a user has manually approved during this session. Targets are bash commands, or tool-permission targets of the form \`tool:<name>\` (a tool approved in a read-only session); judge both the same way. Your verdict decides whether the user is shown an offer to add it permanently.
 
 You must be conservative. Approve only patterns where the varying parts are genuinely innocuous. Reject when:
 - the program is capable of destructive or irreversible action (deletion, overwriting, force-pushing, disk writes),

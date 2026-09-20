@@ -50,7 +50,9 @@ export class InferredEngine {
 	 *  subject to approval — not the raw command string. Re-splitting a raw
 	 *  command also counted policy-auto-approved siblings (a `cd` into the
 	 *  project, a bare assignment), which then ripened into rules and got
-	 *  offered even though no human ever decided them. Fire-and-forget safe. */
+	 *  offered even though no human ever decided them. Tool-permission asks
+	 *  (`tool:<name>` targets) are recorded here too, so tool calls get the same
+	 *  inferred-rule affordances as bash commands. Fire-and-forget safe. */
 	recordApproval(subcommands: string[], modes: ProfileName[]): void {
 		try {
 			for (const sub of subcommands) {

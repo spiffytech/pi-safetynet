@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadGlobalRules, saveGlobalRules, addGlobalRules, getGlobalConfigPath, getGlobalConfigDir, loadDefaultProfile, saveDefaultProfile, loadTrustExternalPaths, loadParadigm } from "./global-config.ts";
-import type { Ruleset } from "./types.ts";
+import { PermissionStorage } from "./permissions/storage.ts";
+import type { Rule, Ruleset } from "./types.ts";
 
 /** Temporary homedir override for testing. */
 const TMP_HOME = join(process.cwd(), ".test-tmp-home");
@@ -309,5 +310,33 @@ describe("global-config", () => {
       assert.deepEqual(parsed.rules, [{ permission: "bash", pattern: "npm test", action: "allow", modes: ["build"] }]);
       assert.deepEqual(parsed.subagents, ["subagent_explore"]);
     });
+  });
+});
+
+describe("project rules are keyed by cwd in the global config", () => {
+  const rule = (pattern: string): Rule => ({ permission: "bash", pattern, action: "allow", modes: ["build"] });
+
+  it("keeps separate rules per project and re-points on setCwd", async () => {
+    const a = new PermissionStorage("/work/a");
+    const b = new PermissionStorage("/work/b");
+    await a.addPersistedRules([rule("npm test")]);
+
+    assert.deepEqual(a.persisted.getRules().map((r) => r.pattern), ["npm test"]);
+    assert.deepEqual(b.persisted.getRules(), [], "project rule must not leak into another project");
+
+    b.persisted.setCwd("/work/a");
+    assert.deepEqual(b.persisted.getRules().map((r) => r.pattern), ["npm test"], "setCwd re-points project scope");
+
+    const config = JSON.parse(readFileSync(getGlobalConfigPath(), "utf-8"));
+    assert.deepEqual(Object.keys(config.projectRules), ["/work/a"]);
+  });
+
+  it("preserves global rules and other keys when adding project rules", async () => {
+    saveGlobalRules([rule("global-cmd")]);
+    const a = new PermissionStorage("/work/a");
+    await a.addPersistedRules([rule("project-cmd")]);
+
+    assert.deepEqual(loadGlobalRules().map((r) => r.pattern), ["global-cmd"]);
+    assert.deepEqual(a.persisted.getRules().map((r) => r.pattern), ["project-cmd"]);
   });
 });

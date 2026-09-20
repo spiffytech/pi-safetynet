@@ -170,6 +170,11 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			autoDenyConfig: opts.autoDenyConfig,
 			paradigm: opts.paradigm ?? "plan-build",
 			modeAliases: opts.modeAliases ?? {},
+			// A custom system prompt marks a specialized subagent (permission
+			// reviewer / inferred-rule judge). It must not inherit the generic
+			// explore/build role message, which the reviewer otherwise mistakes
+			// for the session it is judging.
+			omitContextMessage: opts.systemPrompt !== undefined,
 		}),
 		opts.systemPrompt ? createSystemPromptExtension(opts.systemPrompt) : null,
 		].filter(Boolean) as any[],

@@ -65,6 +65,17 @@ export function paradigmModes(paradigm: Paradigm = currentParadigm): { read: Pro
 	return paradigm === "ro-rw" ? { read: "ro", write: "rw" } : { read: "plan", write: "build" };
 }
 
+/** Modes an accepted rule should cover: the write mode alone when accepting in
+ *  a write session, both read and write when accepting in a read-only session.
+ *  Mirrors the explicit-approval `allowModes` computation. A rule learned under
+ *  read-only enforcement is safe in a write session; the reverse is not — it
+ *  would auto-allow, without review, a write the read-only reviewer would have
+ *  denied — so write-mode rules stay write-only. */
+export function acceptanceModes(): ProfileName[] {
+	const { read, write } = paradigmModes();
+	return getCurrentProfile() === write ? [write] : [read, write];
+}
+
 export function getLatestCustomEntry<T>(journal: SessionEntriesSource, customType: string): { data?: T } | undefined {
 	const entries = journal.sessionManager.getEntries();
 	return entries

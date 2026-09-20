@@ -267,12 +267,25 @@ export function checkToolPermission(
   profile: ProfileName,
   rules: Ruleset,
   modeAliases: ModeAliases = {},
+  /** Accepted inferred rules (structural patterns). Consulted only when the
+   *  explicit ruleset says "ask" — the same contract as checkBashPermission,
+   *  so tool calls get the same inferred-rule affordances as bash commands. */
+  inferred?: InferredBashRule[],
 ): PermissionCheck {
-  const result = evaluatePermission("bash", `tool:${toolName}`, profile, rules, undefined, modeAliases);
+  const target = `tool:${toolName}`;
+  const result = evaluatePermission("bash", target, profile, rules, undefined, modeAliases);
   if (result.action === "deny") {
     return { action: "deny", reason: result.matchedRule?.reason ?? "Unknown tool denied by ruleset" };
   }
   if (result.action === "ask") {
+    const inferredAllow = inferred?.length
+      ? inferred.some(
+          (r) =>
+            inferredRuleApplies(r, profile, modeAliases) &&
+            patternMatches(r.pattern, subcommandTokenLists(target)[0] ?? []),
+        )
+      : false;
+    if (inferredAllow) return { action: "allow" };
     return { action: "ask", reason: profile === "plan" ? "Unknown tool in plan mode requires approval" : "Unknown tool in read-only mode requires approval" };
   }
   return { action: result.action };

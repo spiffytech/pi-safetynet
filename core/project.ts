@@ -1,23 +1,4 @@
-import { existsSync } from "node:fs";
-import { join, dirname, resolve, relative } from "node:path";
-
-/**
- * Find the nearest ancestor directory containing a `.pi` config directory.
- * Used by storage to locate the pi config tree (e.g. ~/.pi or a project-local .pi).
- */
-export function findPiConfigDir(startPath: string): string {
-  let current = startPath;
-  while (true) {
-    if (existsSync(join(current, ".pi"))) {
-      return current;
-    }
-    if (current === "/") break;
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return startPath;
-}
+import { join, resolve, relative } from "node:path";
 
 /** Expand `~` to `$HOME`. No-op for paths that don't start with `~`. */
 export function expandHome(path: string): string {

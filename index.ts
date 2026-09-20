@@ -42,6 +42,7 @@ import {
   normalizeProfile,
   isReadOnly,
   paradigmModes,
+  acceptanceModes,
 } from "./core/profiles.ts";
 import {
   showPermissionPrompt,
@@ -72,9 +73,7 @@ async function resolvePermission(
     cwd: string;
   },
 ): Promise<{ block: boolean; reason: string } | undefined> {
-  const profile = getCurrentProfile();
-  const { read, write } = paradigmModes();
-  const allowModes: ProfileName[] = profile === write ? [write] : [read, write];
+  const allowModes: ProfileName[] = acceptanceModes();
   return resolvePermissionShared(
     {
       displayCtx: ctx,
@@ -141,7 +140,7 @@ function wireInferred(ctx: ExtensionContext): InferredEngine {
 		openReviewPopup: () => {
 			// Fire-and-forget: owns input while up, Esc defers, never gates.
 			import("./inferred-popup-pi.ts")
-				.then((m) => m.openInferredReview(ctx, engine, { modes: [getCurrentProfile()], onQueueChange: () => updateInferredBadge(ctx) }))
+				.then((m) => m.openInferredReview(ctx, engine, { modes: acceptanceModes(), onQueueChange: () => updateInferredBadge(ctx) }))
 				.catch(() => {});
 		},
 	};
@@ -274,7 +273,7 @@ async function handleToolCall(
     const profile = getCurrentProfile();
     const modeAliases = getModeAliases();
 
-    const cwd = process.cwd();
+    const cwd = ctx.cwd;
     const trustExternal = trustExternalActive();
 
     if (event.toolName === "bash") {
@@ -374,8 +373,8 @@ async function handleToolCall(
       return resolvePermission(ctx, {
         permission: "bash",
         target: `tool:${event.toolName}`,
-        check: checkToolPermission(event.toolName, profile, rules, modeAliases),
-        recheck: () => checkToolPermission(event.toolName, profile, storage.getAllRules(), modeAliases),
+        check: checkToolPermission(event.toolName, profile, rules, modeAliases, inferredEngine?.rulesForProfile(profile, modeAliases)),
+        recheck: () => checkToolPermission(event.toolName, profile, storage.getAllRules(), modeAliases, inferredEngine?.rulesForProfile(profile, modeAliases)),
         cwd,
       });
     }
@@ -714,7 +713,7 @@ function registerCommands(pi: ExtensionAPI) {
       }
       const { openInferredReview } = await import("./inferred-popup-pi.ts");
       const result = await openInferredReview(ctx, inferredEngine, {
-        modes: [getCurrentProfile()],
+        modes: acceptanceModes(),
         onQueueChange: () => updateInferredBadge(ctx),
       });
       if (result === "empty") ctx.ui.notify("safetynet: no pending inferred-rule proposals", "info");
@@ -788,7 +787,7 @@ function registerCommands(pi: ExtensionAPI) {
         lines.push("", "--- TEMPORARY ---", ...formatRules(temp));
       }
 
-      lines.push("", `Approvals file: ${storage.persisted.getFilePath()}`);
+      lines.push("", `Approvals file: ${storage.persisted.getFilePath()}`, `Project key: ${storage.persisted.getKey()}`);
       ctx.ui.notify(lines.join("\n"), "info");
     },
   });
@@ -966,7 +965,7 @@ async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): P
   restoreSubagentUsage(ctx);
   restoreAutoEnabled(ctx);
 
-  const { rules: sessionRules, skippedCount } = reconstructSessionRules(ctx, process.cwd());
+  const { rules: sessionRules, skippedCount } = reconstructSessionRules(ctx, ctx.cwd);
   if (opts?.replaceSession) {
     const s = storage.session;
     s.clear();
@@ -1047,6 +1046,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
     currentThinkingLevel = pi.getThinkingLevel();
     installFooter(ctx);
     inferredEngine = new InferredEngine(ctx.cwd);
+    storage.persisted.setCwd(ctx.cwd); // project scope follows the session cwd
     loadLearnedBoundaries();
     uiArbiter.reset(); // no stale surface may block a fresh session's prompts
 
@@ -1162,6 +1162,7 @@ export default function safetynetExtension(api: ExtensionAPI) {
     await restoreSessionState(ctx, { replaceSession: true });
     // Counters are session evidence — a tree switch is a new context.
     inferredEngine = new InferredEngine(ctx.cwd);
+    storage.persisted.setCwd(ctx.cwd);
     loadLearnedBoundaries();
     uiArbiter.reset();
     updateInferredBadge(ctx);

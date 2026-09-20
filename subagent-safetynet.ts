@@ -42,6 +42,12 @@ export interface SubagentSafetynetOpts {
 	promptKeybindings?: PromptKeybindings;
 	/** Inherited from parent: auto-deny behaviour for rule-denies. */
 	autoDenyConfig?: AutoDenyConfig;
+	/** Skip the generic explore/build role context message. Set for specialized
+	 *  subagents (permission reviewer, inferred-rule judge) that run read-only
+	 *  tools under their own system prompt — the generic "You are a read-only
+	 *  explore subagent" text otherwise leaks the harness identity into the
+	 *  model's self-assessment. */
+	omitContextMessage?: boolean;
 }
 
 const SUBAGENT_EPHEMERAL_CUSTOM_TYPE = "safetynet:subagent-ephemeral";
@@ -51,7 +57,7 @@ const BUILD_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"]
 
 // ─── Explore mode ──────────────────────────────────────────────────────────
 
-function createExploreSafetynet(_opts: SubagentSafetynetOpts): (pi: ExtensionAPI) => void {
+function createExploreSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) => void {
 	return (pi: ExtensionAPI) => {
 		const allowedTools = new Set(EXPLORE_TOOL_NAMES);
 
@@ -68,7 +74,11 @@ function createExploreSafetynet(_opts: SubagentSafetynetOpts): (pi: ExtensionAPI
 			return { block: true, reason: `Tool '${event.toolName}' is not available in explore mode` };
 		});
 
-		pi.on("context", async (event) => {
+		// Specialized subagents (permission reviewer, inferred-rule judge) carry
+		// their own system prompt and must NOT receive the generic explore
+		// identity: the reviewer otherwise reasons about "you are a read-only
+		// explore subagent" as though it described the session under review.
+		if (!opts.omitContextMessage) pi.on("context", async (event) => {
 			const ephemeralMessage: AgentMessage & { customType: string; display: boolean } = {
 				role: "custom",
 				customType: SUBAGENT_EPHEMERAL_CUSTOM_TYPE,
@@ -203,7 +213,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 			// which would incorrectly clear the parent's turn-scoped rules.
 		});
 
-		pi.on("context", async (event) => {
+		if (!opts.omitContextMessage) pi.on("context", async (event) => {
 			const ephemeralMessage: AgentMessage & { customType: string; display: boolean } = {
 				role: "custom",
 				customType: SUBAGENT_EPHEMERAL_CUSTOM_TYPE,

@@ -529,6 +529,51 @@ describe("checkToolPermission", () => {
     const resultAfter = checkToolPermission("ask_user", "plan", rulesAfter);
     assert.equal(resultAfter.action, "allow");
   });
+
+  it("consults inferred rules on ask (parity with checkBashPermission)", () => {
+    const inferred = [{
+      id: "r1",
+      render: "tool:ask_user",
+      pattern: { tokens: [{ kind: "lit", text: "tool:ask_user" }] },
+      modes: ["plan"],
+      exemplars: [],
+      scope: "project",
+      acceptedAt: 1,
+    }] as any;
+    const result = checkToolPermission("ask_user", "plan", RULES, {}, inferred);
+    assert.equal(result.action, "allow");
+  });
+
+  it("an inferred rule never overrides an explicit deny", () => {
+    const rules: Ruleset = [
+      { permission: "bash", pattern: "tool:dangerous", action: "deny", modes: ALL_MODES, reason: "Blocked" },
+    ];
+    const inferred = [{
+      id: "r1",
+      render: "tool:dangerous",
+      pattern: { tokens: [{ kind: "lit", text: "tool:dangerous" }] },
+      modes: ["plan"],
+      exemplars: [],
+      scope: "project",
+      acceptedAt: 1,
+    }] as any;
+    const result = checkToolPermission("dangerous", "plan", rules, {}, inferred);
+    assert.equal(result.action, "deny");
+  });
+
+  it("an inferred rule scoped to another mode does not apply", () => {
+    const inferred = [{
+      id: "r1",
+      render: "tool:ask_user",
+      pattern: { tokens: [{ kind: "lit", text: "tool:ask_user" }] },
+      modes: ["build"],
+      exemplars: [],
+      scope: "project",
+      acceptedAt: 1,
+    }] as any;
+    const result = checkToolPermission("ask_user", "plan", RULES, {}, inferred);
+    assert.equal(result.action, "ask");
+  });
 });
 
 describe("unapprovedDisplay parallel array", () => {

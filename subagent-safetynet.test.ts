@@ -85,6 +85,39 @@ describe("createSubagentSafetynetExtension — explore", () => {
 		assert.ok(pi.handlers.has("context"), "context handler registered");
 	});
 
+	it("injects the generic explore identity by default", async () => {
+		const factory = createSubagentSafetynetExtension({
+			taskType: "explore",
+			cwd: "/tmp/test",
+		});
+		const pi = createMockPi();
+		factory(pi as unknown as ExtensionAPI);
+
+		const handler = pi.handlers.get("context")![0]!;
+		const result = await handler({ messages: [] }, createMockCtx());
+		const injected = result.messages.find(
+			(m: any) => m.customType === "safetynet:subagent-ephemeral",
+		);
+		assert.ok(injected, "generic context message injected");
+		assert.match(injected.content, /read-only explore subagent/);
+	});
+
+	it("omits the generic explore identity for specialized subagents (reviewer/judge)", () => {
+		const factory = createSubagentSafetynetExtension({
+			taskType: "explore",
+			cwd: "/tmp/test",
+			omitContextMessage: true,
+		});
+		const pi = createMockPi();
+		factory(pi as unknown as ExtensionAPI);
+
+		assert.equal(
+			pi.handlers.has("context"),
+			false,
+			"the reviewer/judge must not be told it is a read-only explore subagent",
+		);
+	});
+
 	it("allows read tool calls", async () => {
 		const factory = createSubagentSafetynetExtension({
 			taskType: "explore",

@@ -212,8 +212,10 @@ async function runPermissionReviewWithModel(
   };
   const actionJson = formatActionJson(actionOpts);
 
-  // Build task prompt
-  let taskPrompt = `## Transcript\n${transcriptStr}\n\n## Planned action\n${actionJson}\n\nReturn strict JSON only.`;
+  // Build task prompt. State the project root explicitly (as well as inside the
+  // action JSON) so the reviewer cannot mistake a directory mentioned in the
+  // transcript for the project the action runs in.
+  let taskPrompt = `## Project root\n${opts.cwd}\n\n## Transcript\n${transcriptStr}\n\n## Planned action\n${actionJson}\n\nReturn strict JSON only.`;
   if (opts.retryReason) {
     taskPrompt = `## Retry reason\n${opts.retryReason}\n\n${taskPrompt}`;
   }

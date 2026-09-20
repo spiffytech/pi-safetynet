@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  findPiConfigDir,
   isExternalPath,
   normalizePathForMatching,
   toDisplayPath,
@@ -12,41 +11,6 @@ import {
   toRecursiveGlob,
   expandHome,
 } from "./project.ts";
-
-describe("findPiConfigDir", () => {
-  const base = join(tmpdir(), `safetynet-test-project-${Date.now()}`);
-
-  beforeEach(() => {
-    mkdirSync(join(base, "src"), { recursive: true });
-    mkdirSync(join(base, ".pi"), { recursive: true });
-  });
-
-  afterEach(() => {
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  it("finds .pi in same directory", () => {
-    assert.equal(findPiConfigDir(base), base);
-  });
-
-  it("finds .pi in parent directory", () => {
-    assert.equal(findPiConfigDir(join(base, "src")), base);
-  });
-
-  it("finds .pi in grandparent directory", () => {
-    assert.equal(findPiConfigDir(join(base, "src", "sub")), base);
-  });
-
-  it("falls back to startPath when no .pi found", () => {
-    const noPi = join(tmpdir(), `safetynet-test-nopi-${Date.now()}`);
-    try {
-      mkdirSync(noPi, { recursive: true });
-      assert.equal(findPiConfigDir(noPi), noPi);
-    } finally {
-      rmSync(noPi, { recursive: true, force: true });
-    }
-  });
-});
 
 describe("isExternalPath", () => {
   it("flags /etc/passwd as external to /project", () => {

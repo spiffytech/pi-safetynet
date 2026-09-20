@@ -1,8 +1,6 @@
-import { join } from "node:path";
 import type { Rule, Ruleset, TempRule, ProfileName, SessionJournalSource } from "../types.ts";
-import { findPiConfigDir } from "../project.ts";
 import { readJsonFile, withJsonLock } from "../json-store.ts";
-import { loadGlobalRules, addGlobalRules as addGlobalRulesToConfig } from "../global-config.ts";
+import { loadGlobalRules, addGlobalRules as addGlobalRulesToConfig, getGlobalConfigPath } from "../global-config.ts";
 import baselineData from "./baseline.json" with { type: "json" };
 
 const BASELINE: Ruleset = baselineData.rules as Ruleset;
@@ -31,6 +29,10 @@ const VALID_ACTIONS = new Set(["allow", "deny", "ask"]);
 const VALID_PERMISSIONS = new Set(["bash", "edit", "read", "*"]);
 const VALID_MODES = new Set(["plan", "build", "ro", "rw"]);
 
+function asRecord(v: unknown): Record<string, unknown> {
+  return typeof v === "object" && v !== null ? (v as Record<string, unknown>) : {};
+}
+
 export function sanitizeRules(raw: unknown[]): Ruleset {
   return raw.filter((r): r is Rule => {
     if (typeof r !== "object" || r === null) return false;
@@ -46,21 +48,35 @@ export function sanitizeRules(raw: unknown[]): Ruleset {
 }
 
 class PersistedRuleStore {
-  private filePath: string;
+  /** Project scope is a `projectRules[cwd]` key in the global safetynet
+   *  config, not a file at the nearest `.pi` — that collapsed to $HOME for any
+   *  project without a local `.pi`, silently leaking "project" rules across
+   *  every home-nested project. */
+  private cwd: string;
 
   constructor(cwd: string) {
-    const root = findPiConfigDir(cwd);
-    this.filePath = join(root, ".pi", "extensions", "safetynet", "approvals.json");
+    this.cwd = cwd;
+  }
+
+  /** Re-point at another project (resume/switch can change the session cwd). */
+  setCwd(cwd: string): void {
+    this.cwd = cwd;
+  }
+
+  /** The project key these rules are stored under (for display). */
+  getKey(): string {
+    return this.cwd;
   }
 
   getFilePath(): string {
-    return this.filePath;
+    return getGlobalConfigPath();
   }
 
   /** Re-read rules from disk on every call so other sessions' approvals are visible. */
   getRules(): Ruleset {
-    const data = readJsonFile(this.filePath) as { rules?: unknown } | null;
-    return Array.isArray(data?.rules) ? sanitizeRules(data.rules) : [];
+    const config = asRecord(readJsonFile(getGlobalConfigPath()));
+    const rules = asRecord(config.projectRules)[this.cwd];
+    return Array.isArray(rules) ? sanitizeRules(rules) : [];
   }
 
   /** Validate the file is readable at startup. */
@@ -70,16 +86,18 @@ class PersistedRuleStore {
   }
 
   async addRules(newRules: Ruleset): Promise<void> {
-    const filePath = this.filePath;
-    withJsonLock(filePath, (current) => {
-      const data = current as { rules?: unknown } | null;
-      const rules = Array.isArray(data?.rules) ? sanitizeRules(data.rules) : [];
-      rules.push(...newRules);
-      rules.sort((a, b) => {
+    const cwd = this.cwd;
+    withJsonLock(getGlobalConfigPath(), (current) => {
+      const config = asRecord(current);
+      const projectRules = { ...asRecord(config.projectRules) };
+      const existing = Array.isArray(projectRules[cwd]) ? sanitizeRules(projectRules[cwd] as unknown[]) : [];
+      const merged = [...existing, ...newRules];
+      merged.sort((a, b) => {
         const order: Record<string, number> = { bash: 0, edit: 1, read: 2, "*": 3 };
         return (order[a.permission] ?? 4) - (order[b.permission] ?? 4);
       });
-      return { result: undefined, next: { ...(data ?? {}), rules } };
+      projectRules[cwd] = merged;
+      return { result: undefined, next: { ...config, projectRules } };
     });
   }
 }

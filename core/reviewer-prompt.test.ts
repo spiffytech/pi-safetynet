@@ -49,6 +49,21 @@ describe("REVIEWER_SYSTEM_PROMPT policy content", () => {
     assert.match(REVIEWER_SYSTEM_PROMPT, /Read-only session → deny any write action outright, before scoring/);
     assert.match(REVIEWER_SYSTEM_PROMPT, /In read-only mode \(see Session mode\), write actions are denied outright regardless of level/);
   });
+
+  it("tells the reviewer its own read-only tools are not the session mode", () => {
+    assert.match(REVIEWER_SYSTEM_PROMPT, /## Identity and scope/);
+    assert.match(REVIEWER_SYSTEM_PROMPT, /property of this review harness/);
+    assert.match(REVIEWER_SYSTEM_PROMPT, /The only statement of session mode is the "profile" field/);
+  });
+
+  it("anchors the reviewer to the action's cwd, not a directory named in the transcript", () => {
+    assert.match(REVIEWER_SYSTEM_PROMPT, /is the project root the action runs in/);
+    assert.match(REVIEWER_SYSTEM_PROMPT, /do not move the project root and say nothing about this action/);
+  });
+
+  it("scores a direct user instruction as high despite unrelated transcript context", () => {
+    assert.match(REVIEWER_SYSTEM_PROMPT, /scores high, even if the rest of the transcript concerns something else/);
+  });
 });
 
 // ─── parseAssessment: user_authorization defaulting ─────────────────────────
@@ -224,5 +239,32 @@ describe("runPermissionReview trajectory (user-messages-only transcript)", () =>
       !capturedPrompt.includes("ssh prod deploy --force"),
       "assistant tool output must NOT be in the transcript",
     );
+  });
+
+  it("states the action's project root explicitly in the task prompt", async () => {
+    let capturedPrompt = "";
+    await runPermissionReview(
+      {
+        permission: "bash",
+        target: "npm install",
+        check: { action: "ask" },
+        cwd: "/work/pi-safetynet",
+        parentCtx: { sessionManager: { getEntries: makeEntries } } as any,
+        profile: "build",
+        timeoutMs: 100,
+      },
+      {
+        spawn: async (opts: any) => {
+          capturedPrompt = opts.prompt;
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              risk_level: "low", user_authorization: "high", outcome: "allow", rationale: "ok",
+            }) }],
+            details: {},
+          };
+        },
+      },
+    );
+    assert.match(capturedPrompt, /## Project root\n\/work\/pi-safetynet/);
   });
 });

@@ -17,6 +17,7 @@ import {
   getModeAliases,
   isReadOnly,
   paradigmModes,
+  acceptanceModes,
 } from "./profiles.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -113,6 +114,19 @@ describe("profiles", () => {
       setParadigm("ro-rw");
       assert.deepEqual(paradigmModes(), { read: "ro", write: "rw" });
       setParadigm("plan-build");
+    });
+
+    it("acceptanceModes widens read-only acceptance to both modes but keeps write-only write-only", () => {
+      setParadigm("plan-build");
+      setCurrentProfile("plan");
+      assert.deepEqual(acceptanceModes(), ["plan", "build"]);
+      setCurrentProfile("build");
+      assert.deepEqual(acceptanceModes(), ["build"], "write-mode rule must not leak into read-only");
+      setParadigm("ro-rw");
+      setCurrentProfile("ro");
+      assert.deepEqual(acceptanceModes(), ["ro", "rw"]);
+      setCurrentProfile("rw");
+      assert.deepEqual(acceptanceModes(), ["rw"]);
     });
   });
 

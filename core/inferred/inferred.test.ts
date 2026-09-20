@@ -12,7 +12,7 @@ import { join } from "node:path";
 process.env.SAFETYNET_INFERRED_DIR = mkdtempSync(join(tmpdir(), "safetynet-global-"));
 import { ShapeCounters, RIPEN_THRESHOLD } from "./counters.ts";
 import { InferredEngine } from "./engine.ts";
-import { runInferredJudge, buildJudgePrompt, type JudgeInput } from "./judge.ts";
+import { runInferredJudge, buildJudgePrompt, JUDGE_SYSTEM_PROMPT, type JudgeInput } from "./judge.ts";
 import { InferredRuleStore, ProposalQueue } from "./store.ts";
 import { subcommandTokenLists } from "../bash-parser.ts";
 import { resetLearnedBoundariesForTests } from "./shapes.ts";
@@ -89,6 +89,10 @@ function judgeInput(a: string, b: string): JudgeInput {
 import { mergeExemplars } from "./shapes.ts";
 
 describe("judge", () => {
+  it("prompt acknowledges tool-permission targets (parity with bash)", () => {
+    assert.match(JUDGE_SYSTEM_PROMPT, /tool:<name>/);
+  });
+
   it("accepts the mechanical merge", async () => {
     const v = await runInferredJudge(judgeInput("git log main", "git log dev"), {
       ask: async () => JSON.stringify({ verdict: "offer", rationale: "safe read-only" }),
@@ -180,6 +184,9 @@ describe("inferred store + queue", () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "safetynet-inferred-"));
     mkdirSync(join(dir, ".pi"), { recursive: true });
+    // The inferred file is shared by the whole file; clear it per test so a
+    // global rule accepted here cannot leak into the next test.
+    rmSync(join(process.env.SAFETYNET_INFERRED_DIR!, "inferred-rules.json"), { force: true });
   });
 
   it("accepted project rules persist and reload", () => {
@@ -189,10 +196,33 @@ describe("inferred store + queue", () => {
       pattern: { tokens: [{ kind: "lit", text: "git" }, { kind: "lit", text: "log" }, { kind: "slot" }] },
       modes: ["build"], exemplars: ["git log main"], scope: "project", acceptedAt: 1,
     });
-    assert.ok(existsSync(join(dir, ".pi", "extensions", "safetynet", "inferred-rules.json")));
+    assert.ok(existsSync(join(process.env.SAFETYNET_INFERRED_DIR!, "inferred-rules.json")));
     const store2 = new InferredRuleStore(dir);
     assert.equal(store2.all().length, 1);
     assert.equal(store2.all()[0]!.render, "git log <arg>");
+  });
+
+  it("project rules are keyed by the session cwd (no cross-project bleed)", () => {
+    const dirA = mkdtempSync(join(tmpdir(), "safetynet-proj-a-"));
+    const dirB = mkdtempSync(join(tmpdir(), "safetynet-proj-b-"));
+    new InferredRuleStore(dirA).accept({
+      id: "ra", render: "git log <arg>",
+      pattern: { tokens: [{ kind: "lit", text: "git" }, { kind: "lit", text: "log" }, { kind: "slot" }] },
+      modes: ["build"], exemplars: [], scope: "project", acceptedAt: 1,
+    });
+    assert.equal(new InferredRuleStore(dirA).hasEquivalent("git log <arg>"), true);
+    assert.equal(new InferredRuleStore(dirB).hasEquivalent("git log <arg>"), false, "project rule must not leak into another project");
+  });
+
+  it("global inferred rules apply in every project", () => {
+    const dirA = mkdtempSync(join(tmpdir(), "safetynet-proj-a-"));
+    const dirB = mkdtempSync(join(tmpdir(), "safetynet-proj-b-"));
+    new InferredRuleStore(dirA).accept({
+      id: "rg", render: "git log <arg>",
+      pattern: { tokens: [{ kind: "lit", text: "git" }, { kind: "lit", text: "log" }, { kind: "slot" }] },
+      modes: ["build"], exemplars: [], scope: "global", acceptedAt: 1,
+    });
+    assert.equal(new InferredRuleStore(dirB).hasEquivalent("git log <arg>"), true);
   });
 
   it("accepting a rule preserves a pending proposal (single-file RMW)", () => {
@@ -205,9 +235,9 @@ describe("inferred store + queue", () => {
       modes: ["build"], exemplars: [], scope: "project", acceptedAt: 1,
     });
 
-    const doc = JSON.parse(readFileSync(join(dir, ".pi", "extensions", "safetynet", "inferred-rules.json"), "utf-8"));
-    assert.equal(doc.rules.length, 1);
-    assert.equal(doc.proposals.length, 1, "queue key must survive an accept");
+    const doc = JSON.parse(readFileSync(join(process.env.SAFETYNET_INFERRED_DIR!, "inferred-rules.json"), "utf-8"));
+    assert.equal(doc.projects[dir].rules.length, 1);
+    assert.equal(doc.projects[dir].proposals.length, 1, "queue key must survive an accept");
     assert.equal(new InferredRuleStore(dir).all().length, 1);
     assert.equal(new ProposalQueue(dir).list().length, 1);
   });
@@ -278,6 +308,7 @@ describe("engine", () => {
     resetLearnedBoundariesForTests();
     dir = mkdtempSync(join(tmpdir(), "safetynet-inferred-eng-"));
     mkdirSync(join(dir, ".pi"), { recursive: true });
+    rmSync(join(process.env.SAFETYNET_INFERRED_DIR!, "inferred-rules.json"), { force: true });
   });
 
   function mkEngine(hooks: ConstructorParameters<typeof InferredEngine>[1] = {}) {
@@ -316,6 +347,17 @@ describe("engine", () => {
     eng.recordApproval([], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
     assert.equal(eng.listProposals().length, 0);
+  });
+
+  it("learns tool-permission targets (parity with bash)", async () => {
+    const eng = mkEngine();
+    eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
+    eng.recordApproval(["tool:web_search"], ["build"]);
+    eng.recordApproval(["tool:web_search"], ["build"]);
+    await new Promise((r) => setTimeout(r, 10));
+    const proposals = eng.listProposals();
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0]!.render, "tool:web_search");
   });
 
   it("reject verdict queues nothing", async () => {
