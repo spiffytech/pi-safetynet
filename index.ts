@@ -49,7 +49,7 @@ import {
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./core/check.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
-import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, type HazardousDenyState } from "./pipeline.ts";
+import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, strikeDeny, type HazardousDenyState } from "./pipeline.ts";
 import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled, loadAutoApproveConfig } from "./core/auto-config-state.ts";
 import { InferredEngine } from "./core/inferred/engine.ts";
 import { uiArbiter } from "./core/ui-arbiter.ts";
@@ -161,7 +161,8 @@ function sendDenial(text: string, mode: "hidden" | "visible"): void {
 let storage: PermissionStorage;
 let inferredEngine: InferredEngine | undefined;
 
-/** Per-scope hazardous-deny counter for the main session. Resets on agent_end. */
+/** Per-scope deny-strike counter for the main session (all ruleset/mode/
+ *  headless/hazardous denials share it). Resets on agent_end. */
 const hazardousDenyState: HazardousDenyState = { count: 0 };
 
 /** Loaded prompt keybindings (denyContinue/denyAbort). Initialized at extension init. */
@@ -292,12 +293,12 @@ async function handleToolCall(
           permission: "bash",
           target: command,
           reason: detail,
-          hazardous: check.hazardous ?? false,
           autoDeny: autoDenyConfig,
           displayCtx: ctx,
           sendDenial,
           onDenied: undefined,
           state: hazardousDenyState,
+          source: check.modeDenied ? "mode" : "ruleset",
         });
       }
 
@@ -327,8 +328,18 @@ async function handleToolCall(
         const { write: writeMode } = paradigmModes();
         const writeCmd = writeMode === "rw" ? "/safetynet:rw" : "/safetynet:build";
         const label = profile === "ro" ? "Read-only mode" : "Plan mode";
-        ctx.abort();
-        return { block: true, reason: `${label}: ${event.toolName} is disabled. The user must switch to ${writeMode} mode with ${writeCmd} before implementation.` };
+        const filePath = event.input.path as string;
+        return strikeDeny({
+          permission: "edit",
+          target: filePath,
+          reason: `${label}: ${event.toolName} is disabled. The user must switch to ${writeMode} mode with ${writeCmd} before implementation.`,
+          source: "mode",
+          autoDeny: autoDenyConfig,
+          displayCtx: ctx,
+          sendDenial,
+          onDenied: undefined,
+          state: hazardousDenyState,
+        });
       }
       const filePath = event.input.path as string;
       const rules = storage.getAllRules();

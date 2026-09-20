@@ -44,11 +44,17 @@ export interface KeybindingsConfig {
   denyAbort?: string;
 }
 
-/** Auto-deny behaviour for rule-denies and headless (no-TUI) denials. */
+/** Auto-deny behaviour for rule/mode/headless denials. Denials nudge-and-
+ *  continue up to `maxStrikes` per turn (per scope) before the turn aborts. */
 export interface AutoDenyConfig {
-  /** When true, auto-deny blocks the call WITHOUT aborting the turn (the model
-   *  sees the reason and may keep reacting). Default false (abort). */
+  /** When true, auto-deny blocks the call WITHOUT ever aborting the turn, no
+   *  matter how many strikes accumulate (the model sees the reason and may
+   *  keep reacting). Default false (abort once `maxStrikes` is reached). */
   continue?: boolean;
+  /** Strikes per turn (per scope) allowed before the turn aborts. Every strike
+   *  sends a hidden nudge to the model; the aborting strike also renders a
+   *  visible transcript entry. Default 3. Ignored when `continue` is true. */
+  maxStrikes?: number;
   /** Reason surfaced to the model on auto-deny. Per-rule `reason` still takes
    *  precedence when present (more specific). */
   reason?: string;

@@ -56,10 +56,11 @@ export interface PipelineDeps {
    *  nudge that survives aborts; "visible" = display:true transcript entry for
    *  abort paths where the block reason is swallowed by the harness. */
   sendDenial?: (text: string, mode: "hidden" | "visible") => void;
-  /** Per-scope hazardous-deny counter. Main session and each subagent get their
-   *  own (parallel subagents must not share the parent's counter). Resets on
+  /** Per-scope deny-strike counter shared by all auto-denials (ruleset, mode,
+   *  headless, hazardous). The main session and each subagent get their own
+   *  (parallel subagents must not share the parent's counter). Resets on
    *  agent_end. Absent → fresh { count: 0 } (test ergonomics). */
-  hazardousDenyState?: HazardousDenyState;
+  hazardousDenyState?: DenyStrikeState;
   /** Reviewer subagent spawner. Defaults to runSubagent; injectable for tests. */
   reviewSpawn?: (opts: any) => Promise<any>;
   /** Optional abort signal to pass into the prompt loop (auto escalation). */
@@ -73,51 +74,69 @@ export interface PipelineDeps {
 
 // ─── Pure seams ────────────────────────────────────────────────────────────
 
-/** Cap on hazardous-file denials per turn (per scope). The 3rd hazardous deny
- *  aborts the turn, stopping loophole-hunting while still letting the model
- *  course-correct on the first two. */
-export const HAZARDOUS_MAX_DENIES = 3;
+/** Default strikes per turn (per scope) before a denial aborts the turn.
+ *  Overridable via `autoDeny.maxStrikes`. */
+export const DEFAULT_MAX_DENY_STRIKES = 3;
 
-/** Per-scope hazardous-deny counter. */
-export interface HazardousDenyState {
+/** Back-compat alias: hazardous-file denials now share the unified strike
+ *  budget instead of keeping a separate constant. */
+export const HAZARDOUS_MAX_DENIES = DEFAULT_MAX_DENY_STRIKES;
+
+/** Per-scope deny-strike counter. The main session and each subagent get their
+ *  own (parallel subagents must not share the parent's counter). Resets on
+ *  agent_end. */
+export interface DenyStrikeState {
   count: number;
 }
 
-/** Resolve a deny verdict. Hazardous denials nudge-and-continue up to
- *  HAZARDOUS_MAX_DENIES per scope, then abort. Non-hazardous denials keep
- *  historical behavior (abort unless autoDeny.continue). */
-export function resolveDeny(opts: {
+/** Back-compat alias for the former hazardous-only counter type. */
+export type HazardousDenyState = DenyStrikeState;
+
+/** Nudge-and-continue a denial, bounded by a per-turn (per-scope) strike budget.
+ *  Every strike sends a hidden denial nudge to the model (which also sees it as
+ *  the blocked tool's result, so it can course-correct); the aborting strike
+ *  also renders a visible transcript entry and ends the turn. `autoDeny.continue:
+ *  true` keeps the turn alive regardless of the count. Shared by ruleset
+ *  denies, read-only/mode denies, and headless denies. */
+export function strikeDeny(opts: {
   permission: "bash" | "read" | "edit";
   target: string;
   reason: string;
-  hazardous: boolean;
+  source: DenialSource;
   autoDeny: AutoDenyConfig;
   displayCtx: { abort(): void };
   sendDenial: ((text: string, mode: "hidden" | "visible") => void) | undefined;
   onDenied: (() => void) | undefined;
-  state: HazardousDenyState;
-}): { block: boolean; reason: string } {
-  const detail = denialDetail(opts.permission, opts.target, opts.reason, "ruleset");
+  state: DenyStrikeState;
+}): { block: true; reason: string } {
+  const detail = denialMessage(opts.permission, opts.target, opts.reason, opts.source);
+  const cap = opts.autoDeny.maxStrikes ?? DEFAULT_MAX_DENY_STRIKES;
 
-  if (opts.hazardous) {
-    opts.state.count++;
-    opts.sendDenial?.(detail, "hidden");
-    if (opts.state.count >= HAZARDOUS_MAX_DENIES) {
-      opts.sendDenial?.(detail, "visible");
-      opts.displayCtx.abort();
-      opts.onDenied?.();
-    }
-    return { block: true, reason: detail };
-  }
-
-  // Non-hazardous: historical behavior.
+  opts.state.count++;
   opts.sendDenial?.(detail, "hidden");
-  if (!opts.autoDeny.continue) {
+  if (opts.state.count >= cap && !opts.autoDeny.continue) {
     opts.sendDenial?.(detail, "visible");
     opts.displayCtx.abort();
     opts.onDenied?.();
   }
   return { block: true, reason: detail };
+}
+
+/** Resolve a ruleset/mode deny verdict via the shared strike budget. */
+export function resolveDeny(opts: {
+  permission: "bash" | "read" | "edit";
+  target: string;
+  reason: string;
+  autoDeny: AutoDenyConfig;
+  displayCtx: { abort(): void };
+  sendDenial: ((text: string, mode: "hidden" | "visible") => void) | undefined;
+  onDenied: (() => void) | undefined;
+  state: DenyStrikeState;
+  /** Denial label/source; defaults to "ruleset". Mode-enforced denies pass
+   *  "mode" so the nudge carries mode-specific recovery guidance. */
+  source?: DenialSource;
+}): { block: boolean; reason: string } {
+  return strikeDeny({ ...opts, source: opts.source ?? "ruleset" });
 }
 
 /** Check headless-mode deny behavior. Pure function for testability. */
@@ -166,6 +185,34 @@ export function denialDetail(
     source === "ruleset" ? "Ruleset denied" :
     source === "mode" ? "Mode denied" : "Denied";
   return `${label} ${permission}: ${target} — ${reason}`;
+}
+
+/** One-line corrective instruction keyed to the denial source. Appended to
+ *  every denial (hidden nudge, visible entry, and the blocked tool's result)
+ *  so a nudged model knows how to recover instead of retrying the same action
+ *  or hunting for a workaround. Keep these short — they ride on every strike. */
+export function denialGuidance(source: DenialSource): string {
+  switch (source) {
+    case "mode":
+      return "Describe the intended change and let the user switch to a write mode instead; do not retry the write or work around it.";
+    case "ruleset":
+      return "If this action is necessary, explain why and ask the user; otherwise continue without it. Do not retry the denied action.";
+    case "headless":
+      return "No UI is available to approve this action; continue without it or explain what you need.";
+    case "reviewer":
+      return "Try a safer alternative, or explain what you need and let the user decide. Do not retry the denied action.";
+  }
+}
+
+/** Full denial line delivered on a nudge/block: what was denied + why + how to
+ *  recover. This is what `strikeDeny` and the reviewer deny path emit. */
+export function denialMessage(
+  permission: "bash" | "read" | "edit",
+  target: string,
+  reason: string,
+  source: DenialSource = "reviewer",
+): string {
+  return `${denialDetail(permission, target, reason, source)} ${denialGuidance(source)}`;
 }
 
 /** Build a turn-expiry temp rule from checked arguments. */
@@ -230,15 +277,17 @@ function readOnlyWriteDeny(
   permission: "bash" | "read" | "edit",
   target: string,
 ): { block: true; reason: string } {
-  const reason = "read-only mode prevents writes — switch to write mode to implement";
-  const detail = denialDetail(permission, target, reason, "mode");
-  deps.sendDenial?.(detail, "hidden");
-  if (!deps.autoDeny.continue) {
-    deps.sendDenial?.(detail, "visible");
-    deps.displayCtx.abort();
-    deps.onDenied?.();
-  }
-  return { block: true, reason: detail };
+  return strikeDeny({
+    permission,
+    target,
+    reason: "read-only mode prevents writes — switch to write mode to implement",
+    source: "mode",
+    autoDeny: deps.autoDeny,
+    displayCtx: deps.displayCtx,
+    sendDenial: deps.sendDenial,
+    onDenied: deps.onDenied,
+    state: deps.hazardousDenyState ?? { count: 0 },
+  });
 }
 
 // ─── Shared pipeline ───────────────────────────────────────────────────────
@@ -284,7 +333,6 @@ export async function resolvePermission(
       permission: opts.permission,
       target: opts.target,
       reason,
-      hazardous: opts.check.hazardous ?? false,
       autoDeny: deps.autoDeny,
       displayCtx: deps.displayCtx,
       sendDenial: deps.sendDenial,
@@ -360,7 +408,7 @@ export async function resolvePermission(
         // Deny
         deps.displayCtx.ui.notify(` Reviewer denied: ${v.assessment.rationale}`, "warning");
         const denies = reviewIncrementDenies();
-        const detail = denialDetail(opts.permission, opts.target, v.assessment.rationale);
+        const detail = denialMessage(opts.permission, opts.target, v.assessment.rationale);
         deps.sendDenial?.(detail, "hidden");
         if (denies >= maxDenials) {
           deps.sendDenial?.(detail, "visible");
@@ -409,9 +457,17 @@ export async function resolvePermission(
   const denied = headlessDeny(deps.displayCtx.hasUI, action, opts.permission, deps.autoDeny.reason);
   if (denied) {
     if (!deps.displayCtx.hasUI) console.error(`safetynet: ${denied.reason}`);
-    deps.sendDenial?.(denialDetail(opts.permission, opts.target, denied.reason, "headless"), "hidden");
-    if (!deps.autoDeny.continue) deps.displayCtx.abort();
-    return denied;
+    return strikeDeny({
+      permission: opts.permission,
+      target: opts.target,
+      reason: denied.reason,
+      source: "headless",
+      autoDeny: deps.autoDeny,
+      displayCtx: deps.displayCtx,
+      sendDenial: deps.sendDenial,
+      onDenied: deps.onDenied,
+      state: deps.hazardousDenyState ?? { count: 0 },
+    });
   }
 
   // ── Interactive prompt loop ──────────────────────────────────────────────
@@ -469,7 +525,7 @@ export async function resolvePermission(
           const cfg = loadAutoApproveConfig();
           deps.displayCtx.ui.notify(` Reviewer denied: ${pending.assessment.rationale}`, "warning");
           const denies = reviewIncrementDenies();
-          const detail = denialDetail(opts.permission, opts.target, pending.assessment.rationale);
+          const detail = denialMessage(opts.permission, opts.target, pending.assessment.rationale);
           deps.sendDenial?.(detail, "hidden");
           if (denies >= (cfg.maxDenials ?? 3)) {
             deps.sendDenial?.(detail, "visible");

@@ -31,6 +31,10 @@ export interface PermissionCheck {
    *  .ssh, credentials).  Hazardous denials nudge-and-continue up to a per-scope
    *  cap instead of aborting the turn immediately. */
   hazardous?: boolean;
+  /** True when the deny is enforced by the active mode (e.g. a bash write in
+   *  read-only mode). Lets the deny path label the nudge "Mode denied" and
+   *  attach mode-specific recovery guidance. */
+  modeDenied?: boolean;
 }
 
 /** True when the checked action has write side effects: an edit/write tool
@@ -178,7 +182,11 @@ export function checkBashPermission(
   // interpreter -c/-e, etc.
   if ((profile === "plan" || profile === "ro") && isEditLikeBashCommand(command, parsed)) {
     const label = profile === "ro" ? "Read-only mode" : "Plan mode";
-    return { action: "deny", reason: `${label}: bash command writes to a file (equivalent to edit/write tool)` };
+    return {
+      action: "deny",
+      reason: `${label}: bash command writes to a file (equivalent to edit/write tool)`,
+      modeDenied: true,
+    };
   }
 
   const unapproved: string[] = [];

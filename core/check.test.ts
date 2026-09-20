@@ -211,6 +211,7 @@ describe("checkBashPermission ro-mode edit denial", () => {
       const result = checkBashPermission(cmd, "ro", RULES, CWD, false, RO_ALIASES);
       assert.equal(result.action, "deny");
       assert.ok(result.reason?.includes("Read-only mode"));
+      assert.equal(result.modeDenied, true, "flagged as mode-enforced for deny labelling/guidance");
     });
 
     it(`does not deny in rw mode: ${label}`, () => {

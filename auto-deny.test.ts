@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { resolvePermission, denialDetail, buildApprovalRules } from "./pipeline.ts";
+import { resolvePermission, denialDetail, denialGuidance, denialMessage, buildApprovalRules } from "./pipeline.ts";
 import { checkFileTarget } from "./core/check.ts";
 import { setAutoEnabled } from "./core/auto-config-state.ts";
 import { resetReviewStateForTests } from "./core/reviewer-state.ts";
@@ -152,6 +152,27 @@ describe("denialDetail", () => {
   });
 });
 
+// ─── denialGuidance / denialMessage (pure) ────────────────────────────────
+
+describe("denialGuidance / denialMessage", () => {
+  it("gives every source a corrective instruction", () => {
+    for (const source of ["reviewer", "ruleset", "headless", "mode"] as const) {
+      const guidance = denialGuidance(source);
+      assert.ok(guidance.length > 0, `${source} must carry guidance`);
+      assert.match(guidance, /do not retry|continue without it|let the user/i, `${source} guides recovery`);
+    }
+  });
+
+  it("composes label + reason + guidance", () => {
+    const detail = denialDetail("read", "/etc/passwd", "Hazardous file", "ruleset");
+    const guidance = denialGuidance("ruleset");
+    assert.equal(
+      denialMessage("read", "/etc/passwd", "Hazardous file", "ruleset"),
+      `${detail} ${guidance}`,
+    );
+  });
+});
+
 // ─── Reviewer denials (auto mode) ───────────────────────────────────────────
 
 describe("resolvePermission — reviewer deny", () => {
@@ -170,7 +191,7 @@ describe("resolvePermission — reviewer deny", () => {
 
     assert.equal(ctx.aborted.value, false, "first deny must not abort");
     assert.deepEqual(denials, [
-      ["Auto-denied bash: rm -rf /tmp/data — destructive and not user-authorized", "hidden"],
+      [denialMessage("bash", "rm -rf /tmp/data", "destructive and not user-authorized", "reviewer"), "hidden"],
     ]);
     assert.ok(result, "block result returned");
     assert.match(result!.reason, /rm -rf \/tmp\/data/, "reason names the target");
@@ -214,29 +235,34 @@ describe("resolvePermission — reviewer deny", () => {
 // ─── Ruleset denials (deny rules) ───────────────────────────────────────────
 
 describe("resolvePermission — deny rule", () => {
-  it("continue:false — visible entry before abort, hidden nudge, enriched reason", async () => {
+  it("continue:false — hidden nudge per strike, visible entry + abort on the 3rd", async () => {
     const ctx = makeCtx();
     const denials: Array<[string, string]> = [];
-    const result = await resolvePermission(
-      baseDeps({
-        displayCtx: ctx,
-        autoDeny: { continue: false },
-        sendDenial: (t: string, m: string) => denials.push([t, m]),
-      }),
-      {
-        permission: "read",
-        target: "/etc/passwd",
-        check: { action: "deny" as const, reason: "Hazardous file" },
-        recheck: () => ({ action: "deny" as const }),
-      },
-    );
+    const deps = baseDeps({
+      displayCtx: ctx,
+      autoDeny: { continue: false },
+      hazardousDenyState: { count: 0 },
+      sendDenial: (t: string, m: string) => denials.push([t, m]),
+    });
+    const opts = {
+      permission: "read" as const,
+      target: "/etc/passwd",
+      check: { action: "deny" as const, reason: "Hazardous file" },
+      recheck: () => ({ action: "deny" as const }),
+    };
 
-    assert.equal(ctx.aborted.value, true, "continue:false aborts");
+    let result: { block: boolean; reason: string } | undefined;
+    for (let i = 0; i < 3; i++) result = await resolvePermission(deps, opts);
+
+    const line = denialMessage("read", "/etc/passwd", "Hazardous file", "ruleset");
+    assert.equal(ctx.aborted.value, true, "continue:false aborts once maxStrikes is reached");
     assert.deepEqual(denials, [
-      ["Ruleset denied read: /etc/passwd — Hazardous file", "hidden"],
-      ["Ruleset denied read: /etc/passwd — Hazardous file", "visible"],
+      [line, "hidden"],
+      [line, "hidden"],
+      [line, "hidden"],
+      [line, "visible"],
     ]);
-    assert.equal(result?.reason, "Ruleset denied read: /etc/passwd — Hazardous file");
+    assert.equal(result?.reason, line);
   });
 
   it("continue:true — hidden nudge only, no abort", async () => {
@@ -256,11 +282,12 @@ describe("resolvePermission — deny rule", () => {
       },
     );
 
+    const line = denialMessage("bash", "curl http://example.com", "Project policy: no network", "ruleset");
     assert.equal(ctx.aborted.value, false, "continue:true keeps the turn alive");
     assert.deepEqual(denials, [
-      ["Ruleset denied bash: curl http://example.com — Project policy: no network", "hidden"],
+      [line, "hidden"],
     ]);
-    assert.equal(result?.reason, "Ruleset denied bash: curl http://example.com — Project policy: no network");
+    assert.equal(result?.reason, line);
   });
 });
 
@@ -282,11 +309,12 @@ describe("resolvePermission — hazardous deny", () => {
       { permission: "read", target: "/etc/passwd", check: HAZ_CHECK, recheck: () => HAZ_CHECK },
     );
 
+    const line = denialMessage("read", "/etc/passwd", "Sensitive file", "ruleset");
     assert.equal(ctx.aborted.value, false, "1st hazardous deny must NOT abort");
     assert.deepEqual(denials, [
-      ["Ruleset denied read: /etc/passwd — Sensitive file", "hidden"],
+      [line, "hidden"],
     ]);
-    assert.equal(result?.reason, "Ruleset denied read: /etc/passwd — Sensitive file");
+    assert.equal(result?.reason, line);
   });
 
   it("2nd hazardous deny: still no abort", async () => {
@@ -356,47 +384,128 @@ describe("resolvePermission — hazardous deny", () => {
     assert.equal(ctx.aborted.value, false, "parallel scopes must not share the cap");
   });
 
-  it("non-hazardous deny still aborts immediately when continue:false", async () => {
+  it("non-hazardous deny: nudge-and-continue until the strike budget is exhausted", async () => {
     const ctx = makeCtx();
     const denials: Array<[string, string]> = [];
-    const result = await resolvePermission(
-      baseDeps({
-        displayCtx: ctx,
-        autoDeny: { continue: false },
-        sendDenial: (t: string, m: string) => denials.push([t, m]),
-      }),
-      {
-        permission: "bash",
-        target: "curl http://example.com",
-        check: { action: "deny" as const, reason: "Project policy: no network" },
-        recheck: () => ({ action: "deny" as const }),
-      },
-    );
+    const deps = baseDeps({
+      displayCtx: ctx,
+      autoDeny: { continue: false },
+      hazardousDenyState: { count: 0 },
+      sendDenial: (t: string, m: string) => denials.push([t, m]),
+    });
+    const opts = {
+      permission: "bash" as const,
+      target: "curl http://example.com",
+      check: { action: "deny" as const, reason: "Project policy: no network" },
+      recheck: () => ({ action: "deny" as const }),
+    };
 
-    assert.equal(ctx.aborted.value, true, "non-hazardous deny aborts when continue:false");
-    assert.equal(result?.block, true);
+    const first = await resolvePermission(deps, opts);
+    assert.equal(ctx.aborted.value, false, "first strike must not abort");
+    assert.equal(first?.block, true);
+    assert.equal(denials.filter(([, m]) => m === "visible").length, 0, "no visible entry before the aborting strike");
+
+    await resolvePermission(deps, opts);
+    await resolvePermission(deps, opts);
+    assert.equal(ctx.aborted.value, true, "third strike aborts when continue:false");
+    assert.equal(denials.filter(([, m]) => m === "visible").length, 1, "only the aborting strike is visible");
   });
 });
 
 // ─── Headless deny ──────────────────────────────────────────────────────────
 
 describe("resolvePermission — headless deny", () => {
-  it("hidden nudge only (no UI to show visible), still aborts when !continue", async () => {
+  it("nudges-and-continues until the strike budget, then aborts when !continue", async () => {
     const ctx = makeCtx({ hasUI: false });
+    const denials: Array<[string, string]> = [];
+    const deps = baseDeps({
+      displayCtx: ctx,
+      autoDeny: { continue: false },
+      hazardousDenyState: { count: 0 },
+      sendDenial: (t: string, m: string) => denials.push([t, m]),
+    });
+    const opts = { permission: "bash" as const, target: "curl http://example.com", check: ASK_CHECK, recheck: ASK_RECHECK };
+
+    const first = await resolvePermission(deps, opts);
+    assert.equal(ctx.aborted.value, false, "first headless deny must not abort");
+    assert.equal(first?.block, true);
+
+    await resolvePermission(deps, opts);
+    assert.equal(ctx.aborted.value, false, "second headless deny must not abort");
+
+    const third = await resolvePermission(deps, opts);
+    const line = denialMessage("bash", "curl http://example.com", "Bash requires approval (headless mode)", "headless");
+    assert.equal(ctx.aborted.value, true, "third headless deny aborts when !continue");
+    assert.equal(third?.reason, line);
+
+    assert.equal(denials.filter(([, m]) => m === "hidden").length, 3, "every strike gets a hidden nudge");
+    assert.deepEqual(denials.filter(([, m]) => m === "visible"), [[line, "visible"]]);
+  });
+});
+
+// ─── Unified strike budget (autoDeny.maxStrikes) ────────────────────────────
+
+describe("resolvePermission — autoDeny.maxStrikes", () => {
+  const denyOpts = () => ({
+    permission: "bash" as const,
+    target: "curl http://example.com",
+    check: { action: "deny" as const, reason: "Project policy: no network" },
+    recheck: () => ({ action: "deny" as const }),
+  });
+
+  it("maxStrikes:1 aborts on the first strike", async () => {
+    const ctx = makeCtx();
     const denials: Array<[string, string]> = [];
     const result = await resolvePermission(
       baseDeps({
         displayCtx: ctx,
-        autoDeny: { continue: false },
+        autoDeny: { continue: false, maxStrikes: 1 },
+        hazardousDenyState: { count: 0 },
         sendDenial: (t: string, m: string) => denials.push([t, m]),
       }),
-      { permission: "bash", target: "curl http://example.com", check: ASK_CHECK, recheck: ASK_RECHECK },
+      denyOpts(),
     );
-
-    assert.equal(ctx.aborted.value, true, "headless deny aborts when !continue");
+    const line = denialMessage("bash", "curl http://example.com", "Project policy: no network", "ruleset");
+    assert.equal(ctx.aborted.value, true, "maxStrikes:1 aborts immediately");
     assert.deepEqual(denials, [
-      ["Denied bash: curl http://example.com — Bash requires approval (headless mode)", "hidden"],
+      [line, "hidden"],
+      [line, "visible"],
     ]);
+    assert.equal(result?.reason, line);
+  });
+
+  it("maxStrikes:2 aborts on the second strike, not the first", async () => {
+    const ctx = makeCtx();
+    const denials: Array<[string, string]> = [];
+    const deps = baseDeps({
+      displayCtx: ctx,
+      autoDeny: { continue: false, maxStrikes: 2 },
+      hazardousDenyState: { count: 0 },
+      sendDenial: (t: string, m: string) => denials.push([t, m]),
+    });
+
+    await resolvePermission(deps, denyOpts());
+    assert.equal(ctx.aborted.value, false, "first strike must not abort");
+    await resolvePermission(deps, denyOpts());
+    assert.equal(ctx.aborted.value, true, "second strike aborts");
+    assert.equal(denials.filter(([, m]) => m === "visible").length, 1);
+  });
+
+  it("continue:true never aborts, even with maxStrikes:1", async () => {
+    const ctx = makeCtx();
+    const denials: Array<[string, string]> = [];
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        autoDeny: { continue: true, maxStrikes: 1 },
+        hazardousDenyState: { count: 0 },
+        sendDenial: (t: string, m: string) => denials.push([t, m]),
+      }),
+      denyOpts(),
+    );
+    const line = denialMessage("bash", "curl http://example.com", "Project policy: no network", "ruleset");
+    assert.equal(ctx.aborted.value, false, "continue:true keeps the turn alive");
+    assert.deepEqual(denials, [[line, "hidden"]]);
     assert.equal(result?.block, true);
   });
 });
@@ -468,6 +577,36 @@ describe("resolvePermission — auto reviewer honors read-only mode", () => {
     assert.equal(spawnCalls, 0, "reviewer must not run for a write in ro mode");
     assert.ok(result);
     assert.match(result!.reason, /read-only mode prevents writes/);
+  });
+
+  it("read-only write denials nudge-and-continue until the strike budget, then abort", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const denials: Array<[string, string]> = [];
+    const deps = baseDeps({
+      displayCtx: ctx,
+      cwd: "/tmp/ro-proj",
+      allowModes: ["ro", "rw"],
+      autoDeny: { continue: false },
+      hazardousDenyState: { count: 0 },
+      sendDenial: (t: string, m: string) => denials.push([t, m]),
+      reviewSpawn: async () => allowAssessment(),
+    });
+    const opts = {
+      permission: "bash" as const,
+      target: "echo hi > notes.txt",
+      check: { action: "ask" as const, redirectTargets: [{ permission: "edit" as const, path: "/tmp/ro-proj/notes.txt" }] },
+      recheck: ASK_RECHECK,
+    };
+
+    await resolvePermission(deps, opts);
+    assert.equal(ctx.aborted.value, false, "first read-only write denial must not abort");
+    await resolvePermission(deps, opts);
+    assert.equal(ctx.aborted.value, false, "second read-only write denial must not abort");
+    await resolvePermission(deps, opts);
+    assert.equal(ctx.aborted.value, true, "third read-only write denial aborts");
+    assert.ok(denials.every(([t]) => t.includes("Mode denied bash:")), "labelled mode-enforced");
+    assert.equal(denials.filter(([, m]) => m === "visible").length, 1, "only the aborting strike is visible");
   });
 
   it("still routes pure reads through the reviewer in ro mode", async () => {

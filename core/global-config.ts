@@ -108,7 +108,7 @@ export function loadKeybindings(): PromptKeybindings {
   return out;
 }
 
-/** Load auto-deny behaviour for rule/headless denials. */
+/** Load auto-deny behaviour for rule/mode/headless denials. */
 export function loadAutoDeny(): AutoDenyConfig {
   const config = loadConfig();
   const raw = config.autoDeny ?? {};
@@ -117,6 +117,11 @@ export function loadAutoDeny(): AutoDenyConfig {
     ? raw.reason.trim()
     : undefined;
   if (reason !== undefined) out.reason = reason;
+  // Positive-integer guard: 0 / negatives / non-integers fall back to the
+  // default at the call site rather than aborting on the first strike.
+  if (typeof raw.maxStrikes === "number" && Number.isInteger(raw.maxStrikes) && raw.maxStrikes > 0) {
+    out.maxStrikes = raw.maxStrikes;
+  }
   return out;
 }
 

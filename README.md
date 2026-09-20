@@ -66,10 +66,10 @@ The reviewer returns a JSON assessment `{risk_level, user_authorization, outcome
 - **Egress is high risk.** Pushing to a remote, connecting to a host, publishing, or deploying to a destination the user never named is treated as unauthorized egress and denied, not waved through as routine.
 - **Authorization defaults to `unknown`.** Only the user's own messages establish `user_authorization`; a missing score defaults to `unknown` rather than guessing lenient.
 - **Allow** — creates a turn-scoped temp rule so repeats in the same turn skip re-review. The model sees a hidden nudge.
-- **Deny** — blocks with the rationale, keeps the turn alive so the model can try a safer alternative. After 3 consecutive denials the turn is aborted.
+- **Deny** — blocks with the rationale, keeps the turn alive so the model can try a safer alternative. After `autoApprove.maxDenials` consecutive reviewer denials (default 3) the turn is aborted. Ruleset, read-only/mode, and headless denials use a separate per-turn budget (`autoDeny.maxStrikes`).
 Every denial is surfaced in two places:
 - **On the rejected tool call** — the blocked call's error result reads `Auto-denied <permission>: <target> — <rationale>` (a `Ruleset denied …` or `Denied …` prefix for deny-rule/headless denials). The reviewer's internal risk/authorization scores are not shown.
-- **To the model** — a hidden transcript message carries the same line so the reason reaches the model even when the denial aborts the turn. When the denial aborts, the message is also rendered as a visible transcript entry next to the rejected call.
+- **To the model** — a hidden transcript message carries the same line so the reason reaches the model even when the denial aborts the turn, plus a one-line corrective instruction keyed to the denial source (mode denials: propose the change and let the user switch modes; ruleset/headless denials: stop retrying, explain what you need). When the denial aborts, the message is also rendered as a visible transcript entry next to the rejected call.
 - **Infrastructure failure** (timeout, API error, unparseable) — falls back to the interactive permission prompt with a notice, while retrying the reviewer every 30s. If a retry succeeds the prompt is dismissed automatically.
 
 Configure which model handles review and timeouts in global config:
@@ -115,7 +115,7 @@ pi-safetynet automatically denies access to sensitive files, regardless of tool:
 
 These are blocked at the file-permission level — whether accessed via `read`, `edit`, `bash`, or redirect.
 
-Hazardous-file denials do **not** abort the conversation. Instead the model receives the instructional message as a non-aborting nudge, so it can course-correct (ask the user, use an env var) or move on. To stop loophole-hunting, each scope (main session, and each subagent independently) allows up to **3** hazardous denials per turn — the 3rd aborts the turn. The counter resets on `agent_end`.
+Hazardous-file denials do **not** abort the conversation on the first strike. Instead the model receives the instructional message as a non-aborting nudge, so it can course-correct (ask the user, use an env var) or move on. To stop loophole-hunting, every auto-denial — hazardous files, explicit `deny` rules, read-only/mode write denials, and headless (no-TUI) denials — draws from one per-turn strike budget: each strike nudges the model, and the strike that exhausts the budget (`autoDeny.maxStrikes`, default **3**) aborts the turn. Each scope (main session, and each subagent independently) has its own budget, and the counter resets on `agent_end`.
 
 ### Redirect-aware permission checks
 
@@ -304,19 +304,23 @@ With this, `n` denies and continues, `N` (shift+n) denies and aborts, and `Escap
 
 #### `autoDeny`
 
-Controls what happens when a call is denied automatically — either by a `deny` rule, or in headless mode when a `ask` rule can't show a prompt:
+Controls what happens when a call is denied automatically — either by a `deny` rule, a read-only/mode write denial, or in headless mode when an `ask` rule can't show a prompt:
 
-- **`continue`** — when `true`, the deny blocks the call WITHOUT aborting the turn: the model sees the reason as the tool's error result and may keep reacting. Default `false` (abort the turn, matching historical behaviour).
+- **`maxStrikes`** — strikes per turn (per scope) allowed before the turn aborts. Every strike sends the denial reason to the model as a non-aborting nudge (it also appears as the blocked tool's error result), followed by a short corrective instruction for that denial source so the model can self-correct instead of retrying or working around it; the strike that exhausts the budget also renders a visible transcript entry and ends the turn. Default `3`. See [Hazardous file protection](#hazardous-file-protection) for the shared budget.
+- **`continue`** — when `true`, the deny blocks the call WITHOUT ever aborting the turn, no matter how many strikes accumulate: the model sees the reason as the tool's error result and may keep reacting. Default `false` (abort once `maxStrikes` is reached).
 - **`reason`** — a reason string surfaced to the model on auto-deny (e.g. `"Project policy: no network access"`). A per-rule `reason` field still takes precedence when present (more specific).
 
 ```json
 {
   "autoDeny": {
-    "continue": true,
+    "maxStrikes": 3,
+    "continue": false,
     "reason": "Denied by project policy"
   }
 }
 ```
+
+Read-only mode is the common case: a `ro`/`plan` session denies bash commands that write (redirects, heredocs, `sed -i`, …) and the disabled `edit`/`write` tools outright. With the default `maxStrikes`, the first two attempts are non-aborting nudges only — the turn survives, so the model can propose a read-only alternative or ask you to switch modes — and the third ends the turn.
 
 #### `toggleModeKey`
 

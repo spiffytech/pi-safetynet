@@ -138,12 +138,12 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 							permission: "bash",
 							target: command,
 							reason: detail,
-							hazardous: check.hazardous ?? false,
 							autoDeny: autoDenyConfig,
 							displayCtx: ctx,
 							sendDenial,
 							onDenied: onPermissionDenied,
 							state: hazardousDenyState,
+							source: check.modeDenied ? "mode" : "ruleset",
 						});
 					}
 
