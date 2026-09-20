@@ -230,7 +230,7 @@ export async function resolveOmpPermission(
 						// Turn-scoped rules so the approval dies with the turn.
 						const tempRules = buildApprovalTempRules(opts.permission, check, opts.target, deps.ctx.cwd, [deps.profile]);
 						deps.storage.addTempRules(tempRules);
-						if (opts.permission === "bash") deps.inferred?.recordApproval(opts.target, [deps.profile]);
+						if (opts.permission === "bash") deps.inferred?.recordApproval(check.unapproved ?? [], [deps.profile]);
 						const recheckResult = opts.recheck();
 						if (recheckResult.action === "allow") return undefined;
 					} else if (verdict.assessment.outcome === "deny") {
@@ -359,7 +359,7 @@ export async function resolveOmpPermission(
 		// persistence, so it is not evidence of a wanted rule. (Unreachable for
 		// "once": that branch continues or returns above.)
 		if (opts.permission === "bash") {
-			deps.inferred?.recordApproval(opts.target, [deps.profile]);
+			deps.inferred?.recordApproval(check.unapproved ?? [], [deps.profile]);
 		}
 
 		// Recheck after rule creation.

@@ -35,10 +35,10 @@ async function makeComponent(opts: { theme?: PopupTheme; finished?: () => void; 
   mkdirSync(join(dir, ".pi"), { recursive: true });
   const engine = new InferredEngine(dir);
   engine.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
-  engine.recordApproval("git log main", ["build"]);
-  engine.recordApproval("git log dev", ["build"]);
-  engine.recordApproval("dd if=a.img bs=4M", ["build"]);
-  engine.recordApproval("dd if=b.iso bs=1M", ["build"]);
+  engine.recordApproval(["git log main"], ["build"]);
+  engine.recordApproval(["git log dev"], ["build"]);
+  engine.recordApproval(["dd if=a.img bs=4M"], ["build"]);
+  engine.recordApproval(["dd if=b.iso bs=1M"], ["build"]);
   await new Promise((r) => setTimeout(r, 10));
 
   const component = new InferredReviewComponent(engine, {

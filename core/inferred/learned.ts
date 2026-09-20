@@ -14,7 +14,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getLearnedBoundaries, setLearnedBoundaries } from "./shapes.ts";
-import { readJsonFile, writeJsonAtomic } from "./store.ts";
+import { readJsonFile, writeJsonAtomic } from "../json-store.ts";
 
 function learnedPath(): string {
   const dir = process.env.SAFETYNET_INFERRED_DIR ?? join(homedir(), ".config", "pi-safetynet");

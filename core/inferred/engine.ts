@@ -45,12 +45,17 @@ export class InferredEngine {
 		this.queue = new ProposalQueue(cwd);
 	}
 
-	/** Feed one approved bash command (the full command string; each of its
-	 *  subcommands is recorded separately). Fire-and-forget safe. */
-	recordApproval(command: string, modes: ProfileName[]): void {
+	/** Feed the subcommands the user (or reviewer) actually approved. Callers
+	 *  MUST pass `check.unapproved` — the canonical subcommands that were
+	 *  subject to approval — not the raw command string. Re-splitting a raw
+	 *  command also counted policy-auto-approved siblings (a `cd` into the
+	 *  project, a bare assignment), which then ripened into rules and got
+	 *  offered even though no human ever decided them. Fire-and-forget safe. */
+	recordApproval(subcommands: string[], modes: ProfileName[]): void {
 		try {
-			const lists = subcommandTokenLists(command);
-			for (const tokens of lists) {
+			for (const sub of subcommands) {
+				const tokens = subcommandTokenLists(sub)[0];
+				if (!tokens || tokens.length === 0) continue;
 				const ripened = this.counters.record(tokens);
 				if (ripened) void this.offer(ripened, modes);
 			}

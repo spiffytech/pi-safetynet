@@ -152,7 +152,7 @@ describe("judge", () => {
 
 describe("learned-boundary persistence", () => {
   it("a missing/empty file CLEARS the in-memory set (deletion is authoritative)", async () => {
-    const { writeJsonAtomic } = await import("./store.ts");
+    const { writeJsonAtomic } = await import("../json-store.ts");
     const { loadLearnedBoundaries, saveLearnedBoundaries } = await import("./learned.ts");
     const { learnBoundary, mergeExemplars, getLearnedBoundaries } = await import("./shapes.ts");
     const dir = process.env.SAFETYNET_INFERRED_DIR!;
@@ -193,6 +193,36 @@ describe("inferred store + queue", () => {
     const store2 = new InferredRuleStore(dir);
     assert.equal(store2.all().length, 1);
     assert.equal(store2.all()[0]!.render, "git log <arg>");
+  });
+
+  it("accepting a rule preserves a pending proposal (single-file RMW)", () => {
+    const q = new ProposalQueue(dir);
+    assert.ok(q.enqueue({ id: "p1", render: "git log <arg>", pattern: { tokens: [] }, exemplars: [], count: 2, createdAt: Date.now() }));
+    const store = new InferredRuleStore(dir);
+    store.accept({
+      id: "r1", render: "git push <arg>",
+      pattern: { tokens: [{ kind: "slot" }] },
+      modes: ["build"], exemplars: [], scope: "project", acceptedAt: 1,
+    });
+
+    const doc = JSON.parse(readFileSync(join(dir, ".pi", "extensions", "safetynet", "inferred-rules.json"), "utf-8"));
+    assert.equal(doc.rules.length, 1);
+    assert.equal(doc.proposals.length, 1, "queue key must survive an accept");
+    assert.equal(new InferredRuleStore(dir).all().length, 1);
+    assert.equal(new ProposalQueue(dir).list().length, 1);
+  });
+
+  it("enqueuing a proposal preserves accepted rules (single-file RMW)", () => {
+    const store = new InferredRuleStore(dir);
+    store.accept({
+      id: "r1", render: "git push <arg>",
+      pattern: { tokens: [{ kind: "slot" }] },
+      modes: ["build"], exemplars: [], scope: "project", acceptedAt: 1,
+    });
+    const q = new ProposalQueue(dir);
+    assert.ok(q.enqueue({ id: "p1", render: "git log <arg>", pattern: { tokens: [] }, exemplars: [], count: 2, createdAt: Date.now() }));
+
+    assert.equal(new InferredRuleStore(dir).hasEquivalent("git push <arg>"), true, "rule key must survive an enqueue");
   });
 
   it("hasEquivalent blocks duplicates", () => {
@@ -260,8 +290,8 @@ describe("engine", () => {
     });
     eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
 
-    eng.recordApproval("git log main", ["build"]);
-    eng.recordApproval("git log dev", ["build"]);
+    eng.recordApproval(["git log main"], ["build"]);
+    eng.recordApproval(["git log dev"], ["build"]);
     // judge is async — wait a tick for the background offer to land
     await new Promise((r) => setTimeout(r, 10));
 
@@ -279,11 +309,20 @@ describe("engine", () => {
     assert.equal(eng.listProposals().length, 0);
   });
 
+  it("an empty approval list records nothing (auto-approved siblings are not evidence)", async () => {
+    const eng = mkEngine();
+    eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
+    eng.recordApproval([], ["build"]);
+    eng.recordApproval([], ["build"]);
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(eng.listProposals().length, 0);
+  });
+
   it("reject verdict queues nothing", async () => {
     const eng = mkEngine();
     eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "reject", rationale: "egress" }) };
-    eng.recordApproval("curl -s a", ["build"]);
-    eng.recordApproval("curl -s b", ["build"]);
+    eng.recordApproval(["curl -s a"], ["build"]);
+    eng.recordApproval(["curl -s b"], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
     assert.equal(eng.listProposals().length, 0);
   });
@@ -292,8 +331,8 @@ describe("engine", () => {
     const eng = mkEngine();
     eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
     eng.suppressIfAllowed = (exemplar) => exemplar === "git log main";
-    eng.recordApproval("git log main", ["build"]);
-    eng.recordApproval("git log dev", ["build"]);
+    eng.recordApproval(["git log main"], ["build"]);
+    eng.recordApproval(["git log dev"], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
     assert.equal(eng.listProposals().length, 0);
   });
@@ -301,8 +340,8 @@ describe("engine", () => {
   it("drop teaches learned boundaries", async () => {
     const eng = mkEngine();
     eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
-    eng.recordApproval("git log main", ["build"]);
-    eng.recordApproval("git log dev", ["build"]);
+    eng.recordApproval(["git log main"], ["build"]);
+    eng.recordApproval(["git log dev"], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
     const p = eng.listProposals()[0]!;
     eng.drop(p.id);
@@ -317,8 +356,8 @@ describe("engine", () => {
   it("judgment failures fail open to the mechanical merge", async () => {
     const eng = mkEngine();
     eng.judgeDeps = { ask: async () => { throw new Error("rate limited"); } };
-    eng.recordApproval("git log main", ["build"]);
-    eng.recordApproval("git log dev", ["build"]);
+    eng.recordApproval(["git log main"], ["build"]);
+    eng.recordApproval(["git log dev"], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
     // transient judge → no offer (fail closed on quality, structure is safe)
     assert.equal(eng.listProposals().length, 0);
@@ -327,16 +366,16 @@ describe("engine", () => {
   it("does not re-offer shapes already accepted in a prior session", async () => {
     const eng1 = mkEngine();
     eng1.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
-    eng1.recordApproval("git log main", ["build"]);
-    eng1.recordApproval("git log dev", ["build"]);
+    eng1.recordApproval(["git log main"], ["build"]);
+    eng1.recordApproval(["git log dev"], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
     eng1.accept(eng1.listProposals()[0]!.id, "project", ["build"]);
 
     // fresh engine over the same project dir (new session)
     const eng2 = new InferredEngine(dir);
     eng2.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
-    eng2.recordApproval("git log other", ["build"]);
-    eng2.recordApproval("git log more", ["build"]);
+    eng2.recordApproval(["git log other"], ["build"]);
+    eng2.recordApproval(["git log more"], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
     assert.equal(eng2.listProposals().length, 0, "ratified render never re-offered");
   });

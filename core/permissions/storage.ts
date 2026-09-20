@@ -1,7 +1,7 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import type { Rule, Ruleset, TempRule, ProfileName, SessionJournalSource } from "../types.ts";
 import { findPiConfigDir } from "../project.ts";
+import { readJsonFile, withJsonLock } from "../json-store.ts";
 import { loadGlobalRules, addGlobalRules as addGlobalRulesToConfig } from "../global-config.ts";
 import baselineData from "./baseline.json" with { type: "json" };
 
@@ -59,13 +59,8 @@ class PersistedRuleStore {
 
   /** Re-read rules from disk on every call so other sessions' approvals are visible. */
   getRules(): Ruleset {
-    if (!existsSync(this.filePath)) return [];
-    try {
-      const data = JSON.parse(readFileSync(this.filePath, "utf-8"));
-      return sanitizeRules(data.rules ?? []);
-    } catch {
-      return [];
-    }
+    const data = readJsonFile(this.filePath) as { rules?: unknown } | null;
+    return Array.isArray(data?.rules) ? sanitizeRules(data.rules) : [];
   }
 
   /** Validate the file is readable at startup. */
@@ -74,22 +69,18 @@ class PersistedRuleStore {
     this.getRules();
   }
 
-  async save(rules: Ruleset): Promise<void> {
-    const dir = dirname(this.filePath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-    const sorted = [...rules].sort((a, b) => {
-      const order: Record<string, number> = { bash: 0, edit: 1, read: 2, "*": 3 };
-      return (order[a.permission] ?? 4) - (order[b.permission] ?? 4);
-    });
-    writeFileSync(this.filePath, JSON.stringify({ rules: sorted }, null, 2) + "\n", "utf-8");
-  }
-
   async addRules(newRules: Ruleset): Promise<void> {
-    const current = this.getRules();
-    current.push(...newRules);
-    await this.save(current);
+    const filePath = this.filePath;
+    withJsonLock(filePath, (current) => {
+      const data = current as { rules?: unknown } | null;
+      const rules = Array.isArray(data?.rules) ? sanitizeRules(data.rules) : [];
+      rules.push(...newRules);
+      rules.sort((a, b) => {
+        const order: Record<string, number> = { bash: 0, edit: 1, read: 2, "*": 3 };
+        return (order[a.permission] ?? 4) - (order[b.permission] ?? 4);
+      });
+      return { result: undefined, next: { ...(data ?? {}), rules } };
+    });
   }
 }
 

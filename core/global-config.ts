@@ -1,9 +1,10 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { AutoDenyConfig, KeybindingsConfig, Paradigm, ProfileName, Ruleset } from "./types.ts";
 import type { PromptKeybindings } from "./types.ts";
 import { sanitizeRules } from "./permissions/storage.ts";
+import { withJsonLock } from "./json-store.ts";
 
 /** Directory for global config — `~/.config/pi-safetynet/` */
 export function getGlobalConfigDir(): string {
@@ -41,17 +42,16 @@ function loadConfig(): GlobalConfig {
   return {};
 }
 
-/** Save a full config object to disk, creating the directory if needed. */
-function saveConfig(config: GlobalConfig): void {
-  const dir = getGlobalConfigDir();
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-  writeFileSync(
-    getGlobalConfigPath(),
-    JSON.stringify(config, null, 2) + "\n",
-    "utf-8",
-  );
+/** Mutate the full config under an exclusive lock. The previous
+ *  load-then-writeSave pair was an unguarded read-modify-write: two sessions
+ *  saving different keys could each clobber the other. */
+function updateConfig(mutate: (config: GlobalConfig) => void): void {
+  withJsonLock(getGlobalConfigPath(), (current) => {
+    const config: GlobalConfig =
+      typeof current === "object" && current !== null ? { ...(current as GlobalConfig) } : {};
+    mutate(config);
+    return { result: undefined, next: config };
+  });
 }
 
 /** Load and validate the rules from the global config. Invalid entries are silently dropped. */
@@ -63,9 +63,9 @@ export function loadGlobalRules(): Ruleset {
 
 /** Replace the rules in the global config file, preserving other keys. */
 export function saveGlobalRules(rules: Ruleset): void {
-  const config = loadConfig();
-  config.rules = rules;
-  saveConfig(config);
+  updateConfig((config) => {
+    config.rules = rules;
+  });
 }
 
 /** Load the default profile from global config. Returns undefined if unset or invalid. */
@@ -134,9 +134,9 @@ export function loadToggleModeKey(): string {
 
 /** Save the default profile to global config, preserving other keys. */
 export function saveDefaultProfile(profile: ProfileName): void {
-  const config = loadConfig();
-  config.defaultProfile = profile;
-  saveConfig(config);
+  updateConfig((config) => {
+    config.defaultProfile = profile;
+  });
 }
 
 /** Which subagent tools to enable. Defaults to all if key is omitted or null. Empty array disables all. */
@@ -148,8 +148,12 @@ export function loadSubagentsConfig(): string[] {
 
 /** Append rules to the global config and save. Returns the full updated ruleset. */
 export function addGlobalRules(newRules: Ruleset): Ruleset {
-  const existing = loadGlobalRules();
-  const updated = [...existing, ...newRules];
-  saveGlobalRules(updated);
-  return updated;
+  return withJsonLock(getGlobalConfigPath(), (current) => {
+    const config: GlobalConfig =
+      typeof current === "object" && current !== null ? { ...(current as GlobalConfig) } : {};
+    const existing = Array.isArray(config.rules) ? sanitizeRules(config.rules) : [];
+    const updated = [...existing, ...newRules];
+    config.rules = updated;
+    return { result: updated, next: config };
+  });
 }

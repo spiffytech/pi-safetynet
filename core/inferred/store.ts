@@ -2,19 +2,25 @@
  * store.ts — persisted state for inferred rules: accepted rules (the
  * enforcement side) and the pending proposal queue (the offer side).
  *
- * Deliberately NOT stored in the global config.json or approvals.json:
- * those use unserialized read-modify-write whose parse-error path can wipe
- * existing rules. Inferred rules get their own files with atomic
- * tmp+rename writes. Session-scoped accepted rules are memory-only (lost on
- * restart — acceptable: they were conveniences, and re-accepting is one
- * keypress).
+ * Both live in ONE file per scope, and both mutate it through the shared
+ * `withJsonLock` read-modify-write helper. They must not be split into two
+ * files: a lock is what makes concurrency safe, and a single document means
+ * each writer preserves the other's key by spreading the incoming object.
+ * (An earlier split-less version wrote each key as a whole document, so the
+ * queue's persist erased accepted rules and the popup re-offered them every
+ * session.)
+ *
+ * Reads re-read the file on every query rather than caching at construction,
+ * so a rule accepted by another pi session is honored immediately. Session-
+ * scoped rules stay memory-only (lost on restart — acceptable: they were
+ * conveniences, and re-accepting is one keypress).
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ProfileName } from "../types.ts";
 import { findPiConfigDir } from "../project.ts";
+import { readJsonFile, withJsonLock } from "../json-store.ts";
 import type { StructuralBashPattern } from "./shapes.ts";
 
 const QUEUE_CAP = 20;
@@ -47,23 +53,7 @@ export interface PendingProposal {
   createdAt: number;
 }
 
-// ─── Atomic JSON file helpers ───────────────────────────────────────────────
-
-export function readJsonFile(path: string): unknown {
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(readFileSync(path, "utf-8"));
-  } catch {
-    return null; // corrupt file → treated as empty; never throws into the ask path
-  }
-}
-
-export function writeJsonAtomic(path: string, data: unknown): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n");
-  renameSync(tmp, path);
-}
+// ── Store paths ────────────────────────────────────────────────────────────
 
 function projectStorePath(cwd: string): string {
   return join(findPiConfigDir(cwd), ".pi", "extensions", "safetynet", "inferred-rules.json");
@@ -88,38 +78,38 @@ function ruleFileFilter(r: unknown): r is InferredBashRule {
   );
 }
 
+function rulesFrom(doc: unknown): InferredBashRule[] {
+  const data = doc as { rules?: unknown } | null;
+  return Array.isArray(data?.rules) ? (data.rules as unknown[]).filter(ruleFileFilter) : [];
+}
+
 export class InferredRuleStore {
   private sessionRules: InferredBashRule[] = [];
-  private projectRules: InferredBashRule[] = [];
-  private globalRules: InferredBashRule[] = [];
-  private loadedGlobal = false;
   private cwd: string;
 
   constructor(cwd: string) {
     this.cwd = cwd;
-    const path = projectStorePath(cwd);
-    const data = readJsonFile(path) as { rules?: unknown } | null;
-    if (Array.isArray(data?.rules)) {
-      this.projectRules = (data.rules as unknown[]).filter(ruleFileFilter);
-    }
   }
 
-  /** All accepted rules for enforcement. Profile filtering is the caller's
-   *  job (modes are stored on each rule). */
+  private readProject(): InferredBashRule[] {
+    return rulesFrom(readJsonFile(projectStorePath(this.cwd)));
+  }
+
+  private readGlobal(): InferredBashRule[] {
+    return rulesFrom(readJsonFile(globalStorePath()));
+  }
+
+  /** All accepted rules for enforcement, re-read from disk so rules accepted
+   *  by other pi sessions are visible. Profile filtering is the caller's job
+   *  (modes are stored on each rule). */
   all(): InferredBashRule[] {
-    this.ensureGlobalLoaded();
-    return [...this.sessionRules, ...this.projectRules, ...this.globalRules];
+    return [...this.sessionRules, ...this.readProject(), ...this.readGlobal()];
   }
 
-  /** True when an equivalent rule (same render, same or wider scope) already
-   *  exists — used to keep the popup from re-offering ratified rules. */
+  /** True when an equivalent rule (same render) already exists at any scope —
+   *  used to keep the popup from re-offering ratified rules. */
   hasEquivalent(render: string): boolean {
-    this.ensureGlobalLoaded();
-    return (
-      this.sessionRules.some((r) => r.render === render) ||
-      this.projectRules.some((r) => r.render === render) ||
-      this.globalRules.some((r) => r.render === render)
-    );
+    return this.all().some((r) => r.render === render);
   }
 
   accept(rule: InferredBashRule): void {
@@ -129,21 +119,14 @@ export class InferredRuleStore {
       return;
     }
     const path = rule.scope === "global" ? globalStorePath() : projectStorePath(this.cwd);
-    const data = readJsonFile(path) as { rules?: unknown[] } | null;
-    const rules = Array.isArray(data?.rules) ? data!.rules!.filter(ruleFileFilter) : [];
-    rules.push(rule);
-    writeJsonAtomic(path, { version: 1, rules });
-    if (rule.scope === "global") this.globalRules.push(rule);
-    else this.projectRules.push(rule);
-  }
-
-  private ensureGlobalLoaded(): void {
-    if (this.loadedGlobal) return;
-    this.loadedGlobal = true;
-    const data = readJsonFile(globalStorePath()) as { rules?: unknown } | null;
-    if (Array.isArray(data?.rules)) {
-      this.globalRules = (data.rules as unknown[]).filter(ruleFileFilter);
-    }
+    withJsonLock(path, (current) => {
+      const rules = rulesFrom(current);
+      // Re-check under the lock: another session may have accepted an
+      // equivalent rule between our read and our write.
+      if (rules.some((r) => r.render === rule.render)) return { result: undefined };
+      rules.push(rule);
+      return { result: undefined, next: { ...(current as object), version: 1, rules } };
+    });
   }
 }
 
@@ -162,66 +145,62 @@ function sanitizeProposal(p: unknown): p is PendingProposal {
   );
 }
 
+function proposalsFrom(doc: unknown): PendingProposal[] {
+  const data = doc as { proposals?: unknown } | null;
+  return Array.isArray(data?.proposals) ? (data.proposals as unknown[]).filter(sanitizeProposal) : [];
+}
+
+function prune(proposals: PendingProposal[]): PendingProposal[] {
+  const cutoff = Date.now() - QUEUE_TTL_MS;
+  const fresh = proposals.filter((p) => p.createdAt >= cutoff);
+  return fresh.length > QUEUE_CAP ? fresh.slice(fresh.length - QUEUE_CAP) : fresh;
+}
+
 export class ProposalQueue {
-  private proposals: PendingProposal[] = [];
-  private path: string | null = null;
-  private loaded = false;
+  private path: string | null;
+  /** Memory-only fallback for a cwd-less queue (used by tests/edge callers). */
+  private memory: PendingProposal[] = [];
 
   constructor(cwd?: string) {
-    if (cwd) {
-      this.path = projectStorePath(cwd);
-      const data = readJsonFile(this.path) as { proposals?: unknown } | null;
-      if (Array.isArray(data?.proposals)) {
-        this.proposals = (data.proposals as unknown[]).filter(sanitizeProposal);
-      }
-      this.loaded = true;
-    }
-  }
-
-  private persist(): void {
-    if (!this.path) return;
-    writeJsonAtomic(this.path, { version: 1, proposals: this.proposals });
-  }
-
-  /** Drop stale/over-cap entries; called lazily on list(). */
-  private prune(): void {
-    const cutoff = Date.now() - QUEUE_TTL_MS;
-    this.proposals = this.proposals.filter((p) => p.createdAt >= cutoff);
-    if (this.proposals.length > QUEUE_CAP) {
-      this.proposals = this.proposals.slice(this.proposals.length - QUEUE_CAP);
-    }
+    this.path = cwd ? projectStorePath(cwd) : null;
   }
 
   /** enqueue returns false when the proposal was suppressed as redundant. */
   enqueue(p: PendingProposal, opts: { suppressIfAllowed?: (exemplar: string) => boolean } = {}): boolean {
-    this.ensureLoaded();
-    this.prune();
-    if (this.proposals.some((q) => q.render === p.render)) return false;
-    if (opts.suppressIfAllowed?.(p.exemplars[0] ?? "")) return false;
-    this.proposals.push(p);
-    this.persist();
-    return true;
+    if (!this.path) {
+      if (this.memory.some((q) => q.render === p.render)) return false;
+      if (opts.suppressIfAllowed?.(p.exemplars[0] ?? "")) return false;
+      this.memory.push(p);
+      return true;
+    }
+    const path = this.path;
+    return withJsonLock(path, (current) => {
+      const proposals = prune(proposalsFrom(current));
+      if (proposals.some((q) => q.render === p.render)) return { result: false };
+      if (opts.suppressIfAllowed?.(p.exemplars[0] ?? "")) return { result: false };
+      proposals.push(p);
+      return { result: true, next: { ...(current as object), version: 1, proposals } };
+    });
   }
 
   list(): PendingProposal[] {
-    this.ensureLoaded();
-    this.prune();
-    return [...this.proposals];
+    if (!this.path) return prune(this.memory);
+    return prune(proposalsFrom(readJsonFile(this.path)));
   }
 
   remove(id: string): PendingProposal | undefined {
-    this.ensureLoaded();
-    const idx = this.proposals.findIndex((p) => p.id === id);
-    if (idx === -1) return undefined;
-    const [p] = this.proposals.splice(idx, 1);
-    this.persist();
-    return p;
-  }
-
-  private ensureLoaded(): void {
-    if (!this.loaded) {
-      this.loaded = true;
-      // cwd-less queue is memory-only; nothing to load.
+    if (!this.path) {
+      const idx = this.memory.findIndex((p) => p.id === id);
+      if (idx === -1) return undefined;
+      return this.memory.splice(idx, 1)[0];
     }
+    const path = this.path;
+    return withJsonLock(path, (current) => {
+      const proposals = prune(proposalsFrom(current));
+      const idx = proposals.findIndex((p) => p.id === id);
+      if (idx === -1) return { result: undefined };
+      const [removed] = proposals.splice(idx, 1);
+      return { result: removed, next: { ...(current as object), version: 1, proposals } };
+    });
   }
 }

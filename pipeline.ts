@@ -430,7 +430,7 @@ export async function resolvePermission(
         const tempRules = buildApprovalRules(opts.check, opts.permission, deps.cwd, deps.allowModes, opts.target);
         const allStorages = [deps.storage, ...(deps.dualWrite ?? [])];
         for (const s of allStorages) s.addTempRules(tempRules);
-        if (opts.permission === "bash") deps.inferred?.recordApproval(opts.target, deps.allowModes);
+        if (opts.permission === "bash") deps.inferred?.recordApproval(opts.check.unapproved ?? [], deps.allowModes);
 
         const recheckResult = opts.recheck();
         if (recheckResult.action === "allow") {
@@ -645,9 +645,10 @@ export async function resolvePermission(
         patterns.push(edited);
       }
     }
-    // Counters only consume durable bash approvals ("once" declined persistence).
+    // Counters only consume durable bash approvals ("once" declined persistence),
+    // and only the subcommands that were actually subject to approval.
     if (opts.permission === "bash") {
-      deps.inferred?.recordApproval(opts.target, deps.allowModes);
+      deps.inferred?.recordApproval(opts.check.unapproved ?? [], deps.allowModes);
     }
 
     const redirectPatterns: Array<{ permission: "read" | "edit"; pattern: string }> = [];
