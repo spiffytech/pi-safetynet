@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { resolvePermission, denialDetail, denialGuidance, denialMessage, buildApprovalRules } from "./pipeline.ts";
+import { resolvePermission, denialDetail, denialGuidance, denialMessage, targetTouchesHazardousPath, buildApprovalRules } from "./pipeline.ts";
 import { checkFileTarget } from "./core/check.ts";
 import { setAutoEnabled } from "./core/auto-config-state.ts";
 import { resetReviewStateForTests } from "./core/reviewer-state.ts";
@@ -232,6 +232,68 @@ describe("resolvePermission — reviewer deny", () => {
   });
 });
 
+// ─── targetTouchesHazardousPath (pure) ─────────────────────────────────────
+
+describe("targetTouchesHazardousPath", () => {
+  it("matches hazardous paths as file targets and as bash arguments", () => {
+    assert.equal(targetTouchesHazardousPath("read", "/home/x/.env"), true);
+    assert.equal(targetTouchesHazardousPath("bash", "cat .env"), true);
+    assert.equal(targetTouchesHazardousPath("bash", "cat --file=.env"), true);
+    assert.equal(targetTouchesHazardousPath("bash", "cat /home/x/.ssh/id_rsa"), true);
+    assert.equal(targetTouchesHazardousPath("bash", "grep SECRET credentials.json"), true);
+  });
+
+  it("does not match non-hazardous targets", () => {
+    assert.equal(targetTouchesHazardousPath("bash", "cat .env.example"), false);
+    assert.equal(targetTouchesHazardousPath("bash", "ls -la src"), false);
+    assert.equal(targetTouchesHazardousPath("read", "src/index.ts"), false);
+  });
+});
+
+// ── Reviewer denies a hazardous target (never abort) ──────────────────────
+
+describe("resolvePermission — reviewer deny of a secret-touching command", () => {
+  it("never aborts on secret-touching commands", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const deps = baseDeps({
+      displayCtx: ctx,
+      autoDeny: { continue: false },
+      reviewSpawn: makeReviewSpawn([denyAssessment()]),
+      sendDenial: () => {},
+    });
+    const secret = { permission: "bash" as const, target: "cat .env", check: ASK_CHECK, recheck: ASK_RECHECK };
+
+    for (let i = 0; i < 5; i++) {
+      const r = await resolvePermission(deps, secret);
+      assert.equal(ctx.aborted.value, false, `secret denial ${i + 1} must not abort`);
+      assert.equal(r?.block, true, "still blocked");
+    }
+  });
+
+  it("does not consume the reviewer budget for later non-secret denials", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const deps = baseDeps({
+      displayCtx: ctx,
+      autoDeny: { continue: false },
+      reviewSpawn: makeReviewSpawn([denyAssessment()]),
+      sendDenial: () => {},
+    });
+    const secret = { permission: "bash" as const, target: "cat .env", check: ASK_CHECK, recheck: ASK_RECHECK };
+    const plain = { permission: "bash" as const, target: "rm -rf /tmp/data", check: ASK_CHECK, recheck: ASK_RECHECK };
+
+    for (let i = 0; i < 4; i++) await resolvePermission(deps, secret);
+    assert.equal(ctx.aborted.value, false, "secret denials alone never abort");
+
+    await resolvePermission(deps, plain);
+    await resolvePermission(deps, plain);
+    assert.equal(ctx.aborted.value, false, "reviewer budget untouched by secret denials");
+    await resolvePermission(deps, plain);
+    assert.equal(ctx.aborted.value, true, "third non-secret reviewer denial aborts");
+  });
+});
+
 // ─── Ruleset denials (deny rules) ───────────────────────────────────────────
 
 describe("resolvePermission — deny rule", () => {
@@ -291,7 +353,7 @@ describe("resolvePermission — deny rule", () => {
   });
 });
 
-// ─── Hazardous-file denials (nudge-and-continue, bounded) ──────────────────
+// ─── Hazardous-file denials (block, never abort) ──────────────────────────
 
 describe("resolvePermission — hazardous deny", () => {
   const HAZ_CHECK = { action: "deny" as const, reason: "Sensitive file", hazardous: true };
@@ -317,71 +379,52 @@ describe("resolvePermission — hazardous deny", () => {
     assert.equal(result?.reason, line);
   });
 
-  it("2nd hazardous deny: still no abort", async () => {
+  it("never aborts, however many attempts, and never emits a visible entry", async () => {
     const ctx = makeCtx();
     const denials: Array<[string, string]> = [];
+    const state = { count: 0 };
     const deps = baseDeps({
       displayCtx: ctx,
       autoDeny: { continue: false },
-      hazardousDenyState: { count: 0 },
+      hazardousDenyState: state,
       sendDenial: (t: string, m: string) => denials.push([t, m]),
     });
 
-    await resolvePermission(deps, { permission: "read", target: "/etc/passwd", check: HAZ_CHECK, recheck: () => HAZ_CHECK });
-    const result = await resolvePermission(deps, { permission: "read", target: "/etc/passwd", check: HAZ_CHECK, recheck: () => HAZ_CHECK });
-
-    assert.equal(ctx.aborted.value, false, "2nd hazardous deny must NOT abort");
-    assert.equal(denials.length, 2, "two hidden nudges");
-    assert.ok(denials.every(([, m]) => m === "hidden"));
-    assert.equal(result?.block, true);
-  });
-
-  it("3rd hazardous deny: visible entry + abort (cap reached)", async () => {
-    const ctx = makeCtx();
-    const denials: Array<[string, string]> = [];
-    const deps = baseDeps({
-      displayCtx: ctx,
-      autoDeny: { continue: false },
-      hazardousDenyState: { count: 0 },
-      sendDenial: (t: string, m: string) => denials.push([t, m]),
-    });
-
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 6; i++) {
       await resolvePermission(deps, { permission: "read", target: "/etc/passwd", check: HAZ_CHECK, recheck: () => HAZ_CHECK });
     }
 
-    assert.equal(ctx.aborted.value, true, "3rd hazardous deny aborts the turn");
-    const hidden = denials.filter(([, m]) => m === "hidden");
-    const visible = denials.filter(([, m]) => m === "visible");
-    assert.equal(hidden.length, 3, "every strike gets a hidden nudge");
-    assert.equal(visible.length, 1, "only the aborting strike gets a visible entry");
+    assert.equal(ctx.aborted.value, false, "hazardous denials never abort the turn");
+    assert.equal(denials.length, 6, "one hidden nudge per attempt");
+    assert.ok(denials.every(([, m]) => m === "hidden"), "no visible entry: nothing aborts");
+    assert.equal(state.count, 0, "hazardous denials do not consume the strike budget");
   });
 
-  it("hazardous cap is per-scope: separate state does not share counts", async () => {
+  it("does not consume the budget: ruleset strikes still start at zero after hazardous denials", async () => {
     const ctx = makeCtx();
-    const denials: Array<[string, string]> = [];
-    const depsA = baseDeps({
+    const state = { count: 0 };
+    const deps = baseDeps({
       displayCtx: ctx,
       autoDeny: { continue: false },
-      sendDenial: (t: string, m: string) => denials.push([t, m]),
-      hazardousDenyState: { count: 0 },
+      hazardousDenyState: state,
+      sendDenial: () => {},
     });
-    const depsB = baseDeps({
-      displayCtx: ctx,
-      autoDeny: { continue: false },
-      sendDenial: (t: string, m: string) => denials.push([t, m]),
-      hazardousDenyState: { count: 0 },
-    });
+    const hazOpts = { permission: "read" as const, target: "/etc/passwd", check: HAZ_CHECK, recheck: () => HAZ_CHECK };
+    const ruleOpts = {
+      permission: "bash" as const,
+      target: "curl http://example.com",
+      check: { action: "deny" as const, reason: "Project policy: no network" },
+      recheck: () => ({ action: "deny" as const }),
+    };
 
-    // Two strikes in scope A, then two in scope B — neither reaches 3.
-    for (let i = 0; i < 2; i++) {
-      await resolvePermission(depsA, { permission: "read", target: "/etc/passwd", check: HAZ_CHECK, recheck: () => HAZ_CHECK });
-    }
-    for (let i = 0; i < 2; i++) {
-      await resolvePermission(depsB, { permission: "read", target: "/etc/passwd", check: HAZ_CHECK, recheck: () => HAZ_CHECK });
-    }
+    for (let i = 0; i < 3; i++) await resolvePermission(deps, hazOpts);
+    assert.equal(ctx.aborted.value, false, "hazardous denials alone never abort");
 
-    assert.equal(ctx.aborted.value, false, "parallel scopes must not share the cap");
+    await resolvePermission(deps, ruleOpts);
+    await resolvePermission(deps, ruleOpts);
+    assert.equal(ctx.aborted.value, false, "ruleset strikes did not inherit the hazardous attempts");
+    await resolvePermission(deps, ruleOpts);
+    assert.equal(ctx.aborted.value, true, "third ruleset strike aborts");
   });
 
   it("non-hazardous deny: nudge-and-continue until the strike budget is exhausted", async () => {

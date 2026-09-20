@@ -299,6 +299,7 @@ async function handleToolCall(
           onDenied: undefined,
           state: hazardousDenyState,
           source: check.modeDenied ? "mode" : "ruleset",
+          hazardous: check.hazardous ?? false,
         });
       }
 

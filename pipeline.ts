@@ -19,6 +19,7 @@ import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import { PermissionStorage } from "./core/permissions/index.ts";
 import type { PermissionCheck } from "./core/check.ts";
 import { actionWrites } from "./core/check.ts";
+import { isHazardousFile, subcommandTokenLists } from "./core/bash-parser.ts";
 import { isAutoEnabled, loadAutoApproveConfig, setAutoEnabled } from "./core/auto-config-state.ts";
 import type { InferredEngine } from "./core/inferred/engine.ts";
 import {
@@ -78,10 +79,6 @@ export interface PipelineDeps {
  *  Overridable via `autoDeny.maxStrikes`. */
 export const DEFAULT_MAX_DENY_STRIKES = 3;
 
-/** Back-compat alias: hazardous-file denials now share the unified strike
- *  budget instead of keeping a separate constant. */
-export const HAZARDOUS_MAX_DENIES = DEFAULT_MAX_DENY_STRIKES;
-
 /** Per-scope deny-strike counter. The main session and each subagent get their
  *  own (parallel subagents must not share the parent's counter). Resets on
  *  agent_end. */
@@ -97,7 +94,12 @@ export type HazardousDenyState = DenyStrikeState;
  *  the blocked tool's result, so it can course-correct); the aborting strike
  *  also renders a visible transcript entry and ends the turn. `autoDeny.continue:
  *  true` keeps the turn alive regardless of the count. Shared by ruleset
- *  denies, read-only/mode denies, and headless denies. */
+ *  denies, read-only/mode denies, and headless denies.
+ *
+ *  Hazardous/sensitive-file denials are the exception: `hazardous` blocks and
+ *  nudges but NEVER aborts and never consumes a strike. The block already
+ *  protects the file; ending the turn adds no protection and only strands the
+ *  user mid-task (and the model can retry next turn regardless). */
 export function strikeDeny(opts: {
   permission: "bash" | "read" | "edit";
   target: string;
@@ -108,10 +110,17 @@ export function strikeDeny(opts: {
   sendDenial: ((text: string, mode: "hidden" | "visible") => void) | undefined;
   onDenied: (() => void) | undefined;
   state: DenyStrikeState;
+  /** Sensitive-file denial: block + nudge, but never abort or count a strike. */
+  hazardous?: boolean;
 }): { block: true; reason: string } {
   const detail = denialMessage(opts.permission, opts.target, opts.reason, opts.source);
-  const cap = opts.autoDeny.maxStrikes ?? DEFAULT_MAX_DENY_STRIKES;
 
+  if (opts.hazardous) {
+    opts.sendDenial?.(detail, "hidden");
+    return { block: true, reason: detail };
+  }
+
+  const cap = opts.autoDeny.maxStrikes ?? DEFAULT_MAX_DENY_STRIKES;
   opts.state.count++;
   opts.sendDenial?.(detail, "hidden");
   if (opts.state.count >= cap && !opts.autoDeny.continue) {
@@ -135,6 +144,8 @@ export function resolveDeny(opts: {
   /** Denial label/source; defaults to "ruleset". Mode-enforced denies pass
    *  "mode" so the nudge carries mode-specific recovery guidance. */
   source?: DenialSource;
+  /** Sensitive-file denial: block + nudge, but never abort or count a strike. */
+  hazardous?: boolean;
 }): { block: boolean; reason: string } {
   return strikeDeny({ ...opts, source: opts.source ?? "ruleset" });
 }
@@ -213,6 +224,32 @@ export function denialMessage(
   source: DenialSource = "reviewer",
 ): string {
   return `${denialDetail(permission, target, reason, source)} ${denialGuidance(source)}`;
+}
+
+/** True when a denial target references a hazardous/sensitive file. Used to keep
+ *  secret-related denials from ending the turn: the reviewer may deny `cat .env`,
+ *  but a repeated probe must not abort. The match is deliberately broad (any
+ *  token that looks like a hazardous path) — a false positive only suppresses an
+ *  abort, it never grants access. */
+export function targetTouchesHazardousPath(
+  permission: "bash" | "read" | "edit",
+  target: string,
+): boolean {
+  if (isHazardousFile(target)) return true;
+  if (permission !== "bash") return false;
+  try {
+    for (const tokens of subcommandTokenLists(target)) {
+      for (const tok of tokens) {
+        if (!tok) continue;
+        const eq = tok.indexOf("=");
+        const value = eq >= 0 ? tok.slice(eq + 1) : tok;
+        if (value && isHazardousFile(value)) return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 /** Build a turn-expiry temp rule from checked arguments. */
@@ -338,6 +375,7 @@ export async function resolvePermission(
       sendDenial: deps.sendDenial,
       onDenied: deps.onDenied,
       state: deps.hazardousDenyState ?? { count: 0 },
+      hazardous: opts.check.hazardous ?? false,
     });
   }
 
@@ -407,8 +445,16 @@ export async function resolvePermission(
       if (v.kind === "assessment" && v.assessment.outcome === "deny") {
         // Deny
         deps.displayCtx.ui.notify(` Reviewer denied: ${v.assessment.rationale}`, "warning");
-        const denies = reviewIncrementDenies();
         const detail = denialMessage(opts.permission, opts.target, v.assessment.rationale);
+        // Secret-touching denials block but never abort and never consume the
+        // reviewer budget: the block protects the secret, while ending the turn
+        // would only strand the user when the model doesn't realise it
+        // shouldn't read the file (e.g. `cat .env`).
+        if (targetTouchesHazardousPath(opts.permission, opts.target)) {
+          deps.sendDenial?.(detail, "hidden");
+          return { block: true, reason: detail };
+        }
+        const denies = reviewIncrementDenies();
         deps.sendDenial?.(detail, "hidden");
         if (denies >= maxDenials) {
           deps.sendDenial?.(detail, "visible");
@@ -524,8 +570,13 @@ export async function resolvePermission(
         } else {
           const cfg = loadAutoApproveConfig();
           deps.displayCtx.ui.notify(` Reviewer denied: ${pending.assessment.rationale}`, "warning");
-          const denies = reviewIncrementDenies();
           const detail = denialMessage(opts.permission, opts.target, pending.assessment.rationale);
+          // Secret-touching denials never abort or consume the reviewer budget.
+          if (targetTouchesHazardousPath(opts.permission, opts.target)) {
+            deps.sendDenial?.(detail, "hidden");
+            return { block: true, reason: detail };
+          }
+          const denies = reviewIncrementDenies();
           deps.sendDenial?.(detail, "hidden");
           if (denies >= (cfg.maxDenials ?? 3)) {
             deps.sendDenial?.(detail, "visible");

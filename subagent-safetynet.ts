@@ -144,6 +144,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 							onDenied: onPermissionDenied,
 							state: hazardousDenyState,
 							source: check.modeDenied ? "mode" : "ruleset",
+							hazardous: check.hazardous ?? false,
 						});
 					}
 
