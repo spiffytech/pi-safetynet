@@ -20,7 +20,7 @@ import questionnaire from "./questionnaire.ts";
 import { renderCustomFooter } from "./footer.ts";
 import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile, loadParadigm, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./core/global-config.ts";
 import { evaluatePermission } from "./core/permissions/ruleset.ts";
-import { runSubagent, addUsage, formatSubagentUsage, ZERO_USAGE, type SubagentUsage } from "./subagent.ts";
+import { runSubagent } from "./subagent.ts";
 import {
   getBaselineRules,
   PermissionStorage,
@@ -181,11 +181,6 @@ let currentModelSupportsReasoning: boolean = false;
 /** Current thinking level, updated via thinking_level_select events. */
 let currentThinkingLevel: string = "off";
 
-/** Cumulative subagent usage for the current turn. Never cleared. */
-let subagentUsage: SubagentUsage = { ...ZERO_USAGE };
-
-const SUBAGENT_USAGE_TYPE = "safetynet:subagent-usage";
-
 /** Update the inferred-proposals badge widget (P2, never takes focus). */
 function updateInferredBadge(ctx: ExtensionContext): void {
 	const n = inferredEngine?.listProposals().length ?? 0;
@@ -197,25 +192,6 @@ function updateInferredBadge(ctx: ExtensionContext): void {
 		);
 	} else {
 		ctx.ui.setWidget("safetynet-inferred", undefined);
-	}
-}
-
-function persistSubagentUsage(): void {
-	pi.appendEntry(SUBAGENT_USAGE_TYPE, { ...subagentUsage });
-}
-
-function restoreSubagentUsage(ctx: ExtensionContext): void {
-	const entry = getLatestCustomEntry<SubagentUsage>(ctx, SUBAGENT_USAGE_TYPE);
-	if (entry?.data) subagentUsage = { ...ZERO_USAGE, ...entry.data };
-}
-
-/** Update the subagent cost status indicator (same mechanism as plan/build mode). */
-function refreshSubagentStatus(ctx: ExtensionContext) {
-	const formatted = formatSubagentUsage(subagentUsage);
-	if (formatted.length > 0) {
-		// Key order is defined in footer.ts SAFETYNET_STATUS_KEYS: the mode label
-		// renders first on our dedicated footer line, subagent cost second.
-		ctx.ui.setStatus("\x00", ctx.ui.theme.fg("dim", `subagents +${formatted}`));
 	}
 }
 
@@ -838,10 +814,7 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 				paradigm: getParadigm(),
 				modeAliases: getModeAliases(),
 			});
-			if (result.details && typeof result.details === "object" && "usage" in result.details) {
-				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
-				refreshSubagentStatus(ctx);
-			}
+			// `result.usage` rides the toolResult entry, so pi counts delegated spend.
 			return result;
 		},
 	});
@@ -877,10 +850,7 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 				paradigm: getParadigm(),
 				modeAliases: getModeAliases(),
 			});
-			if (result.details && typeof result.details === "object" && "usage" in result.details) {
-				subagentUsage = addUsage(subagentUsage, result.details.usage as SubagentUsage);
-				refreshSubagentStatus(ctx);
-			}
+			// `result.usage` rides the toolResult entry, so pi counts delegated spend.
 			return result;
 		},
 	});
@@ -962,7 +932,6 @@ interface RestoreOpts {
 async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): Promise<void> {
   if (opts?.init) await storage.init();
   restoreProfile(ctx);
-  restoreSubagentUsage(ctx);
   restoreAutoEnabled(ctx);
 
   const { rules: sessionRules, skippedCount } = reconstructSessionRules(ctx, ctx.cwd);
@@ -1128,8 +1097,6 @@ export default function safetynetExtension(api: ExtensionAPI) {
 
   pi.on("agent_end", async (_event, ctx) => {
     storage.temp.clearTurnRules();
-    persistSubagentUsage();
-    refreshSubagentStatus(ctx);
     reviewBumpTurnToken();
     reviewResetDenies();
     hazardousDenyState.count = 0;

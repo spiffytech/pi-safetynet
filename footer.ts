@@ -2,14 +2,19 @@
  * Custom pi footer for pi-safetynet.
  *
  * Replicates the built-in footer (pwd / stats+model lines) and then splits the
- * extension statuses: OUR entries (safetynet mode label, subagent usage) land
+ * extension statuses: OUR entries (currently just the safetynet mode label) land
  * on one dedicated line that is never crowded out or truncated away by other
  * extensions' statuses. Everyone else's statuses keep the built-in behaviour
  * (one shared line, sorted by key).
  *
+ * Nothing about usage is apportioned here. Token/cost totals are summed from the
+ * same session entries the built-in footer reads, which means delegated (subagent)
+ * spend is folded into the normal stats line via the toolResult entry's `usage`
+ * field, and cache-warming refreshes via `type: "usage"` entries. Replaces the
+ * built-in footer only to protect the mode label from status-line truncation.
+ *
  * Version note: this is written against the @earendil-works/pi-coding-agent
- * 0.81.x extension API (what pi-safetynet typechecks against) but is meant to
- * run on pi 0.84.x. Only APIs present in both versions are used.
+ * 0.86.x extension API (what pi-safetynet typechecks against).
  */
 
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -17,11 +22,11 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
 
 /**
- * Keys of the footer statuses this extension owns, in display order (mode
- * label first, subagent cost second — truncation therefore never hides the
- * read-only indicator).
+ * Keys of the footer statuses this extension owns. Ordering is display order, so
+ * if the line ever truncates it cuts from the right of this list. It currently
+ * holds only the mode label — the read-only indicator must never be hidden.
  */
-export const SAFETYNET_STATUS_KEYS = ["safetynet", "\x00"] as const;
+export const SAFETYNET_STATUS_KEYS = ["safetynet"] as const;
 export type SafetynetStatusKey = (typeof SAFETYNET_STATUS_KEYS)[number];
 
 export interface CustomFooterDeps {
@@ -123,7 +128,19 @@ interface UsageTotals {
 function accumulateUsage(entries: readonly SessionEntry[]): UsageTotals {
 	const totals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, latestCacheHitRate: undefined };
 	for (const entry of entries) {
-		if (entry.type === "message") {
+		if (entry.type === "usage") {
+			// Model-attributed usage that is not part of the conversation (currently
+			// cache-warming refreshes). The built-in footer counts these; skipping
+			// them would under-report cache reads and cost. Deliberately does not
+			// touch latestCacheHitRate — a warming read is ~100% cached, which would
+			// flatter the displayed hit rate.
+			const usage = entry.usage;
+			totals.input += usage.input;
+			totals.output += usage.output;
+			totals.cacheRead += usage.cacheRead;
+			totals.cacheWrite += usage.cacheWrite;
+			totals.cost += usage.cost.total;
+		} else if (entry.type === "message") {
 			const message = entry.message;
 			if (message.role === "assistant") {
 				const usage = message.usage;

@@ -3,7 +3,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model, Usage } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -31,45 +31,42 @@ function createSystemPromptExtension(systemPrompt: string): (pi: ExtensionAPI) =
 
 export type SubagentTaskType = "explore" | "build";
 
-export interface SubagentUsage {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	cost: number;
-}
-
-export const ZERO_USAGE: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-
-/** Add two SubagentUsage objects, returning a new object. */
-export function addUsage(a: SubagentUsage, b: SubagentUsage): SubagentUsage {
+/** Zeroed pi-ai `Usage` accumulator. */
+export function zeroUsage(): Usage {
 	return {
-		input: a.input + b.input,
-		output: a.output + b.output,
-		cacheRead: a.cacheRead + b.cacheRead,
-		cacheWrite: a.cacheWrite + b.cacheWrite,
-		cost: a.cost + b.cost,
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 }
 
-/** Format a token count like the built-in footer (1.2k, 45k, 1.5M). */
-export function formatTokenCount(count: number): string {
-	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-	return `${Math.round(count / 1000000)}M`;
+/**
+ * Fold one assistant message's usage into an accumulator.
+ *
+ * `totalTokens` mirrors pi's own fallback (`usage.totalTokens || sum of parts`), so a
+ * provider that reports no total still contributes a sensible figure. This value is
+ * never used for context accounting — pi reads usage only from assistant messages in
+ * the main session — it just has to be present on the `Usage` we hand back.
+ */
+export function accumulateUsage(target: Usage, usage: Usage): void {
+	target.input += usage.input || 0;
+	target.output += usage.output || 0;
+	target.cacheRead += usage.cacheRead || 0;
+	target.cacheWrite += usage.cacheWrite || 0;
+	target.totalTokens += usage.totalTokens || (usage.input || 0) + (usage.output || 0) + (usage.cacheRead || 0) + (usage.cacheWrite || 0);
+	target.cost.input += usage.cost?.input || 0;
+	target.cost.output += usage.cost?.output || 0;
+	target.cost.cacheRead += usage.cost?.cacheRead || 0;
+	target.cost.cacheWrite += usage.cost?.cacheWrite || 0;
+	target.cost.total += usage.cost?.total || 0;
 }
 
-/** Format SubagentUsage as a compact string (e.g. "+↑20k ↓8k $0.023"). */
-export function formatSubagentUsage(usage: SubagentUsage): string {
-	const parts: string[] = [];
-	if (usage.input) parts.push(`↑${formatTokenCount(usage.input)}`);
-	if (usage.output) parts.push(`↓${formatTokenCount(usage.output)}`);
-	if (usage.cacheRead) parts.push(`R${formatTokenCount(usage.cacheRead)}`);
-	if (usage.cacheWrite) parts.push(`W${formatTokenCount(usage.cacheWrite)}`);
-	if (usage.cost) parts.push(`$${usage.cost.toFixed(3)}`);
-	return parts.join(" ");
+/** Deep copy of an accumulator, safe to hand to pi as a tool-result `usage`. */
+export function snapshotUsage(usage: Usage): Usage {
+	return { ...usage, cost: { ...usage.cost } };
 }
 
 export interface SubagentOptions {
@@ -122,7 +119,13 @@ function formatActivity(toolName: string, args: Record<string, unknown>, cwd: st
 export async function runSubagent(opts: SubagentOptions): Promise<{
 	content: { type: "text"; text: string }[];
 	details: Record<string, unknown>;
+	/** Usage accumulated by the subagent. Pi persists this on the parent's toolResult
+	 *  entry, which is what puts delegated spend into the normal stats line and
+	 *  /session without any extension-side bookkeeping. */
+	usage: Usage;
 }> {
+	// Declared before any early return so every exit path can attach it.
+	const usage = zeroUsage();
 	const { taskType, prompt, parentCtx, parentStorage, initialRules, signal, onUpdate, cwd } = opts;
 
 	const agentDir = process.env.PI_AGENT_DIR ?? `${process.env.HOME}/.pi/agent`;
@@ -189,6 +192,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 		return {
 			content: [{ type: "text", text: "Error: No model available in parent context." }],
 			details: { error: "no_model" },
+			usage: snapshotUsage(usage),
 		};
 	}
 
@@ -237,6 +241,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 		return {
 			content: [{ type: "text", text: `Error creating subagent session: ${err}` }],
 			details: { error: String(err) },
+			usage: snapshotUsage(usage),
 		};
 	}
 
@@ -262,12 +267,11 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	let hitTurnLimit = false;
 	let hitTimeout = false;
 	const activities: string[] = [];
-	const cumulativeUsage: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 
 	const emitUpdate = () => {
 		onUpdate?.({
 			content: [{ type: "text", text: fullText }],
-			details: { activities, usage: { ...cumulativeUsage } },
+			details: { activities },
 		});
 	};
 
@@ -301,11 +305,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 					}
 				}
 				if (msg.usage) {
-					cumulativeUsage.input += msg.usage.input || 0;
-					cumulativeUsage.output += msg.usage.output || 0;
-					cumulativeUsage.cacheRead += msg.usage.cacheRead || 0;
-					cumulativeUsage.cacheWrite += msg.usage.cacheWrite || 0;
-					cumulativeUsage.cost += msg.usage.cost?.total || 0;
+					accumulateUsage(usage, msg.usage);
 					emitUpdate();
 				}
 			}
@@ -338,7 +338,8 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 		if (!aborted && !hitTurnLimit && !hitTimeout && !hitPermissionDenied) {
 			return {
 				content: [{ type: "text", text: `Subagent error: ${err}` }],
-				details: { error: String(err), activities, usage: { ...cumulativeUsage } },
+				details: { error: String(err), activities },
+				usage: snapshotUsage(usage),
 			};
 		}
 	} finally {
@@ -354,7 +355,8 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			: "Subagent completed with no output.";
 		return {
 			content: [{ type: "text", text: reason }],
-			details: { aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, taskType, activities, usage: { ...cumulativeUsage } },
+			details: { aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, taskType, activities },
+			usage: snapshotUsage(usage),
 		};
 	}
 
@@ -365,6 +367,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 
 	return {
 		content: [{ type: "text", text: fullText + suffix }],
-		details: { taskType, aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, turnCount, activities, usage: { ...cumulativeUsage } },
+		details: { taskType, aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, turnCount, activities },
+		usage: snapshotUsage(usage),
 	};
 }

@@ -64,6 +64,47 @@ function assistantEntry(input: number, output = 0, cacheRead = 0, cacheWrite = 0
 	});
 }
 
+/** A toolResult entry carrying usage — what subagent spend rides on. */
+function toolResultUsageEntry(input: number, cost = 0): SessionEntry {
+	return entry({
+		type: "message",
+		message: {
+			role: "toolResult",
+			toolCallId: "call_1",
+			toolName: "subagent_explore",
+			content: [{ type: "text", text: "done" }],
+			usage: {
+				input,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: input,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+			},
+			isError: false,
+			timestamp: 0,
+		},
+	});
+}
+
+/** A `usage` session entry, as cache warming writes them. */
+function cacheWarmEntry(input: number, cacheRead: number, cost = 0): SessionEntry {
+	return entry({
+		type: "usage",
+		kind: "cache_warm",
+		provider: "hyper",
+		model: "deepseek-v4.1-flash",
+		usage: {
+			input,
+			output: 0,
+			cacheRead,
+			cacheWrite: 0,
+			totalTokens: input + cacheRead,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+		},
+	});
+}
+
 describe("formatTokens", () => {
 	it("formats like the built-in footer", () => {
 		assert.equal(formatTokens(999), "999");
@@ -88,22 +129,19 @@ describe("formatCwdForFooter", () => {
 });
 
 describe("splitExtensionStatuses", () => {
-	it("orders our entries by SAFETYNET_STATUS_KEYS (mode first)", () => {
+	it("returns our entries in SAFETYNET_STATUS_KEYS order", () => {
 		const { ours } = splitExtensionStatuses(
-			new Map([
-				["safetynet", "read-only auto"],
-				["\x00", "subagents +$0.02"],
-			]),
+			new Map([["safetynet", "read-only auto"]]),
 			SAFETYNET_STATUS_KEYS,
 		);
-		assert.deepEqual(ours, ["read-only auto", "subagents +$0.02"]);
+		assert.deepEqual(ours, ["read-only auto"]);
 	});
 	it("sanitizes our status text", () => {
 		const { ours } = splitExtensionStatuses(
-			new Map([["\x00", "subagents +\n$0.02\t(2)"]]),
+			new Map([["safetynet", "read-only\nauto\t(2)"]]),
 			SAFETYNET_STATUS_KEYS,
 		);
-		assert.deepEqual(ours, ["subagents + $0.02 (2)"]);
+		assert.deepEqual(ours, ["read-only auto (2)"]);
 	});
 	it("sorts others by key and excludes our keys", () => {
 		const { ours, others } = splitExtensionStatuses(
@@ -187,13 +225,12 @@ describe("renderCustomFooter", () => {
 					["tps", "41.2 TPS"],
 					["kilo-credits", "2.1k"],
 					["safetynet", "read-only auto"],
-					["\x00", "subagents +$0.02"],
 				]),
 			}),
 		);
 		assert.equal(lines.length, 4);
 		assert.equal(lines[2], "2.1k 41.2 TPS");
-		assert.equal(lines[3], "read-only auto · subagents +$0.02");
+		assert.equal(lines[3], "read-only auto");
 	});
 
 	it("renders only the ours line when there are no other statuses", () => {
@@ -204,22 +241,42 @@ describe("renderCustomFooter", () => {
 		assert.equal(lines[2], "read-only");
 	});
 
-	it("truncating the ours line keeps the mode label first", () => {
+	it("truncating the ours line keeps the mode label", () => {
 		const lines = renderCustomFooter(
 			makeDeps({
-				width: 30,
+				width: 20,
 				extensionStatuses: new Map([
-					["safetynet", "read-only auto"],
-					["\x00", "subagents +$0.02"],
+					["safetynet", "read-only auto with a very long suffix"],
 				]),
 			}),
 		);
 		const oursLine = lines[2] ?? "";
 		assert.equal(lines.length, 3);
 		assert.ok(oursLine.startsWith("read-only auto"));
-		assert.ok(visibleWidth(oursLine) <= 30);
-		// The cost tail was cut (mode label survived), with an ellipsis marker.
+		assert.ok(visibleWidth(oursLine) <= 20);
 		assert.ok(oursLine.includes("..."));
-		assert.ok(!oursLine.includes("$0.02"));
+	});
+
+	it("counts toolResult usage (subagent spend) in the totals", () => {
+		const lines = renderCustomFooter(
+			makeDeps({ entries: [assistantEntry(1000, 100, 0, 0, 0.01), toolResultUsageEntry(4000, 0.02)] }),
+		);
+		assert.ok(lines[1]?.includes("↑5.0k"));
+		assert.ok(lines[1]?.includes("$0.030"));
+	});
+
+	it("counts cache-warming usage entries without touching the cache-hit rate", () => {
+		const lines = renderCustomFooter(
+			makeDeps({
+				entries: [
+					assistantEntry(1000, 100, 9000, 0, 0.01),
+					cacheWarmEntry(0, 200_000, 0.05),
+				],
+			}),
+		);
+		assert.ok(lines[1]?.includes("R209k"), `expected R209k in ${lines[1]}`);
+		assert.ok(lines[1]?.includes("$0.060"), `expected $0.060 in ${lines[1]}`);
+		// 9000 / (1000 + 9000) = 90.0% — the warming read must not flatter it.
+		assert.ok(lines[1]?.includes("CH90.0%"), `expected CH90.0% in ${lines[1]}`);
 	});
 });
