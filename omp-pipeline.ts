@@ -220,7 +220,9 @@ export async function resolveOmpPermission(
 							// the spec isn't in the catalog at all.
 							...reviewerSpawnModelOpts(deps.ctx, o.model),
 							...(o.signal ? { signal: o.signal } : {}),
-						}) },
+						}),
+						// Fallback diagnostics go to the TUI, not the terminal stream.
+						onDiagnostic: (msg, level) => deps.ctx.ui.notify(msg, level) },
 				);
 				updateLatencyWidget(deps, reviewRecordLatency(Date.now() - reviewT0), config.latencyWarnEmaMs ?? 8000);
 				// Discard stale verdicts (their turn already ended).

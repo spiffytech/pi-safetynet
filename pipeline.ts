@@ -410,7 +410,12 @@ export async function resolvePermission(
             timeoutMs,
             ...(config.model ? { model: config.model } : {}),
           },
-          { spawn: deps.reviewSpawn ?? (await import("./subagent.ts").then((m) => m.runSubagent)) },
+          {
+            spawn: deps.reviewSpawn ?? (await import("./subagent.ts").then((m) => m.runSubagent)),
+            // Route reviewer fallback diagnostics to the TUI via notify — the
+            // render-safe channel. console.warn here would corrupt the display.
+            onDiagnostic: (msg, level) => deps.displayCtx.ui.notify(msg, level),
+          },
         ),
         new Promise<any>((_, reject) =>
           setTimeout(() => { ctl.abort(); reject(new Error("reviewer timeout")); }, timeoutMs)
@@ -481,7 +486,10 @@ export async function resolvePermission(
           retriesDone++;
           const verdict = await runPermissionReview(
             { permission: opts.permission, target: opts.target, check: opts.check, cwd: deps.cwd, parentCtx: deps.displayCtx, profile: reviewProfile, timeoutMs, ...(config.model ? { model: config.model } : {}) },
-            { spawn: deps.reviewSpawn ?? (await import("./subagent.ts").then((m) => m.runSubagent)) },
+            {
+              spawn: deps.reviewSpawn ?? (await import("./subagent.ts").then((m) => m.runSubagent)),
+              onDiagnostic: (msg, level) => deps.displayCtx.ui.notify(msg, level),
+            },
           ).catch(() => ({ kind: "transient" as const, message: "retry failed" }));
           if (verdict.kind === "assessment") {
             clearPendingAutoResult();

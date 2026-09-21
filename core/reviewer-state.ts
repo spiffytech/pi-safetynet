@@ -13,6 +13,7 @@ import {
   type TranscriptEntry,
 } from "./reviewer-prompt.ts";
 import { isReadOnly } from "./profiles.ts";
+import { debugLog } from "./debug-log.ts";
 
 // ─── Module state (circuit breaker + turn token) ───────────────────────────
 
@@ -68,6 +69,23 @@ export function clearPendingAutoResult(): void { pendingAutoResult = null; }
 export interface ReviewDeps {
   /** Function to spawn a subagent session. Production = runSubagent. */
   spawn: (opts: any) => Promise<SpawnResult>;
+  /** On-screen diagnostic sink for review outcomes the user must see. Pipelines
+   *  wire this to ctx.ui.notify, which renders through the TUI and so cannot
+   *  interleave with frames the way console.warn did. Absent → diagnostics are
+   *  dropped (tests, headless callers). */
+  onDiagnostic?: (message: string, level: "info" | "warning") => void;
+}
+
+/** Render the reviewer fallback chain as one readable line: the models that
+ *  failed and why, then the model that produced the verdict (if any). */
+export function formatReviewerFallback(
+  failures: readonly { spec: string; message: string }[],
+  winner?: string,
+): string {
+  const chain = failures.map((f) => `${f.spec} (${f.message})`).join(", ");
+  return winner
+    ? `reviewer fell back: ${chain} → ${winner}`
+    : `reviewer unavailable — all models failed: ${chain}`;
 }
 
 export interface SpawnOpts {
@@ -133,7 +151,7 @@ export function resolveModelSpec<M extends { id: string; provider?: string }>(
     .getAll()
     .find((m) => m.id === modelSpec || `${m.provider}/${m.id}` === modelSpec);
   if (!found) {
-    console.warn(`safetynet: autoApprove.model "${modelSpec}" not found in registry; ${label} will use the parent model.`);
+    debugLog(`safetynet: autoApprove.model "${modelSpec}" not found in registry; ${label} will use the parent model.`);
   }
   return found;
 }
@@ -148,15 +166,26 @@ export async function runPermissionReview(
   const specs = Array.isArray(opts.model) ? opts.model : opts.model ? [opts.model] : [];
   // No model configured → single attempt on the parent model (historical default).
   if (specs.length === 0) return runPermissionReviewWithModel(opts, deps, "");
+  const failures: { spec: string; message: string }[] = [];
   let lastVerdict: ReviewVerdict | undefined;
   for (let i = 0; i < specs.length; i++) {
     const spec = specs[i]!;
     const verdict = await runPermissionReviewWithModel(opts, deps, spec);
-    if (verdict.kind === "assessment") return verdict;
-    lastVerdict = verdict;
-    if (i < specs.length - 1) {
-      console.warn(`safetynet: reviewer model "${spec}" failed (${verdict.message}); falling back to next model.`);
+    if (verdict.kind === "assessment") {
+      // A fallback happened → surface the whole chain once, so a silent hop to
+      // a working model is still visible to the user.
+      if (failures.length > 0) {
+        deps.onDiagnostic?.(formatReviewerFallback(failures, spec), "warning");
+      }
+      return verdict;
     }
+    failures.push({ spec, message: verdict.message });
+    if (i < specs.length - 1) {
+      debugLog(`safetynet: reviewer model "${spec}" failed (${verdict.message}); falling back to next model.`);
+    }
+  }
+  if (failures.length > 0) {
+    deps.onDiagnostic?.(formatReviewerFallback(failures), "warning");
   }
   return lastVerdict ?? { kind: "transient", message: "No reviewer model configured" };
 }
@@ -237,11 +266,9 @@ async function runPermissionReviewWithModel(
     trustExternalPaths: true,
     ...(modelOverride ? { model: modelOverride } : {}),
   });
-  if (typeof console !== "undefined") {
-    console.warn(
-      `safetynet: review timing — model="${modelSpec}" transcript=${transcriptMs}ms resolve=${spawnT0 - reviewT0 - transcriptMs}ms spawn=${Date.now() - spawnT0}ms total=${Date.now() - reviewT0}ms`,
-    );
-  }
+  debugLog(
+    `safetynet: review timing — model="${modelSpec}" transcript=${transcriptMs}ms resolve=${spawnT0 - reviewT0 - transcriptMs}ms spawn=${Date.now() - spawnT0}ms total=${Date.now() - reviewT0}ms`,
+  );
 
   // Classify the result
   const text = result.content.map((c) => c.text).join("\n").trim();

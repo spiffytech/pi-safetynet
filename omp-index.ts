@@ -11,6 +11,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { resolveOmpPermission, type OmpPipelineDeps } from "./omp-pipeline.ts";
 import { PermissionStorage, reconstructSessionRules } from "./core/permissions/index.ts";
+import { debugLog } from "./core/debug-log.ts";
 import {
 	loadSubagentsConfig,
 	loadTrustExternalPaths,
@@ -363,7 +364,7 @@ export default function safetynetOmp(pi: ExtensionAPI) {
 				check: runCheck(),
 				recheck: runCheck,
 			});
-			console.warn(`safetynet: bash resolve=${Date.now() - handlerT0}ms since-handler-entry`);
+			debugLog(`safetynet: bash resolve=${Date.now() - handlerT0}ms since-handler-entry`);
 			return resolved;
 		}
 

@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionEntriesSource } from "./core/types.ts";
+import { debugLog } from "./core/debug-log.ts";
 
 export interface OmpSpawnResult {
 	content: { type: "text"; text: string }[];
@@ -147,7 +148,7 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 		// Phase timings land in the omp debug log; correlated against
 		// ui.loop-blocked entries when a review stalls the UI.
 		if (promptMs > 3000) {
-			console.warn(`safetynet: reviewer slow — boot=${bootMs}ms prompt=${promptMs}ms total=${Date.now() - reviewerT0}ms`);
+			debugLog(`safetynet: reviewer slow — boot=${bootMs}ms prompt=${promptMs}ms total=${Date.now() - reviewerT0}ms`);
 		}
 
 		// Extract final assistant text from the reviewer's OWN in-memory
