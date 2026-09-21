@@ -20,7 +20,7 @@ import questionnaire from "./questionnaire.ts";
 import { renderCustomFooter } from "./footer.ts";
 import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile, loadParadigm, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./core/global-config.ts";
 import { evaluatePermission } from "./core/permissions/ruleset.ts";
-import { runSubagent } from "./subagent.ts";
+import { runSubagent, isSubagentFailure } from "./subagent.ts";
 import {
   getBaselineRules,
   PermissionStorage,
@@ -180,6 +180,39 @@ let currentModelProvider: string = "";
 let currentModelSupportsReasoning: boolean = false;
 /** Current thinking level, updated via thinking_level_select events. */
 let currentThinkingLevel: string = "off";
+
+/**
+ * Tool calls whose subagent result should be reported to the model as an error.
+ *
+ * Keyed by toolCallId because that is the only identifier both the tool's
+ * `execute` and the `tool_result` event share, and it is unique per call, so
+ * concurrent subagents cannot collide. A side channel is required because
+ * `AgentToolResult` has no `isError` field and throwing would discard the
+ * result's content, details, and usage. Read and cleared by the tool_result
+ * handler; also cleared on agent_end so an unfinished call cannot leak.
+ */
+const subagentFailures = new Set<string>();
+
+/** Record a subagent call whose result should be reported as an error. */
+export function recordSubagentFailure(toolCallId: string): void {
+	subagentFailures.add(toolCallId);
+}
+
+/**
+ * Consume a recorded failure for this tool call, returning the `isError` patch.
+ * Returns undefined for calls never recorded as failures, so unrelated tools
+ * (and successful subagents) are untouched. Consuming — rather than peeking —
+ * keeps the set from growing and stops a verdict applying twice.
+ */
+export function consumeSubagentFailure(toolCallId: string): { isError: true } | undefined {
+	if (!subagentFailures.delete(toolCallId)) return undefined;
+	return { isError: true };
+}
+
+/** Drop any unconsumed failures (their tool_result never fired). */
+export function clearSubagentFailures(): void {
+	subagentFailures.clear();
+}
 
 /** Update the inferred-proposals badge widget (P2, never takes focus). */
 function updateInferredBadge(ctx: ExtensionContext): void {
@@ -796,7 +829,7 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 		renderResult: renderSubagentResult,
 		renderCall: (args, theme, context) => renderSubagentCall("Subagent Explore", args, theme, context),
 		...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const result = await runSubagent({
 				taskType: "explore",
 				prompt: params.prompt,
@@ -815,6 +848,7 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 				modeAliases: getModeAliases(),
 			});
 			// `result.usage` rides the toolResult entry, so pi counts delegated spend.
+			if (isSubagentFailure(result.details)) recordSubagentFailure(toolCallId);
 			return result;
 		},
 	});
@@ -832,7 +866,7 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 		renderResult: renderSubagentResult,
 		renderCall: (args, theme, context) => renderSubagentCall("Subagent Build", args, theme, context),
 		...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const result = await runSubagent({
 				taskType: "build",
 				prompt: params.prompt,
@@ -851,6 +885,7 @@ function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
 				modeAliases: getModeAliases(),
 			});
 			// `result.usage` rides the toolResult entry, so pi counts delegated spend.
+			if (isSubagentFailure(result.details)) recordSubagentFailure(toolCallId);
 			return result;
 		},
 	});
@@ -1095,8 +1130,15 @@ export default function safetynetExtension(api: ExtensionAPI) {
 
   pi.on("tool_call", handleToolCall);
 
+  // Report failed subagents as tool errors. pi has no isError on AgentToolResult — it
+  // only sets one when execute() throws, which would discard the partial output and
+  // usage — so the verdict is recorded by execute() and applied here. Scoped by
+  // toolCallId, so nothing else in the tool_result chain has to agree on a convention.
+  pi.on("tool_result", async (event) => consumeSubagentFailure(event.toolCallId));
+
   pi.on("agent_end", async (_event, ctx) => {
     storage.temp.clearTurnRules();
+    clearSubagentFailures();
     reviewBumpTurnToken();
     reviewResetDenies();
     hazardousDenyState.count = 0;

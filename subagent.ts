@@ -69,6 +69,31 @@ export function snapshotUsage(usage: Usage): Usage {
 	return { ...usage, cost: { ...usage.cost } };
 }
 
+/**
+ * Whether a subagent's result should be reported to the model as a tool error.
+ *
+ * `AgentToolResult` has no `isError` field — pi derives it solely from whether
+ * `execute()` throws — so a non-throwing tool always looks successful. We can't
+ * throw instead: the agent loop discards the whole result on throw, taking the
+ * partial findings and the `usage` we attach with it. So failures are flagged
+ * out-of-band and applied by a `tool_result` handler (see the safetynet extension).
+ *
+ * Matches pi's own convention, where a blocked tool call and a timed-out bash
+ * command are both errors. Anything short of the subagent doing its job counts:
+ * the parent should see a red result and re-plan, not a green one that happens to
+ * contain the word "Error". Partial output and details survive either way.
+ */
+export function isSubagentFailure(details: Record<string, unknown> | undefined): boolean {
+	if (!details) return false;
+	return Boolean(
+		details.error ||
+		details.aborted ||
+		details.hitPermissionDenied ||
+		details.hitTurnLimit ||
+		details.hitTimeout,
+	);
+}
+
 export interface SubagentOptions {
 	taskType: SubagentTaskType;
 	prompt: string;
@@ -266,6 +291,10 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	let turnCount = 0;
 	let hitTurnLimit = false;
 	let hitTimeout = false;
+	// Provider failures arrive as an assistant message with stopReason "error", not as a
+	// thrown exception, so `session.prompt()` resolves normally and this is the only
+	// signal. Captured here so the result can be reported as a tool error.
+	let modelError: string | undefined;
 	const activities: string[] = [];
 
 	const emitUpdate = () => {
@@ -294,6 +323,9 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 				if ((msg as any).stopReason === "error" && (msg as any).errorMessage && !fullText.trim()) {
 					fullText = `Error: ${(msg as any).errorMessage}`;
 					emitUpdate();
+				}
+				if ((msg as any).stopReason === "error" && (msg as any).errorMessage) {
+					modelError = String((msg as any).errorMessage);
 				}
 				// Capture text from the final message (thinking models may not emit text_delta)
 				if (!fullText.trim()) {
@@ -355,7 +387,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			: "Subagent completed with no output.";
 		return {
 			content: [{ type: "text", text: reason }],
-			details: { aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, taskType, activities },
+			details: { aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, taskType, activities, ...(modelError ? { error: modelError } : {}) },
 			usage: snapshotUsage(usage),
 		};
 	}
@@ -367,7 +399,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 
 	return {
 		content: [{ type: "text", text: fullText + suffix }],
-		details: { taskType, aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, turnCount, activities },
+		details: { taskType, aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, turnCount, activities, ...(modelError ? { error: modelError } : {}) },
 		usage: snapshotUsage(usage),
 	};
 }
