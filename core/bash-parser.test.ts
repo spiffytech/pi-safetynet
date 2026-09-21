@@ -43,6 +43,19 @@ describe("parseCommand", () => {
       assert.deepEqual(parseCommand("   ").subcommands, []);
     });
 
+    // Regression: @aliou/sh 0.3.x throws on tokens it flags as `Expected a
+    // command word` in far more cases than 0.2 did (a trailing `a()` inside
+    // an interpreter one-liner throws; 0.2 recovered the `a` word).  parse
+    // now runs with recoverErrors so the parseable prefix still classifies,
+    // matching the 0.2 behavior the inferred-rules corpus depends on.
+    it("recovers malformed inline code with parens/operators", () => {
+      assert.deepEqual(parseCommand("node -e a()").subcommands, ["node -e a"]);
+      assert.deepEqual(parseCommand("node --eval a()").subcommands, ["node --eval a"]);
+      assert.deepEqual(parseCommand("python -c a()").subcommands, ["python -c a"]);
+      // Literal operators inside quoted code are unaffected.
+      assert.deepEqual(parseCommand('node -e "a()"').subcommands, ["node -e a()"]);
+    });
+
     it("keeps placeholder for variable expansions in double quotes", () => {
       assert.ok(parseCommand('echo "$HOME"').subcommands[0]!.includes('"..."'));
     });
@@ -370,6 +383,30 @@ describe("parseCommand", () => {
       assert.ok(r.some((t) => t.path === "out.txt" && t.direction === "output"));
       assert.ok(r.some((t) => t.path === "err.txt" && t.direction === "output"));
     });
+
+    // Regression: @aliou/sh 0.3.1 moved redirects written after a compound
+    // command (fi/done/}/)/esac) from a phantom SimpleCommand onto the
+    // compound node.  Without explicit surfacing in walkCommands these
+    // vanish from parsed.redirects, silently dropping the file-permission
+    // check.  Each case below is a distinct compound node type.
+    const COMPOUND: [string, string, "input" | "output"][] = [
+      ["while read x; do echo $x; done < files", "files", "input"],
+      ["{ a; b; } > out", "out", "output"],
+      ["( a; b ) > out", "out", "output"],
+      ["for x in a b; do echo $x; done > out", "out", "output"],
+      ["case $x in a) echo a;; esac > out", "out", "output"],
+      ["f() { echo hi; } > out", "out", "output"],
+      ["if foo; then bar; fi < input", "input", "input"],
+    ];
+
+    for (const [input, path, direction] of COMPOUND) {
+      it(`keeps compound redirect: ${input}`, () => {
+        assert.ok(
+          parseCommand(input).redirects.some((t) => t.path === path && t.direction === direction),
+          `expected ${direction} redirect to ${path}`,
+        );
+      });
+    }
   });
 
   describe("catastrophic", () => {

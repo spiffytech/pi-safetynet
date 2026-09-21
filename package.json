@@ -13,7 +13,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@aliou/sh": "^0.2.0",
+    "@aliou/sh": "^0.3.3",
     "@earendil-works/pi-agent-core": "^0.86.1",
     "@earendil-works/pi-ai": "^0.86.1",
     "@earendil-works/pi-coding-agent": "^0.86.1",

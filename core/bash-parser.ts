@@ -5,6 +5,7 @@ import type {
 	ProcSubst,
 	WordPart,
 	Command,
+	Redirect,
 	TestClause as TestClauseType,
 	TestExpr,
 	Word,
@@ -138,7 +139,18 @@ function hasFindDangerousFlag(cmd: SimpleCommand): "exec" | "delete" | null {
 type SimpleCallback = (cmd: SimpleCommand) => boolean;
 type TestCallback = (expr: string, words: Word[]) => void;
 
-/** Flatten @aliou/sh 0.2's structured [[ ... ]] tree (UnaryTest / BinaryTest /
+/** A redirect carried by a compound command node (WhileClause, Block,
+ *  Subshell, ...) rather than by a SimpleCommand.
+ *
+ *  @aliou/sh 0.2 attached redirects written after `fi` / `done` / `}` / `)` /
+ *  `esac` to a phantom word-less SimpleCommand.  0.3.1 ("8ad6f38") attaches
+ *  them to the compound node instead, so walkCommands must surface them
+ *  explicitly or the read/write permission checks silently lose the target
+ *  (e.g. the `< files` in `while read x; do ...; done < files`).  This
+ *  callback lets walkCommands hand those redirects to the caller. */
+type CompoundRedirectCallback = (redirects: Redirect[]) => void;
+
+/** Flatten the structured [[ ... ]] tree (UnaryTest / BinaryTest /
  *  ParenTest / Word) into the flat Word list the rest of this module expects:
  *  e.g. "file1 -ef file2" or "-f package.json". Operands are emitted in
  *  source order so extractTestFilePaths() can pair them with their operators
@@ -164,7 +176,12 @@ function flattenTestExpr(node: TestExpr): Word[] {
 	return [];
 }
 
-function walkCommands(cmd: Command, onSimple: SimpleCallback, onTest?: TestCallback): void {
+function walkCommands(
+  cmd: Command,
+  onSimple: SimpleCallback,
+  onTest?: TestCallback,
+  onCompoundRedirects?: CompoundRedirectCallback,
+): void {
   switch (cmd.type) {
     case "SimpleCommand": {
       const recurse = onSimple(cmd);
@@ -177,56 +194,65 @@ function walkCommands(cmd: Command, onSimple: SimpleCallback, onTest?: TestCallb
       break;
     }
     case "Pipeline":
-      for (const s of cmd.commands) walkCommands(s.command, onSimple);
+      for (const s of cmd.commands) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
       break;
     case "Logical":
-      walkCommands(cmd.left.command, onSimple);
-      walkCommands(cmd.right.command, onSimple);
+      walkCommands(cmd.left.command, onSimple, onTest, onCompoundRedirects);
+      walkCommands(cmd.right.command, onSimple, onTest, onCompoundRedirects);
       break;
     case "Subshell":
     case "Block":
-      for (const s of cmd.body) walkCommands(s.command, onSimple);
+      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
+      for (const s of cmd.body) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
       break;
     case "IfClause":
-      for (const s of cmd.cond) walkCommands(s.command, onSimple);
-      for (const s of cmd.then) walkCommands(s.command, onSimple);
-      if (cmd.else) for (const s of cmd.else) walkCommands(s.command, onSimple);
+      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
+      for (const s of cmd.cond) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
+      for (const s of cmd.then) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
+      if (cmd.else) for (const s of cmd.else) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
       break;
     case "WhileClause":
-      for (const s of cmd.cond) walkCommands(s.command, onSimple);
-      for (const s of cmd.body) walkCommands(s.command, onSimple);
+      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
+      for (const s of cmd.cond) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
+      for (const s of cmd.body) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
       break;
     case "ForClause":
     case "SelectClause":
-      for (const s of cmd.body) walkCommands(s.command, onSimple);
+      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
+      for (const s of cmd.body) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
       break;
     case "FunctionDecl":
-      for (const s of cmd.body) walkCommands(s.command, onSimple);
+      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
+      for (const s of cmd.body) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
       break;
     case "CaseClause":
+      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
       for (const item of cmd.items) {
-        for (const s of item.body) walkCommands(s.command, onSimple);
+        for (const s of item.body) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
       }
       break;
     case "TimeClause":
-      walkCommands(cmd.command.command, onSimple);
+      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
+      walkCommands(cmd.command.command, onSimple, onTest, onCompoundRedirects);
       break;
     case "CoprocClause":
-      walkCommands(cmd.body.command, onSimple);
+      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
+      walkCommands(cmd.body.command, onSimple, onTest, onCompoundRedirects);
       break;
     case "DeclClause":
       if (cmd.assigns) {
         for (const a of cmd.assigns) {
-          if (a.value) walkWord(a.value, onSimple);
+          if (a.value) walkWord(a.value, onSimple, onTest, onCompoundRedirects);
         }
       }
       break;
-    // @aliou/sh 0.2 parses [[ ... ]] as a TestClause whose operands are a
+    // @aliou/sh parses [[ ... ]] as a TestClause whose operands are a
     // structured tree (UnaryTest / BinaryTest / ParenTest / Word) on `.x`,
     // rather than the flat `.expr: Word[]` of 0.1. Flatten it back to the
     // ordered Word list the rest of this module expects so it shows up as a
     // subcommand (e.g. "[[ -f package.json ]]") and file paths are extracted.
     case "TestClause": {
+      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
       if (onTest) {
         const tc = cmd as TestClauseType;
         const words = tc.x ? flattenTestExpr(tc.x) : [];
@@ -244,25 +270,35 @@ function walkCommands(cmd: Command, onSimple: SimpleCallback, onTest?: TestCallb
   }
 }
 
-function walkWordPart(part: WordPart, onSimple: SimpleCallback): void {
+function walkWordPart(
+  part: WordPart,
+  onSimple: SimpleCallback,
+  onTest?: TestCallback,
+  onCompoundRedirects?: CompoundRedirectCallback,
+): void {
   if (part.type === "CmdSubst") {
     for (const s of (part as CmdSubst).stmts) {
-      walkCommands(s.command, onSimple);
+      walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
     }
   } else if (part.type === "ProcSubst") {
     for (const s of (part as ProcSubst).stmts) {
-      walkCommands(s.command, onSimple);
+      walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
     }
   } else if (part.type === "DblQuoted") {
     for (const p of (part as { type: "DblQuoted"; parts: WordPart[] }).parts) {
-      walkWordPart(p, onSimple);
+      walkWordPart(p, onSimple, onTest, onCompoundRedirects);
     }
   }
 }
 
-function walkWord(w: Word, onSimple: SimpleCallback): void {
+function walkWord(
+  w: Word,
+  onSimple: SimpleCallback,
+  onTest?: TestCallback,
+  onCompoundRedirects?: CompoundRedirectCallback,
+): void {
   for (const p of w.parts ?? []) {
-    walkWordPart(p, onSimple);
+    walkWordPart(p, onSimple, onTest, onCompoundRedirects);
   }
 }
 
@@ -580,6 +616,28 @@ export interface RedirectTarget {
   direction: "input" | "output";
 }
 
+/** Classify a raw Redirect into a file-permission target, or null when it is
+ *  not a file open (heredocs/here-strings carry their content directly and
+ *  are surfaced as a `<< '...'` subcommand suffix instead). */
+function classifyRedirect(r: Redirect): RedirectTarget | null {
+  const target = wordToString(r.target);
+  if (!target) return null;
+  if (r.op === "<") return { path: target, direction: "input" };
+  if (r.op === ">" || r.op === ">>" || r.op === "&>" || r.op === "&>>" || r.op === ">|" || r.op === "<>") {
+    return { path: target, direction: "output" };
+  }
+  return null;
+}
+
+/** Append every file-open redirect in `rs` to `out` (heredocs skipped). */
+function collectRedirects(rs: Redirect[] | undefined, out: RedirectTarget[]): void {
+  if (!rs?.length) return;
+  for (const r of rs) {
+    const t = classifyRedirect(r);
+    if (t) out.push(t);
+  }
+}
+
 export interface ParsedCommand {
   subcommands: string[];
   /** Per-subcommand structured token lists.  Parallel to `subcommands`
@@ -599,10 +657,12 @@ export interface ParsedCommand {
 /**
  * Strip multi-line heredoc bodies from a command string.
  *
- * @aliou/sh throws when it encounters a heredoc body (the lines between
- * `<<DELIM` and the closing `DELIM`). By removing the body and keeping
- * only the opener line (which may also contain redirects and pipes), we
- * let the parser produce a valid AST that captures those constructs.
+ * @aliou/sh 0.2 threw when it encountered a heredoc body (the lines between
+ * `<<DELIM` and the closing `DELIM`); 0.3.x parses them natively. Retained as
+ * a fallback because odd heredoc/operator shapes can still throw. By removing
+ * the body and keeping only the opener line (which may also contain redirects
+ * and pipes), we let the parser produce a valid AST that captures those
+ * constructs.
  *
  * The opener line is preserved minus the `<<[-]?DELIM` token itself —
  * any trailing redirects (`> file`) or pipes (`| tee file`) remain.
@@ -737,25 +797,21 @@ export function parseCommand(command: string): ParsedCommand {
     // regular word token.
     command = quoteBraces(command);
 
-    const { ast } = parse(command);
+    // recoverErrors: 0.3.x made "Expected a command word" (and other
+    // 0.2-only rejections like `node -e a()` — `a()` is not valid bash, but
+    // tools like bash-parser must still classify a one-liner the user pasted)
+    // throw in far more cases.  Recovering yields the closest valid AST for
+    // the parseable prefix, which is exactly how these commands were parsed
+    // under 0.2.  The heredoc path already relied on this: a real heredoc
+    // body parses under recoverErrors instead of throwing.
+    const { ast } = parse(command, { recoverErrors: true });
     const acc: SubcommandAccum = { canonical: [], display: [], words: [] };
     const redirects: RedirectTarget[] = [];
     let catastrophic = false;
 
     for (const stmt of ast.body) {
       walkCommands(stmt.command, (cmd) => {
-        if (cmd.redirects?.length) {
-          for (const r of cmd.redirects) {
-            const target = wordToString(r.target);
-            if (!target) continue;
-            if (r.op === "<") {
-              redirects.push({ path: target, direction: "input" });
-            } else if (r.op === ">" || r.op === ">>" || r.op === "&>" || r.op === "&>>" || r.op === ">|" || r.op === "<>") {
-              redirects.push({ path: target, direction: "output" });
-            }
-            // <<< / << / <<- are handled via appendRedirectSuffix below
-          }
-        }
+        collectRedirects(cmd.redirects, redirects);
 
         const name = wordToString(cmd.words?.[0] as Word);
         if (!name) return false;
@@ -831,7 +887,7 @@ export function parseCommand(command: string): ParsedCommand {
         for (const p of extractTestFilePaths(wordStrs)) {
           redirects.push({ path: p, direction: "input" });
         }
-      });
+      }, (rs) => collectRedirects(rs, redirects));
     }
 
     dedupParallel(acc);
@@ -848,25 +904,14 @@ export function parseCommand(command: string): ParsedCommand {
     // and retry so the AST captures redirects and pipelines.
     const stripped = stripHeredocBodies(command);
     try {
-      const { ast } = parse(stripped);
+      const { ast } = parse(stripped, { recoverErrors: true });
       const acc: SubcommandAccum = { canonical: [], display: [], words: [] };
       const redirects: RedirectTarget[] = [];
       let catastrophic = false;
 
       for (const stmt of ast.body) {
         walkCommands(stmt.command, (cmd) => {
-          if (cmd.redirects?.length) {
-            for (const r of cmd.redirects) {
-              const target = wordToString(r.target);
-              if (!target) continue;
-              if (r.op === "<") {
-                redirects.push({ path: target, direction: "input" });
-              } else if (r.op === ">" || r.op === ">>" || r.op === "&>" || r.op === "&>>" || r.op === ">|" || r.op === "<>") {
-                redirects.push({ path: target, direction: "output" });
-              }
-              // <<< / << / <<- handled via appendRedirectSuffix below
-            }
-          }
+          collectRedirects(cmd.redirects, redirects);
 
           const name = wordToString(cmd.words?.[0] as Word);
           if (!name) return false;
@@ -930,7 +975,7 @@ export function parseCommand(command: string): ParsedCommand {
           for (const p of extractTestFilePaths(wordStrs)) {
             redirects.push({ path: p, direction: "input" });
           }
-        });
+        }, (rs) => collectRedirects(rs, redirects));
       }
 
       dedupParallel(acc);
