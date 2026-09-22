@@ -142,12 +142,10 @@ type TestCallback = (expr: string, words: Word[]) => void;
 /** A redirect carried by a compound command node (WhileClause, Block,
  *  Subshell, ...) rather than by a SimpleCommand.
  *
- *  @aliou/sh 0.2 attached redirects written after `fi` / `done` / `}` / `)` /
- *  `esac` to a phantom word-less SimpleCommand.  0.3.1 ("8ad6f38") attaches
- *  them to the compound node instead, so walkCommands must surface them
- *  explicitly or the read/write permission checks silently lose the target
- *  (e.g. the `< files` in `while read x; do ...; done < files`).  This
- *  callback lets walkCommands hand those redirects to the caller. */
+ *  walkCommands must surface these explicitly or the read/write permission
+ *  checks silently lose the target (e.g. the `< files` in
+ *  `while read x; do ...; done < files`).  This callback hands those
+ *  redirects to the caller. */
 type CompoundRedirectCallback = (redirects: Redirect[]) => void;
 
 /** Flatten the structured [[ ... ]] tree (UnaryTest / BinaryTest /
@@ -302,53 +300,6 @@ function walkWord(
   }
 }
 
-/** Replace standalone {} tokens (not inside quotes) with "{}" so that
- *  @aliou/sh doesn't misparse them as empty brace groups.
- *  A character-by-character walk tracks quote state to avoid modifying
- *  {} that appears inside single- or double-quoted strings.
- */
-function quoteBraces(cmd: string): string {
-  let result = "";
-  let inSingleQuote = false;
-  let inDoubleQuote = false;
-  let i = 0;
-
-  while (i < cmd.length) {
-    const ch = cmd[i]!;
-
-    if (ch === "'" && !inDoubleQuote) {
-      inSingleQuote = !inSingleQuote;
-      result += ch;
-      i++;
-    } else if (ch === '"' && !inSingleQuote) {
-      inDoubleQuote = !inDoubleQuote;
-      result += ch;
-      i++;
-    } else if (
-      ch === "{" && !inSingleQuote && !inDoubleQuote
-      && i + 1 < cmd.length && cmd[i + 1] === "}"
-    ) {
-      // Check that {} is a standalone token (bounded by whitespace or string
-      // boundaries).  This avoids replacing {} inside -I{} or similar.
-      const prevOk = i === 0 || /\s/.test(cmd[i - 1]!);
-      const nextIdx = i + 2;
-      const nextOk = nextIdx >= cmd.length || /\s/.test(cmd[nextIdx]!);
-      if (prevOk && nextOk) {
-        result += '"{}"';
-        i += 2;
-      } else {
-        result += ch;
-        i++;
-      }
-    } else {
-      result += ch;
-      i++;
-    }
-  }
-
-  return result;
-}
-
 const PROTECTED_DIRS = new Set(
   "/ /usr /usr/local /usr/bin /usr/lib /usr/sbin /usr/share /etc /var /bin /sbin /lib /lib64 /boot /sys /proc /dev /root /opt /home /srv /snap /tmp".split(" "),
 );
@@ -497,7 +448,6 @@ function wordsToDisplayString(words: Word[]): string {
 function appendRedirectSuffix(
   subcommand: string,
   redirects: Array<{ op: string; target: Word }> | undefined,
-  hasHeredoc: boolean,
 ): string {
   let suffix = "";
   if (redirects) {
@@ -508,11 +458,6 @@ function appendRedirectSuffix(
         suffix += " << '...'";
       }
     }
-  }
-  // When the heredoc fallback path (stripHeredocBodies) was used,
-  // the << redirect is no longer in the AST, but we know one existed.
-  if (hasHeredoc && !suffix.includes("<<")) {
-    suffix += " << '...'";
   }
   return suffix ? subcommand + suffix : subcommand;
 }
@@ -650,85 +595,6 @@ export interface ParsedCommand {
   displaySubcommands: string[];
   redirects: RedirectTarget[];
   catastrophic: boolean;
-  /** True when the command uses heredoc (<<) or here-string (<<<). */
-  hasHeredoc: boolean;
-}
-
-/**
- * Strip multi-line heredoc bodies from a command string.
- *
- * @aliou/sh 0.2 threw when it encountered a heredoc body (the lines between
- * `<<DELIM` and the closing `DELIM`); 0.3.x parses them natively. Retained as
- * a fallback because odd heredoc/operator shapes can still throw. By removing
- * the body and keeping only the opener line (which may also contain redirects
- * and pipes), we let the parser produce a valid AST that captures those
- * constructs.
- *
- * The opener line is preserved minus the `<<[-]?DELIM` token itself —
- * any trailing redirects (`> file`) or pipes (`| tee file`) remain.
- *
- * Here-strings (`<<<`) are left untouched; the parser handles them natively.
- * Uses plain string scanning — no regex.
- */
-function stripHeredocBodies(command: string): string {
-  const lines = command.split("\n");
-  const result: string[] = [];
-  let skipping = false;
-  let delim: string | null = null;
-
-  for (const line of lines) {
-    if (skipping) {
-      // The closing delimiter appears alone on a line (possibly with
-      // leading whitespace for <<- heredocs).
-      if (line.trim() === delim) {
-        skipping = false;
-        delim = null;
-      }
-      continue;
-    }
-
-    // Look for heredoc opener: << or <<- followed by a delimiter word.
-    // Skip here-strings (<<<).
-    const heredocIdx = line.indexOf("<<");
-    if (
-      heredocIdx >= 0
-      && !(heredocIdx + 2 < line.length && line[heredocIdx + 2] === "<") // not <<<
-    ) {
-      // Extract the delimiter word after << or <<-
-      let rest = line.slice(heredocIdx + 2); // after "<<"
-      if (rest.startsWith("-")) rest = rest.slice(1); // skip <<- dash
-      rest = rest.trimStart();
-      // Strip optional quotes around the delimiter
-      if (rest.startsWith('"') || rest.startsWith("'")) {
-        const quote = rest[0]!;
-        const closeIdx = rest.indexOf(quote, 1);
-        if (closeIdx > 0) {
-          delim = rest.slice(1, closeIdx);
-        } else {
-          delim = rest.slice(1).trim(); // unclosed quote — best effort
-        }
-      } else {
-        // Delimiter is the next whitespace-delimited word
-        const spaceIdx = rest.search(/\s/);
-        delim = spaceIdx >= 0 ? rest.slice(0, spaceIdx) : rest;
-      }
-
-      if (delim) {
-        // Remove the <<[-]?DELIM token, keep the rest of the line
-        // (redirects, pipes, etc.)
-        const tokenEnd = line.indexOf(delim, heredocIdx) + delim.length;
-        const afterToken = line.slice(tokenEnd);
-        const opener = line.slice(0, heredocIdx) + afterToken;
-        result.push(opener);
-        skipping = true;
-        continue;
-      }
-    }
-
-    result.push(line);
-  }
-
-  return result.join("\n");
 }
 
 /** Mutable accumulator for the three parallel per-subcommand arrays. */
@@ -749,10 +615,9 @@ function pushSubcommand(
   display: string,
   wordList: Word[],
   redirects: Array<{ op: string; target: Word }> | undefined,
-  hasHeredoc: boolean,
 ): void {
-  acc.canonical.push(appendRedirectSuffix(canonical, redirects, hasHeredoc));
-  acc.display.push(appendRedirectSuffix(display, redirects, hasHeredoc));
+  acc.canonical.push(appendRedirectSuffix(canonical, redirects));
+  acc.display.push(appendRedirectSuffix(display, redirects));
   acc.words.push(wordList);
 }
 
@@ -780,30 +645,9 @@ function dedupParallel(acc: SubcommandAccum): void {
 
 export function parseCommand(command: string): ParsedCommand {
   try {
-    // @aliou/sh misparses \( and \) as subshell boundaries, but in bash these
-    // are escaped parens (literal characters). This is common in `find`
-    // expression grouping: find . \( -name "*.ts" -o -name "*.js" \).
-    // Replace standalone \( \) with equivalent double-quoted parens
-    // before parsing so the parser keeps them as regular word tokens.
-    command = command
-      .replace(/(?<=^|\s)\\\((?=\s|$)/g, '"("')
-      .replace(/(?<=^|\s)\\\)(?=\s|$)/g, '")"');
-
-    // @aliou/sh also misparses standalone {} as an empty brace group (Block),
-    // but in the context of xargs and find -exec, {} is a placeholder token.
-    // An empty brace group { } is actually a syntax error in bash, so a
-    // standalone {} can never be a real brace group.  Replace it with a
-    // double-quoted version before parsing so the parser keeps it as a
-    // regular word token.
-    command = quoteBraces(command);
-
-    // recoverErrors: 0.3.x made "Expected a command word" (and other
-    // 0.2-only rejections like `node -e a()` — `a()` is not valid bash, but
-    // tools like bash-parser must still classify a one-liner the user pasted)
-    // throw in far more cases.  Recovering yields the closest valid AST for
-    // the parseable prefix, which is exactly how these commands were parsed
-    // under 0.2.  The heredoc path already relied on this: a real heredoc
-    // body parses under recoverErrors instead of throwing.
+    // recoverErrors keeps malformed-but-common input (e.g. `node -e "a()"`,
+    // which is not valid bash but is a one-liner users paste) from throwing;
+    // the parser returns the closest valid AST for the parseable prefix.
     const { ast } = parse(command, { recoverErrors: true });
     const acc: SubcommandAccum = { canonical: [], display: [], words: [] };
     const redirects: RedirectTarget[] = [];
@@ -819,11 +663,11 @@ export function parseCommand(command: string): ParsedCommand {
         if (name === "find") {
           const dangerous = hasFindDangerousFlag(cmd);
           if (dangerous === "exec") {
-            pushSubcommand(acc, "find:exec", "find:exec", [], cmd.redirects, false);
+            pushSubcommand(acc, "find:exec", "find:exec", [], cmd.redirects);
             return true;
           }
           if (dangerous === "delete") {
-            pushSubcommand(acc, "find:delete", "find:delete", [], cmd.redirects, false);
+            pushSubcommand(acc, "find:delete", "find:delete", [], cmd.redirects);
             return false;
           }
         }
@@ -844,11 +688,11 @@ export function parseCommand(command: string): ParsedCommand {
             isTimeoutDuration(wordToString(words[effectiveIdx + 1] as Word))) {
           const prefixWords = words.slice(0, effectiveIdx); // e.g. [sudo ...]
           const wrapperWords = [...prefixWords, words[effectiveIdx]!, words[effectiveIdx + 1]!];
-          pushSubcommand(acc, wordsToString(wrapperWords), wordsToDisplayString(wrapperWords), wrapperWords, cmd.redirects, false);
+          pushSubcommand(acc, wordsToString(wrapperWords), wordsToDisplayString(wrapperWords), wrapperWords, cmd.redirects);
           const innerWords = words.slice(effectiveIdx + 2);
           if (innerWords.length) {
             const allInner = [...prefixWords, ...innerWords];
-            pushSubcommand(acc, wordsToString(allInner), wordsToDisplayString(allInner), allInner, cmd.redirects, false);
+            pushSubcommand(acc, wordsToString(allInner), wordsToDisplayString(allInner), allInner, cmd.redirects);
           }
         } else if (effective === "xargs") {
           // findEffectiveCommandIdx already skipped any sudo prefix
@@ -857,13 +701,13 @@ export function parseCommand(command: string): ParsedCommand {
           const innerWords = words.slice(innerStart);
           const allWords = [...prefixWords, ...innerWords];
           if (allWords.length) {
-            pushSubcommand(acc, wordsToString(allWords), wordsToDisplayString(allWords), allWords, cmd.redirects, false);
+            pushSubcommand(acc, wordsToString(allWords), wordsToDisplayString(allWords), allWords, cmd.redirects);
           } else {
             // xargs with no command defaults to echo
-            pushSubcommand(acc, "echo", "echo", [], cmd.redirects, false);
+            pushSubcommand(acc, "echo", "echo", [], cmd.redirects);
           }
         } else {
-          pushSubcommand(acc, commandToString(cmd), commandToDisplayString(cmd), words, cmd.redirects, false);
+          pushSubcommand(acc, commandToString(cmd), commandToDisplayString(cmd), words, cmd.redirects);
         }
 
         // [ (test) and [[ check file existence/properties, which
@@ -881,7 +725,7 @@ export function parseCommand(command: string): ParsedCommand {
         // Reconstruct the display form of the [[ ... ]] expression from
         // the raw words so quoted operands keep their quotes.
         const displayExpr = `[[ ${wordsToDisplayString(words)} ]]`;
-        pushSubcommand(acc, expr, displayExpr, words, undefined, false);
+        pushSubcommand(acc, expr, displayExpr, words, undefined);
         // Same file-read extraction for [[ TestClause nodes
         const wordStrs = words.map((w) => wordToString(w)).filter((s: string | null): s is string => s !== null);
         for (const p of extractTestFilePaths(wordStrs)) {
@@ -897,107 +741,19 @@ export function parseCommand(command: string): ParsedCommand {
       displaySubcommands: acc.display,
       redirects,
       catastrophic,
-      hasHeredoc: false,
     };
   } catch {
-    // Parser threw, likely due to a heredoc body.  Strip heredoc bodies
-    // and retry so the AST captures redirects and pipelines.
-    const stripped = stripHeredocBodies(command);
-    try {
-      const { ast } = parse(stripped, { recoverErrors: true });
-      const acc: SubcommandAccum = { canonical: [], display: [], words: [] };
-      const redirects: RedirectTarget[] = [];
-      let catastrophic = false;
-
-      for (const stmt of ast.body) {
-        walkCommands(stmt.command, (cmd) => {
-          collectRedirects(cmd.redirects, redirects);
-
-          const name = wordToString(cmd.words?.[0] as Word);
-          if (!name) return false;
-
-          if (name === "find") {
-            const dangerous = hasFindDangerousFlag(cmd);
-            if (dangerous === "exec") {
-              pushSubcommand(acc, "find:exec", "find:exec", [], cmd.redirects, true);
-              return true;
-            }
-            if (dangerous === "delete") {
-              pushSubcommand(acc, "find:delete", "find:delete", [], cmd.redirects, true);
-              return false;
-            }
-          }
-
-          if (isNodeCatastrophic(cmd)) catastrophic = true;
-
-          // Strip wrappers (timeout DURATION, xargs + flags) so permissions
-          // are checked against the inner command. sudo prefix is kept.
-          const words = cmd.words ?? [];
-          const effectiveIdx = findEffectiveCommandIdx(words);
-          const effective = wordToString(words[effectiveIdx] as Word);
-
-          if (effective === "timeout" &&
-              isTimeoutDuration(wordToString(words[effectiveIdx + 1] as Word))) {
-            const prefixWords = words.slice(0, effectiveIdx);
-            const wrapperWords = [...prefixWords, words[effectiveIdx]!, words[effectiveIdx + 1]!];
-            pushSubcommand(acc, wordsToString(wrapperWords), wordsToDisplayString(wrapperWords), wrapperWords, cmd.redirects, true);
-            const innerWords = words.slice(effectiveIdx + 2);
-            if (innerWords.length) {
-              const allInner = [...prefixWords, ...innerWords];
-              pushSubcommand(acc, wordsToString(allInner), wordsToDisplayString(allInner), allInner, cmd.redirects, true);
-            }
-          } else if (effective === "xargs") {
-            const innerStart = skipXargsFlags(words, effectiveIdx + 1);
-            const prefixWords = words.slice(0, effectiveIdx);
-            const innerWords = words.slice(innerStart);
-            const allWords = [...prefixWords, ...innerWords];
-            if (allWords.length) {
-              pushSubcommand(acc, wordsToString(allWords), wordsToDisplayString(allWords), allWords, cmd.redirects, true);
-            } else {
-              pushSubcommand(acc, "echo", "echo", [], cmd.redirects, true);
-            }
-          } else {
-            pushSubcommand(acc, commandToString(cmd), commandToDisplayString(cmd), words, cmd.redirects, true);
-          }
-
-          if (name === "[" || name === "[[") {
-            const wordStrs = (cmd.words ?? []).map((w: Word) => wordToString(w)).filter((s: string | null): s is string => s !== null);
-            for (const p of extractTestFilePaths(wordStrs)) {
-              redirects.push({ path: p, direction: "input" });
-            }
-          }
-
-          return true;
-        }, (expr, words) => {
-          const displayExpr = `[[ ${wordsToDisplayString(words)} ]]`;
-          pushSubcommand(acc, expr, displayExpr, words, undefined, true);
-          const wordStrs = words.map((w) => wordToString(w)).filter((s: string | null): s is string => s !== null);
-          for (const p of extractTestFilePaths(wordStrs)) {
-            redirects.push({ path: p, direction: "input" });
-          }
-        }, (rs) => collectRedirects(rs, redirects));
-      }
-
-      dedupParallel(acc);
-      return {
-        subcommands: acc.canonical,
-        subcommandWords: acc.words,
-        displaySubcommands: acc.display,
-        redirects,
-        catastrophic,
-        hasHeredoc: true,
-      };
-    } catch {
-      const first = command.trim().split(/\s+/)[0] ?? "";
-      return {
-        subcommands: first ? [first] : [],
-        subcommandWords: [],
-        displaySubcommands: first ? [first] : [],
-        redirects: [],
-        catastrophic: first ? SYSTEM_HALT_COMMANDS.has(first) : false,
-        hasHeredoc: true,
-      };
-    }
+    // Unreachable for realistic input (recoverErrors is error-tolerant); kept
+    // as a last resort so a parser bug degrades to a first-token guess rather
+    // than throwing from inside a permission check.
+    const first = command.trim().split(/\s+/)[0] ?? "";
+    return {
+      subcommands: first ? [first] : [],
+      subcommandWords: [],
+      displaySubcommands: first ? [first] : [],
+      redirects: [],
+      catastrophic: first ? SYSTEM_HALT_COMMANDS.has(first) : false,
+    };
   }
 }
 
@@ -1066,14 +822,12 @@ export function isEditLikeBashCommand(
   command: string,
   parsed: ParsedCommand,
 ): boolean {
-  // 1. Any output redirect detected by the parser or the heredoc fallback
+  // 1. Any output redirect detected by the parser
   //    (excluding redirects to safe device files like /dev/null)
   if (parsed.redirects.some((r) => r.direction === "output" && !SAFE_DEVICE_FILES.has(r.path))) return true;
 
-  // 2. Heredoc / here-string with redirect or pipe in raw command
-  //    (handled by parseCommand()'s heredoc fallback, which populates
-  //    parsed.redirects and parsed.subcommands — checked by #1 and #4 above)
-  //    No separate regex scan needed here.
+  // 2. Heredoc / here-string content is collapsed to a `<< '...'` subcommand
+  //    suffix by parseCommand(); no separate scan needed here.
 
   // 3–5. Token-aware checks over the structured word lists.  Operating on
   //    tokens (not the joined canonical string) means a quoted literal like

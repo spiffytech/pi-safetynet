@@ -43,11 +43,9 @@ describe("parseCommand", () => {
       assert.deepEqual(parseCommand("   ").subcommands, []);
     });
 
-    // Regression: @aliou/sh 0.3.x throws on tokens it flags as `Expected a
-    // command word` in far more cases than 0.2 did (a trailing `a()` inside
-    // an interpreter one-liner throws; 0.2 recovered the `a` word).  parse
-    // now runs with recoverErrors so the parseable prefix still classifies,
-    // matching the 0.2 behavior the inferred-rules corpus depends on.
+    // Regression: the parser rejects tokens it flags as `Expected a command
+    // word` (a trailing `a()` inside an interpreter one-liner). parse runs
+    // with recoverErrors so the parseable prefix still classifies.
     it("recovers malformed inline code with parens/operators", () => {
       assert.deepEqual(parseCommand("node -e a()").subcommands, ["node -e a"]);
       assert.deepEqual(parseCommand("node --eval a()").subcommands, ["node --eval a"]);
@@ -314,13 +312,13 @@ describe("parseCommand", () => {
       assert.equal(r.subcommands[0], "bun -e <<< '...'");
     });
 
-    it("appends << '...' for heredoc redirects (fallback path)", () => {
+    it("appends << '...' for heredoc redirects", () => {
       const r = parseCommand("cat <<EOF > file.txt\nhello\nEOF");
       assert.equal(r.subcommands.length, 1);
       assert.ok(r.subcommands[0]!.includes("<< '...'"));
     });
 
-    it("still detects output redirects in heredoc fallback", () => {
+    it("detects output redirects alongside a heredoc", () => {
       const r = parseCommand("cat <<EOF > file.txt\nhello\nEOF");
       assert.ok(r.redirects.some((t) => t.path === "file.txt" && t.direction === "output"));
     });
