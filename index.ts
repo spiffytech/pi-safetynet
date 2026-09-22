@@ -51,12 +51,12 @@ import {
 import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./core/check.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, strikeDeny, type HazardousDenyState } from "./pipeline.ts";
-import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled, loadAutoApproveConfig } from "./core/auto-config-state.ts";
+import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./core/auto-config-state.ts";
 import { InferredEngine } from "./core/inferred/engine.ts";
 import { uiArbiter } from "./core/ui-arbiter.ts";
-import { JUDGE_SYSTEM_PROMPT } from "./core/inferred/judge.ts";
+import { createJudgeAsk } from "./core/inferred/judge-adapter.ts";
 import { loadLearnedBoundaries } from "./core/inferred/learned.ts";
-import { reviewBumpTurnToken, reviewResetDenies, resolveModelSpec } from "./core/reviewer-state.ts";
+import { reviewBumpTurnToken, reviewResetDenies } from "./core/reviewer-state.ts";
 /** Re-exported pure seams for test compatibility. */
 export const headlessDeny = hd;
 export const denyResultFromPrompt = drfp;
@@ -100,32 +100,15 @@ async function resolvePermission(
   );
 }
 
-/** Bind the inferred engine to the live session context (judge adapter on
- *  runSubagent, suppression predicate, UI hooks). Cheap per call. */
+/** Bind the inferred engine to the live session context (judge adapter,
+ *  suppression predicate, UI hooks). Cheap per call. */
 function wireInferred(ctx: ExtensionContext): InferredEngine {
 	const engine = inferredEngine!; // caller guards
-	engine.judgeDeps = {
-		ask: (prompt: string) => {
-			// Judge uses the same autoApprove.model key as the reviewer (plan
-			// decision #13), resolved against the parent catalog; degrades to the
-			// session model when unset or unresolvable.
-			const spec = loadAutoApproveConfig().model;
-			const first = Array.isArray(spec) ? spec[0] : spec;
-			return runSubagent({
-				taskType: "explore",
-				prompt,
-				systemPrompt: JUDGE_SYSTEM_PROMPT,
-				cwd: ctx.cwd,
-				parentCtx: ctx,
-				parentStorage: storage,
-				initialRules: [],
-				promptKeybindings: promptKeybindings,
-				autoDenyConfig: autoDenyConfig,
-				timeoutMs: 30_000,
-				...(first ? { model: resolveModelSpec(ctx, first, "judge") ?? ctx.model } : {}),
-			}).then((r) => r.content.map((c) => c.text).join("\n"));
-		},
-	};
+	// Judge uses the same autoApprove.model key as the reviewer (plan
+	// decision #13), resolved against the parent catalog; degrades to the
+	// session model when unset or unresolvable. One scoped model call through
+	// the parent registry — no subagent session, no transcript.
+	engine.judgeDeps = { ask: createJudgeAsk(ctx) };
 	engine.suppressIfAllowed = (exemplar: string) =>
 		evaluatePermission(
 			"bash",
@@ -1146,13 +1129,14 @@ export default function safetynetExtension(api: ExtensionAPI) {
   });
 
   // Mode messaging: per-turn mode-specific stanza in the system prompt.
-  // The active-mode stanza is appended on every agent start (matching the
-  // current profile), so after a mode switch the next turn's prompt already
-  // reflects the new mode; durable reminders carry the switch itself.
+  // Written as a structured prompt section rather than a full-prompt
+  // replacement: Pi diffs sections and appends only the change, so the mode
+  // stanza is re-emitted when the profile switches but the cached prompt
+  // prefix survives stable turns. Durable reminders carry the switch itself.
   pi.on("before_agent_start", async (event, ctx) => {
     // Clear stale plan widget from a previous turn
     ctx.ui.setWidget("plan", undefined);
-    return { systemPrompt: `${event.systemPrompt}\n\n${getModeSystemPrompt(getCurrentProfile())}` };
+    event.systemPromptOptions.sections["safetynet_mode"] = getModeSystemPrompt(getCurrentProfile());
   });
 
   // Compaction purges history; re-append the current-mode reminder

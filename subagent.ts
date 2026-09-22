@@ -295,6 +295,25 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	// thrown exception, so `session.prompt()` resolves normally and this is the only
 	// signal. Captured here so the result can be reported as a tool error.
 	let modelError: string | undefined;
+
+	// Turn cap: end the run gracefully after MAX_TURNS completed turns. Replaces the
+	// old turn_end abort, which cut the model off mid-batch. `finishTurn` runs after
+	// the assistant message and tool results are finalized, before `turn_end`;
+	// returning `{ action: "end" }` lets the partial output and usage settle.
+	//
+	// AgentSession installs its own finishTurn wrapper at construction (to dispatch
+	// `turn_end` extension boundaries), so we must wrap and delegate rather than
+	// replace it.
+	const priorFinishTurn = session.agent.finishTurn;
+	session.agent.finishTurn = async (turn, signal) => {
+		turnCount++;
+		if (turnCount >= MAX_TURNS) {
+			hitTurnLimit = true;
+			return { action: "end" };
+		}
+		// Normalize the prior hook's `void` return to `undefined` for FinishTurn.
+		return (await priorFinishTurn?.(turn, signal)) as { action: "continue" | "end" } | undefined;
+	};
 	const activities: string[] = [];
 
 	const emitUpdate = () => {
@@ -340,13 +359,6 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 					accumulateUsage(usage, msg.usage);
 					emitUpdate();
 				}
-			}
-		}
-		if (event.type === "turn_end") {
-			turnCount++;
-			if (turnCount >= MAX_TURNS) {
-				hitTurnLimit = true;
-				session.abort();
 			}
 		}
 	});
