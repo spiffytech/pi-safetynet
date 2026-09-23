@@ -53,10 +53,12 @@ import { JUDGE_SYSTEM_PROMPT } from "./core/inferred/judge.ts";
 import { evaluatePermission } from "./core/permissions/ruleset.ts";
 import { spawnReviewer } from "./omp-subagent.ts";
 import { reviewerSpawnModelOpts } from "./omp-pipeline.ts";
+import { initBashParser } from "./core/bash-parser.ts";
 
 const SESSION_RULES_CUSTOM_TYPE = "safetynet:session-rules";
 
-export default function safetynetOmp(pi: ExtensionAPI) {
+export default async function safetynetOmp(pi: ExtensionAPI) {
+	await initBashParser();
 	pi.setLabel("safetynet");
 
 	let storage: PermissionStorage | undefined;

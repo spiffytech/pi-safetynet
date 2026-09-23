@@ -382,11 +382,11 @@ describe("parseCommand", () => {
       assert.ok(r.some((t) => t.path === "err.txt" && t.direction === "output"));
     });
 
-    // Regression: @aliou/sh 0.3.1 moved redirects written after a compound
-    // command (fi/done/}/)/esac) from a phantom SimpleCommand onto the
-    // compound node.  Without explicit surfacing in walkCommands these
-    // vanish from parsed.redirects, silently dropping the file-permission
-    // check.  Each case below is a distinct compound node type.
+    // Regression: redirects written after a compound command (fi/done/}/)/esac)
+    // attach to the compound node rather than a SimpleCommand/command.  Without
+    // explicit surfacing in the walker these vanish from parsed.redirects,
+    // silently dropping the file-permission check.  Each case below is a
+    // distinct compound node type.
     const COMPOUND: [string, string, "input" | "output"][] = [
       ["while read x; do echo $x; done < files", "files", "input"],
       ["{ a; b; } > out", "out", "output"],
@@ -619,6 +619,99 @@ describe("isEditLikeBashCommand", () => {
         assert.equal(isEditLike(cmd), false);
       });
     }
+  });
+});
+
+describe("tree-sitter port regressions", () => {
+  it("treats env-assignment prefixes as the effective command (catastrophic)", () => {
+    assert.equal(parseCommand("A=1 rm -rf /etc").catastrophic, true);
+    assert.equal(parseCommand("FOO=bar chmod 777 /usr").catastrophic, true);
+  });
+
+  it("keeps the effective command first after an env-assignment prefix", () => {
+    assert.deepEqual(parseCommand("A=1 echo hi").subcommands, ["echo hi"]);
+    assert.equal(parseCommand("A=1 echo hi").subcommandWords[0]![0], "echo");
+  });
+
+  it("detects edit-like commands behind env-assignment prefixes", () => {
+    assert.equal(isEditLikeBashCommand("FOO=bar sed -i f", parseCommand("FOO=bar sed -i f")), true);
+    assert.equal(isEditLikeBashCommand("FOO=bar node -e x", parseCommand("FOO=bar node -e x")), true);
+    assert.equal(isEditLikeBashCommand("FOO=x tee f", parseCommand("FOO=x tee f")), true);
+  });
+
+  it("does not strip backslashes before ordinary chars in double quotes", () => {
+    assert.deepEqual(parseCommand('echo "a\\qb"').subcommands, ["echo a\\qb"]);
+  });
+
+  it("still unescapes double-quoted $ and quotes", () => {
+    assert.equal(parseCommand('echo "\\$HOME"').subcommands[0], "echo $HOME");
+    assert.equal(parseCommand('echo "a\\"b"').subcommands[0], 'echo a"b');
+  });
+
+  it("keeps the here-string placeholder when a file redirect wraps the command", () => {
+    assert.ok(parseCommand("cat <<< x > out").subcommands[0]!.includes("<<< '...'"));
+  });
+
+  it("keeps per-token subcommandWords for [ and [[ tests", () => {
+    assert.deepEqual(parseCommand("[ -f package.json ]").subcommandWords[0], ["[", "-f", "package.json", "]"]);
+    assert.deepEqual(parseCommand("[[ -f package.json ]]").subcommandWords[0], ["[[", "-f", "package.json", "]]"]);
+  });
+
+  it("reports parseFailed:false for ordinary commands", () => {
+    assert.equal(parseCommand("ls -la").parseFailed, false);
+  });
+});
+
+describe("dangerous-command hardening", () => {
+  const BLOCKED = [
+    "env rm -rf /",
+    "nice rm -rf /etc",
+    "nohup chmod -R 777 /",
+    "command rm -rf /",
+    "setsid rm -rf /",
+    "stdbuf -oL rm -rf /",
+    "rm -rf /usr/",
+    "rm -rf //usr",
+    "rm -rf /usr/../etc",
+    "rm -rf /var/*",
+    "xargs --max-args 2 rm -rf /etc",
+  ];
+  for (const cmd of BLOCKED) {
+    it(`blocks ${cmd}`, () => assert.equal(parseCommand(cmd).catastrophic, true));
+  }
+
+  it("does not over-block a glob inside a user dir", () => {
+    assert.equal(parseCommand("rm -rf /home/user/project/build/*").catastrophic, false);
+  });
+
+  it("treats find -ok/-okdir as destructive exec", () => {
+    assert.ok(parseCommand("find . -ok rm {} \\;").subcommands.includes("find:exec"));
+    assert.ok(parseCommand("find . -okdir rm {} \\;").subcommands.includes("find:exec"));
+  });
+
+  const EDIT_LIKE = [
+    "sed -Ei s/a/b/ f",
+    "sed -ni p f",
+    "sed --in-place=.bak s/a/b/ f",
+    "perl -pie s/a/b/ f",
+    "perl -i -e s/a/b/ f",
+  ];
+  for (const cmd of EDIT_LIKE) {
+    it(`edit-like: ${cmd}`, () => assert.equal(isEditLikeBashCommand(cmd, parseCommand(cmd)), true));
+  }
+
+  it("does not treat a sed -e script as a flag", () => {
+    assert.equal(isEditLikeBashCommand("sed -es/i/x/ f", parseCommand("sed -es/i/x/ f")), false);
+  });
+
+  it("forces ask for a dangerous verb with a quoted expansion", () => {
+    assert.equal(parseCommand('rm -rf "$HOME"').forceAsk, true);
+    assert.equal(parseCommand('chmod 777 "$VAR"').forceAsk, true);
+    assert.equal(parseCommand('echo "$HOME"').forceAsk, false);
+  });
+
+  it("displays double-quoted strings with their original escapes", () => {
+    assert.equal(parseCommand('echo "a\\"b"').displaySubcommands[0], 'echo "a\\"b"');
   });
 });
 

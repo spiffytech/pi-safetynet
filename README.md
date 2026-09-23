@@ -20,7 +20,7 @@ These approaches tend to protect words, not actions.
 
 pi-safetynet takes two key approaches: **AST-aware command analysis** that parses what commands actually *do* rather than matching strings, and a **plan/build profile system** that lets you run the agent read-only until you explicitly allow changes.
 
-Every bash command is parsed into a proper **AST** using [`@aliou/sh`](https://github.com/aliou/sh) and security decisions are made based on what the command *does*, not what strings it contains.
+Every bash command is parsed into a proper **AST** using [tree-sitter](https://tree-sitter.github.io/) (via `web-tree-sitter` + the `tree-sitter-bash` grammar) and security decisions are made based on what the command *does*, not what strings it contains.
 
 ![pi-safetynet permission prompt](assets/screenshot-permission-request.png)
 
@@ -89,6 +89,8 @@ System-destroying commands are **always denied**, regardless of profile or rules
 - `xargs` variants (`xargs rm -rf /` is still catastrophic)
 - `mkfs.*`, `dd of=/dev/`, `shutdown`, `reboot`, `halt`, `poweroff`
 
+**Best-effort, not a security boundary.** This is a denylist over an open-ended command language, so it cannot catch every spelling (shell functions, aliases, `eval`, dynamically built command names, expansions). It only ever overrides a rule that would otherwise match. The real guarantee is that unmatched commands ask — or deny when no rules exist. Don't rely on this to stop a determined command.
+
 ### Edit-equivalent bash detection
 
 In **plan mode**, pi-safetynet doesn't just disable the `edit` and `write` tools — it also detects bash commands that are functionally equivalent to editing a file:
@@ -102,6 +104,8 @@ In **plan mode**, pi-safetynet doesn't just disable the `edit` and `write` tools
 | `python3 -c` / `node -e` / `ruby -e` / `perl -e` / `php -r` | ✅ Interpreter one-liners can embed arbitrary I/O |
 | `sh -c` / `bash -c` | ✅ Subshell execution with code strings |
 | Redirections to `/dev/null` and friends | ❌ Safe device files are excluded |
+
+**Same caveat as catastrophic blocking:** this is a best-effort heuristic, not a guarantee. A write mechanism the detector doesn't recognize falls back to the normal ruleset — which asks unless a rule matches. It is not a sandbox; for a hard "no writes" boundary, use plan/ro with a tight read-only allowlist, or run in a container.
 
 ### Hazardous file protection
 
@@ -233,7 +237,7 @@ This table reflects the gaps that motivated building pi-safetynet. I haven't rig
 | `sed -i` vs `sed -n` distinction | ✅ In-place flags detected | Both may match `sed` |
 | Interpreter one-liner detection | ✅ `python -c`, `node -e`, etc. | May see only the interpreter name |
 | Plan mode bash write prevention | ✅ All edit-equivalent techniques blocked | Typically only edit/write tools disabled |
-| Catastrophic command detection | ✅ AST-level: peels sudo flags, timeout, xargs, quotes | Often substring matching |
+| Catastrophic command detection | Best-effort AST heuristics (peels sudo flags, timeout, xargs, quotes — see caveat) | Often substring matching |
 | `[ -f /etc/passwd ]` as file read | ✅ Test operators tracked as reads | Often not tracked as file access |
 | Hazardous file protection | ✅ `.env`, `.ssh`, credentials, etc. | ⚠️ Varies — sometimes config-driven |
 | External path approval | ✅ Auto-detects paths outside project root | Project root awareness varies |

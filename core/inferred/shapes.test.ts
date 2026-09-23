@@ -283,10 +283,10 @@ describe("boundary tables — every entry refuses the token that follows it", ()
 
   it("runner verbs never slot the program, package, or code after them", () => {
     for (const verb of RUNNER_VERBS) {
-      // -exec / -execdir never reach the merge as tokens: the bash parser
-      // splits them into a nested subcommand (asserted below). They stay in the
-      // table as defense-in-depth for parsers that flatten the same command.
-      if (verb === "-exec" || verb === "-execdir") continue;
+      // -exec/-execdir/-ok fold into a nested subcommand (find:exec) in the
+      // bash parser, asserted below, so they never reach the merge as tokens.
+      // They stay in the table as defense-in-depth for parsers that flatten.
+      if (verb === "-exec" || verb === "-execdir" || verb === "-ok") continue;
       // flag verbs (find --exec) get their first bare word from the path; bare
       // verbs need a flag so the verb itself is not the pinned first bare word
       const prefix = verb.startsWith("-") ? "find ." : "npm -g";
@@ -295,7 +295,7 @@ describe("boundary tables — every entry refuses the token that follows it", ()
   });
 
   it("find's exec flags are split off by the parser, one layer earlier", () => {
-    for (const verb of ["-exec", "-execdir"]) {
+    for (const verb of ["-exec", "-execdir", "-ok", "-okdir"]) {
       const command = `find . ${verb} x1`;
       // the parser folds the flag into the subcommand name (find:exec) and the
       // nested command keeps its own token list, so x1 is never a token that

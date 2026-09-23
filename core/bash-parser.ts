@@ -1,15 +1,7 @@
-import { parse } from "@aliou/sh";
-import type {
-	SimpleCommand,
-	CmdSubst,
-	ProcSubst,
-	WordPart,
-	Command,
-	Redirect,
-	TestClause as TestClauseType,
-	TestExpr,
-	Word,
-} from "@aliou/sh";
+import { Parser, Language } from "web-tree-sitter";
+import type { Node } from "web-tree-sitter";
+import { createRequire } from "node:module";
+import path from "node:path";
 
 /** Threshold (chars) beyond which a quoted string is considered "opaque"
  *  and collapsed to a placeholder.  Strings at or below this length that
@@ -20,306 +12,264 @@ function isOpaqueString(value: string): boolean {
   return value.includes("\n") || value.length > OPAQUE_STRING_THRESHOLD;
 }
 
-function dblQuotedToString(p: WordPart): string | null {
-  const parts = (p as { type: "DblQuoted"; parts: WordPart[] }).parts;
-  if (!parts?.length) return "";
-  const hasExpansion = parts.some(
-    (sp) => sp.type !== "Literal" && sp.type !== "SglQuoted",
-  );
-  if (hasExpansion) return null;
-  return parts.map((sp) => sp.value ?? "").join("");
-}
-
-function wordToString(w: Word): string | null {
-  if (!w?.parts?.length) return null;
-  return w.parts
-    .map((p: WordPart) => {
-      if (p.type === "Literal") return p.value ?? "";
-      if (p.type === "SglQuoted") {
-        const v = p.value ?? "";
-        if (v === "") return "''";
-        return isOpaqueString(v) ? "'...'" : v;
-      }
-      if (p.type === "DblQuoted") {
-        const literal = dblQuotedToString(p);
-        if (literal === null) return '"..."';
-        if (literal === "") return '""';
-        return isOpaqueString(literal) ? '"..."' : literal;
-      }
-      if (p.type === "ParamExp") return "${...}";
-      if (p.type === "CmdSubst") return "$(...)";
-      if (p.type === "ArithExp") return "$((...))";
-      if (p.type === "ProcSubst") return p.op === "<" ? "<(...)" : ">(...)";
-      return "";
-    })
-    .join("");
-}
-
-/** Display form of a word — like wordToString, but wraps non-opaque
- *  SglQuoted/DblQuoted content in the originating quote chars so the UI
- *  shows the user's original quoting (e.g. `-g "can save a link"`).
- *  Opaque/expansion placeholders ('...' / "...") and empty quotes ('' / "")
- *  are preserved exactly as wordToString produces them.  Mixed words
- *  (e.g. pre"mid"post) wrap each quoted part independently. */
-function wordToDisplayString(w: Word): string | null {
-  if (!w?.parts?.length) return null;
-  return w.parts
-    .map((p: WordPart) => {
-      if (p.type === "Literal") return p.value ?? "";
-      if (p.type === "SglQuoted") {
-        const v = p.value ?? "";
-        if (v === "") return "''";
-        return isOpaqueString(v) ? "'...'" : `'${v}'`;
-      }
-      if (p.type === "DblQuoted") {
-        const literal = dblQuotedToString(p);
-        if (literal === null) return '"..."';
-        if (literal === "") return '""';
-        return isOpaqueString(literal) ? '"..."' : `"${literal}"`;
-      }
-      if (p.type === "ParamExp") return "${...}";
-      if (p.type === "CmdSubst") return "$(...)";
-      if (p.type === "ArithExp") return "$((...))";
-      if (p.type === "ProcSubst") return p.op === "<" ? "<(...)" : ">(...)";
-      return "";
-    })
-    .join("");
-}
-
-/** Test whether a single word token acts as `flag`.  A token matches if it
- *  equals the flag, or is the flag followed by a non-word suffix (so
- *  `-i.bak` matches `-i`, but `-in` does not).  This is the token-boundary
- *  equivalent of the old `\s-i\b` substring regex — a quoted literal like
- *  `"we are -i today"` is a single token whose literal value is the whole
- *  sentence, so it never matches. */
-function tokenHasFlag(token: string, flag: string): boolean {
-  if (token === flag) return true;
-  if (!token.startsWith(flag)) return false;
-  const next = token[flag.length];
-  return next !== undefined && !/[A-Za-z0-9_]/.test(next);
-}
-
-function commandToString(cmd: SimpleCommand): string {
-  const parts: string[] = [];
-  for (const w of cmd.words ?? []) {
-    const s = wordToString(w);
-    if (s !== null) parts.push(s);
+/** Resolve backslash escapes in an unquoted word (bash treats `\(`, `\;`,
+ *  `\ ` etc. as the literal character).  Single-quoted content is handled
+ *  separately and never passes through here. */
+function unescapeText(s: string): string {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === "\\" && i + 1 < s.length) {
+      out += s[i + 1];
+      i += 2;
+    } else {
+      out += s[i];
+      i++;
+    }
   }
-  return parts.join(" ");
+  return out;
 }
 
-/** Display form of a SimpleCommand — joins wordToDisplayString per word,
- *  preserving the user's original quoting for UI display. */
-function commandToDisplayString(cmd: SimpleCommand): string {
-  const parts: string[] = [];
-  for (const w of cmd.words ?? []) {
-    const s = wordToDisplayString(w);
-    if (s !== null) parts.push(s);
+/** Resolve escapes inside a double-quoted string.  Unlike an unquoted word,
+ *  bash only treats backslash as an escape before `$`, backtick, `"`, `\\`,
+ *  and newline; before anything else the backslash is literal. */
+function unescapeDoubleQuoted(s: string): string {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i]!;
+    if (ch === "\\" && i + 1 < s.length) {
+      const next = s[i + 1]!;
+      if (next === "\n") {
+        i += 2; // line continuation: both chars vanish
+        continue;
+      }
+      if (next === "$" || next === "`" || next === '"' || next === "\\") {
+        out += next;
+        i += 2;
+        continue;
+      }
+    }
+    out += ch;
+    i++;
   }
-  return parts.join(" ");
+  return out;
 }
 
-function getCommandArgs(cmd: SimpleCommand): string[] {
-  const args: string[] = [];
-  if (!cmd.words?.length) return args;
-  for (let i = 1; i < cmd.words.length; i++) {
-    const s = wordToString(cmd.words[i]);
-    if (s !== null) args.push(s);
+// ---------------------------------------------------------------------------
+// Parser initialization (WASM)
+// ---------------------------------------------------------------------------
+
+let parser: Parser | null = null;
+let initPromise: Promise<void> | null = null;
+
+function requireFromHere(): NodeRequire {
+  return createRequire(import.meta.url);
+}
+
+export function isBashParserReady(): boolean {
+  return parser !== null;
+}
+
+/** One-time async initialization of the tree-sitter WASM parser.
+ *  `parseCommand` is synchronous, so this must complete before it is called
+ *  (pi awaits an async extension factory before session start; tests await it
+ *  in a setup hook). */
+export function initBashParser(): Promise<void> {
+  if (!initPromise) {
+    initPromise = (async () => {
+      const require_ = requireFromHere();
+      const runtimeWasm = require_.resolve("web-tree-sitter/web-tree-sitter.wasm");
+      await Parser.init({ locateFile: () => runtimeWasm });
+      const bashWasm = require_.resolve("tree-sitter-bash/tree-sitter-bash.wasm");
+      const language = await Language.load(bashWasm);
+      const p = new Parser();
+      p.setLanguage(language);
+      parser = p;
+    })().catch((err) => {
+      // Do not latch a rejected init: clear it so a later call (e.g. after
+      // `/reload`) can retry instead of being permanently broken.
+      initPromise = null;
+      throw err;
+    });
   }
-  return args;
+  return initPromise;
 }
 
-function hasFindDangerousFlag(cmd: SimpleCommand): "exec" | "delete" | null {
-  const args = getCommandArgs(cmd);
-  if (args.some((a) => a === "-exec" || a === "-execdir")) return "exec";
-  if (args.some((a) => a === "-delete")) return "delete";
-  return null;
+// ---------------------------------------------------------------------------
+// Word rendering: canonical (de-quoted, placeholders) + display (quotes kept)
+// ---------------------------------------------------------------------------
+
+interface Rendered {
+  canonical: string;
+  display: string;
 }
 
-type SimpleCallback = (cmd: SimpleCommand) => boolean;
-type TestCallback = (expr: string, words: Word[]) => void;
-
-/** A redirect carried by a compound command node (WhileClause, Block,
- *  Subshell, ...) rather than by a SimpleCommand.
- *
- *  walkCommands must surface these explicitly or the read/write permission
- *  checks silently lose the target (e.g. the `< files` in
- *  `while read x; do ...; done < files`).  This callback hands those
- *  redirects to the caller. */
-type CompoundRedirectCallback = (redirects: Redirect[]) => void;
-
-/** Flatten the structured [[ ... ]] tree (UnaryTest / BinaryTest /
- *  ParenTest / Word) into the flat Word list the rest of this module expects:
- *  e.g. "file1 -ef file2" or "-f package.json". Operands are emitted in
- *  source order so extractTestFilePaths() can pair them with their operators
- *  the same way it did when the parser exposed `.expr: Word[]` directly. */
-function flattenTestExpr(node: TestExpr): Word[] {
-	if (node.type === "Word") return [node];
-	if (node.type === "UnaryTest") {
-		const x = flattenTestExpr(node.x);
-		// Bash unary form is `OP operand`; preserve that order.
-		return [{ type: "Word", parts: [{ type: "Literal", value: node.op }] }, ...x];
-	}
-	if (node.type === "BinaryTest") {
-		const x = flattenTestExpr(node.x);
-		const y = flattenTestExpr(node.y);
-		// "operand OP operand"
-		return [...x, { type: "Word", parts: [{ type: "Literal", value: node.op }] }, ...y];
-	}
-	if (node.type === "ParenTest") {
-		// `[[ ( inner ) ]]` — surface the inner expression; parens have no
-		// significance for file-path extraction.
-		return flattenTestExpr(node.x);
-	}
-	return [];
-}
-
-function walkCommands(
-  cmd: Command,
-  onSimple: SimpleCallback,
-  onTest?: TestCallback,
-  onCompoundRedirects?: CompoundRedirectCallback,
-): void {
-  switch (cmd.type) {
-    case "SimpleCommand": {
-      const recurse = onSimple(cmd);
-      if (recurse) {
-        for (const w of cmd.words ?? []) {
-          if (!w.parts) continue;
-          for (const p of w.parts) walkWordPart(p, onSimple);
+/** Convert a tree-sitter word-ish node into a canonical + display token
+ *  (canonical is de-quoted with expansion placeholders; display keeps the
+ *  user's original quoting). */
+function renderNode(node: Node): Rendered | null {
+  switch (node.type) {
+    case "word":
+    case "number":
+    case "test_operator":
+    case "variable_name":
+    case "string_content":
+    case "regex":
+    case "brace_expression":
+    case "escape_sequence": {
+      const text = unescapeText(node.text);
+      return { canonical: text, display: text };
+    }
+    case "raw_string": {
+      const inner = node.text.slice(1, -1);
+      if (inner === "") return { canonical: "''", display: "''" };
+      if (isOpaqueString(inner)) return { canonical: "'...'", display: "'...'" };
+      // Display the original source text so the UI shows what was written.
+      return { canonical: inner, display: node.text };
+    }
+    case "string": {
+      let hasExpansion = false;
+      for (const child of node.namedChildren) {
+        if (child.type === "string_content" || child.type === "escape_sequence") continue;
+        hasExpansion = true;
+      }
+      if (hasExpansion) return { canonical: '"..."', display: '"..."' };
+      const literal = unescapeDoubleQuoted(node.text.slice(1, -1));
+      if (literal === "") return { canonical: '""', display: '""' };
+      if (isOpaqueString(literal)) return { canonical: '"..."', display: '"..."' };
+      // Display the original source text (including its escapes) so the user
+      // approves exactly what will run; re-quoting the unescaped literal would
+      // corrupt e.g. `"a\"b"` into `"a"b"`.
+      return { canonical: literal, display: node.text };
+    }
+    case "concatenation": {
+      let canonical = "";
+      let display = "";
+      for (const child of node.namedChildren) {
+        const r = renderNode(child);
+        if (r) {
+          canonical += r.canonical;
+          display += r.display;
         }
       }
-      break;
+      return { canonical, display };
     }
-    case "Pipeline":
-      for (const s of cmd.commands) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-      break;
-    case "Logical":
-      walkCommands(cmd.left.command, onSimple, onTest, onCompoundRedirects);
-      walkCommands(cmd.right.command, onSimple, onTest, onCompoundRedirects);
-      break;
-    case "Subshell":
-    case "Block":
-      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
-      for (const s of cmd.body) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-      break;
-    case "IfClause":
-      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
-      for (const s of cmd.cond) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-      for (const s of cmd.then) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-      if (cmd.else) for (const s of cmd.else) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-      break;
-    case "WhileClause":
-      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
-      for (const s of cmd.cond) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-      for (const s of cmd.body) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-      break;
-    case "ForClause":
-    case "SelectClause":
-      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
-      for (const s of cmd.body) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-      break;
-    case "FunctionDecl":
-      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
-      for (const s of cmd.body) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-      break;
-    case "CaseClause":
-      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
-      for (const item of cmd.items) {
-        for (const s of item.body) walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-      }
-      break;
-    case "TimeClause":
-      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
-      walkCommands(cmd.command.command, onSimple, onTest, onCompoundRedirects);
-      break;
-    case "CoprocClause":
-      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
-      walkCommands(cmd.body.command, onSimple, onTest, onCompoundRedirects);
-      break;
-    case "DeclClause":
-      if (cmd.assigns) {
-        for (const a of cmd.assigns) {
-          if (a.value) walkWord(a.value, onSimple, onTest, onCompoundRedirects);
-        }
-      }
-      break;
-    // @aliou/sh parses [[ ... ]] as a TestClause whose operands are a
-    // structured tree (UnaryTest / BinaryTest / ParenTest / Word) on `.x`,
-    // rather than the flat `.expr: Word[]` of 0.1. Flatten it back to the
-    // ordered Word list the rest of this module expects so it shows up as a
-    // subcommand (e.g. "[[ -f package.json ]]") and file paths are extracted.
-    case "TestClause": {
-      if (cmd.redirects?.length) onCompoundRedirects?.(cmd.redirects);
-      if (onTest) {
-        const tc = cmd as TestClauseType;
-        const words = tc.x ? flattenTestExpr(tc.x) : [];
-        const parts: string[] = [];
-        for (const w of words) {
-          const s = wordToString(w);
-          if (s !== null) parts.push(s);
-        }
-        if (parts.length) onTest(`[[ ${parts.join(" ")} ]]`, words);
-      }
-      break;
+    case "simple_expansion":
+    case "expansion":
+      return { canonical: "${...}", display: "${...}" };
+    case "arithmetic_expansion":
+      return { canonical: "$((...))", display: "$((...))" };
+    case "command_substitution":
+      return { canonical: "$(...)", display: "$(...)" };
+    case "process_substitution": {
+      const placeholder = node.text.startsWith("<") ? "<(...)" : ">(...)";
+      return { canonical: placeholder, display: placeholder };
     }
-    default:
-      break;
-  }
-}
-
-function walkWordPart(
-  part: WordPart,
-  onSimple: SimpleCallback,
-  onTest?: TestCallback,
-  onCompoundRedirects?: CompoundRedirectCallback,
-): void {
-  if (part.type === "CmdSubst") {
-    for (const s of (part as CmdSubst).stmts) {
-      walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-    }
-  } else if (part.type === "ProcSubst") {
-    for (const s of (part as ProcSubst).stmts) {
-      walkCommands(s.command, onSimple, onTest, onCompoundRedirects);
-    }
-  } else if (part.type === "DblQuoted") {
-    for (const p of (part as { type: "DblQuoted"; parts: WordPart[] }).parts) {
-      walkWordPart(p, onSimple, onTest, onCompoundRedirects);
+    default: {
+      const text = unescapeText(node.text);
+      return { canonical: text, display: text };
     }
   }
 }
 
-function walkWord(
-  w: Word,
-  onSimple: SimpleCallback,
-  onTest?: TestCallback,
-  onCompoundRedirects?: CompoundRedirectCallback,
-): void {
-  for (const p of w.parts ?? []) {
-    walkWordPart(p, onSimple, onTest, onCompoundRedirects);
-  }
-}
+// ---------------------------------------------------------------------------
+// Redirects
+// ---------------------------------------------------------------------------
 
-const PROTECTED_DIRS = new Set(
-  "/ /usr /usr/local /usr/bin /usr/lib /usr/sbin /usr/share /etc /var /bin /sbin /lib /lib64 /boot /sys /proc /dev /root /opt /home /srv /snap /tmp".split(" "),
-);
-
-/** Device files that are always safe to use as redirect targets.
- *  Writing to these is a no-op (e.g., /dev/null) or read-only (e.g.,
- *  /dev/urandom), so they should not be treated as edit-like redirects. */
-const SAFE_DEVICE_FILES = new Set([
-  "/dev/null",
-  "/dev/zero",
-  "/dev/urandom",
-  "/dev/random",
-  "/dev/stdin",
-  "/dev/stdout",
-  "/dev/stderr",
-  "/dev/full",
+const REDIRECT_TYPES = new Set([
+  "file_redirect",
+  "heredoc_redirect",
+  "herestring_redirect",
 ]);
 
+function isRedirectNode(node: Node): boolean {
+  return REDIRECT_TYPES.has(node.type);
+}
+
+interface RedirectInfo {
+  op: string;
+  target: string;
+  direction: "input" | "output" | null;
+}
+
+function redirectOp(node: Node): string {
+  const m = node.text.match(/^[0-9]*(<<<|<<-|<<|&>>|&>|>>|>\||<>|>&|<&|>|<)/);
+  return m ? m[1]! : "";
+}
+
+function parseRedirect(node: Node): RedirectInfo | null {
+  if (node.type === "heredoc_redirect") {
+    const op = redirectOp(node) === "<<-" ? "<<-" : "<<";
+    const start = node.childForFieldName("heredoc_start");
+    return { op, target: start?.text ?? "", direction: null };
+  }
+  if (node.type === "herestring_redirect") {
+    return { op: "<<<", target: "", direction: null };
+  }
+  // file_redirect
+  const dest = node.childForFieldName("destination");
+  if (!dest) return null;
+  const op = redirectOp(node);
+  if (op === ">&" || op === "<&") return null;
+  let direction: "input" | "output" | null = null;
+  if (op === "<") direction = "input";
+  else if (op === ">" || op === ">>" || op === "&>" || op === "&>>" || op === ">|" || op === "<>") {
+    direction = "output";
+  }
+  if (dest.type === "number" || dest.type === "file_descriptor") direction = null;
+  const target = renderNode(dest)?.canonical ?? dest.text;
+  return { op, target, direction };
+}
+
+/** Redirects belonging to a `redirected_statement`: its direct redirect
+ *  children plus redirects nested one level inside a heredoc (e.g. the `> f`
+ *  in `cat <<EOF > f`).  Does not descend into nested commands. */
+function collectRedirects(node: Node): RedirectInfo[] {
+  const out: RedirectInfo[] = [];
+  for (const child of node.namedChildren) {
+    if (isRedirectNode(child)) {
+      const info = parseRedirect(child);
+      if (info) out.push(info);
+      if (child.type === "heredoc_redirect") {
+        for (const grand of child.namedChildren) {
+          if (isRedirectNode(grand)) {
+            const gi = parseRedirect(grand);
+            if (gi) out.push(gi);
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Redirects attached directly to a `command` node (e.g. here-strings). */
+function directRedirectChildren(cmd: Node): RedirectInfo[] {
+  const out: RedirectInfo[] = [];
+  for (const child of cmd.namedChildren) {
+    if (isRedirectNode(child)) {
+      const info = parseRedirect(child);
+      if (info) out.push(info);
+    }
+  }
+  return out;
+}
+
+function redirectSuffix(reds: RedirectInfo[]): string {
+  let suffix = "";
+  for (const r of reds) {
+    if (r.op === "<<<") suffix += " <<< '...'";
+    else if (r.op === "<<" || r.op === "<<-") suffix += " << '...'";
+  }
+  return suffix;
+}
+
+// ---------------------------------------------------------------------------
+// File-test operator extraction (`[ ... ]` / `[[ ... ]]`)
+// ---------------------------------------------------------------------------
+
 // File-test operators that take a single path argument (unary).
-// Used by both [ (test) and [[ to detect file reads.
 const UNARY_FILE_TEST_OPS = new Set([
   "-f", "-e", "-d", "-r", "-s", "-L", "-w", "-x", "-h",
   "-O", "-G", "-N", "-k", "-g", "-u",
@@ -328,15 +278,12 @@ const UNARY_FILE_TEST_OPS = new Set([
 // Binary operators where both operands are file paths.
 const BINARY_FILE_OPS = new Set(["-ef", "-nt", "-ot"]);
 
-// Extract file paths from the word list of a [ or [[ expression.
-// Returns paths that are arguments to file-test operators so they can
-// be tracked as read targets (i.e. "[ -f /etc/passwd ]" reads /etc/passwd).
+// Extract file paths from the token list of a [ or [[ expression.
 function extractTestFilePaths(words: string[]): string[] {
   const paths: string[] = [];
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
     if (!w) continue;
-    // Skip the opening [[ and closing ]] or trailing ]
     if (w === "[[" || w === "]]" || w === "]") continue;
     if (w === "!") continue;
     if (UNARY_FILE_TEST_OPS.has(w)) {
@@ -346,7 +293,6 @@ function extractTestFilePaths(words: string[]): string[] {
         i++;
       }
     } else if (BINARY_FILE_OPS.has(w)) {
-      // Both operands are file paths
       const left = words[i - 1];
       const right = words[i + 1];
       if (left && left !== "[" && left !== "[[") paths.push(left);
@@ -359,46 +305,84 @@ function extractTestFilePaths(words: string[]): string[] {
   return [...new Set(paths)];
 }
 
+/** Flatten a tree-sitter test expression into ordered canonical/display
+ *  tokens (operators emitted in source order, parens dropped). */
+function flattenTest(node: Node, out: Rendered[]): void {
+  switch (node.type) {
+    case "unary_expression": {
+      for (let i = 0; i < node.childCount; i++) {
+        const child = node.child(i);
+        if (!child || !child.isNamed) continue;
+        if (node.fieldNameForChild(i) === "operator") {
+          out.push({ canonical: child.text, display: child.text });
+          continue;
+        }
+        flattenTest(child, out);
+      }
+      return;
+    }
+    case "binary_expression": {
+      const left = node.childForFieldName("left");
+      const op = node.childForFieldName("operator");
+      const right = node.childForFieldName("right");
+      if (left) flattenTest(left, out);
+      if (op) out.push({ canonical: op.text, display: op.text });
+      if (right) flattenTest(right, out);
+      return;
+    }
+    case "parenthesized_expression": {
+      for (const child of node.namedChildren) flattenTest(child, out);
+      return;
+    }
+    default: {
+      const r = renderNode(node);
+      if (r) out.push(r);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Command wrapper peeling (sudo / timeout / xargs)
+// ---------------------------------------------------------------------------
+
 const SUDO_FLAGS_WITH_ARGS = new Set(["-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D", "-T", "-R"]);
 
-// xargs short flags that consume the next word as their argument.
-// (Flags like -e, -i, -l have optional concatenated args and don't consume
-// a separate word; --long-flags embed the value after =.)
 const XARGS_FLAGS_WITH_ARGS = new Set(["-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"]);
 
-/** Starting at `start` in `words`, skip past xargs options and return the
- *  index of the first non-option word (the inner command). */
-function skipXargsFlags(words: Word[], start: number): number {
+// Long xargs options that consume a separate following argument.
+const XARGS_LONG_FLAGS_WITH_ARGS = new Set([
+  "--arg-file", "--delimiter", "--eof", "--max-args", "--max-chars",
+  "--max-lines", "--max-procs", "--process-slot-var",
+]);
+
+/** Starting at `start`, skip past xargs options and return the index of the
+ *  first non-option token (the inner command). */
+function skipXargsFlags(words: string[], start: number): number {
   let i = start;
   while (i < words.length) {
-    const w = wordToString(words[i]!);
-    if (!w) { i++; continue; }
-    // -- ends option processing; the next word is the command.
+    const w = words[i]!;
     if (w === "--") { i++; break; }
-    // Long options: value is either after = or not present.
-    if (w.startsWith("--")) { i++; continue; }
-    // Short options
+    if (w.startsWith("--")) {
+      if (XARGS_LONG_FLAGS_WITH_ARGS.has(w)) { i += 2; continue; }
+      i++;
+      continue;
+    }
     if (w.startsWith("-")) {
       if (XARGS_FLAGS_WITH_ARGS.has(w)) { i += 2; continue; }
       i++;
       continue;
     }
-    // Non-option word: this is the inner command.
     break;
   }
   return i;
 }
 
-/** Walks past a sudo + sudo-flags prefix in `words` (starting at index 0)
- *  and returns the index of the first non-sudo word (the effective command).
- *  Mirrors the sudo-peel logic in getBaseWord/getNonFlagArgsFromNode so
- *  the timeout/xargs detection in walkCommands shares one implementation. */
-function findEffectiveCommandIdx(words: Word[]): number {
-  if (wordToString(words[0] as Word) !== "sudo") return 0;
+/** Walks past a sudo prefix and returns the index of the effective command. */
+function findEffectiveCommandIdx(words: string[]): number {
+  if (words[0] !== "sudo") return 0;
   let skipNext = false;
   for (let i = 1; i < words.length; i++) {
-    const w = wordToString(words[i]!);
-    if (!w) continue;
+    const w = words[i]!;
     if (skipNext) { skipNext = false; continue; }
     if (w.startsWith("-")) {
       if (SUDO_FLAGS_WITH_ARGS.has(w)) skipNext = true;
@@ -409,226 +393,386 @@ function findEffectiveCommandIdx(words: Word[]): number {
   return words.length;
 }
 
-/** Returns true iff `s` looks like a `timeout` DURATION operand
- *  (GNU coreutils: NUMBER[SUFFIX], always digit-led). */
-function isTimeoutDuration(s: string | null): boolean {
-  return s !== null && /^\d/.test(s);
+function isAssignmentToken(w: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(w);
 }
 
-/** Convert an array of Words to a space-joined canonical string. */
-function wordsToString(words: Word[]): string {
-  const parts: string[] = [];
-  for (const w of words) {
-    const s = wordToString(w);
-    if (s !== null) parts.push(s);
+function skipSimpleFlags(words: string[], start: number): number {
+  let i = start;
+  if (words[i] === "--") return i + 1;
+  while (i < words.length && words[i]!.startsWith("-")) i++;
+  return i;
+}
+
+function skipEnv(words: string[], start: number): number {
+  let i = start;
+  while (i < words.length) {
+    const w = words[i]!;
+    if (w === "--") { i++; break; }
+    if (w === "-i" || w === "--ignore-environment") { i++; continue; }
+    if (w === "-u" || w === "--unset") { i += 2; continue; }
+    if (w.startsWith("--unset=")) { i++; continue; }
+    if (w.startsWith("-") && w !== "-") { i++; continue; }
+    if (isAssignmentToken(w)) { i++; continue; }
+    break;
   }
-  return parts.join(" ");
+  return i;
 }
 
-/** Display form of a Word array — joins wordToDisplayString, preserving
- *  the user's original quoting for UI display. */
-function wordsToDisplayString(words: Word[]): string {
-  const parts: string[] = [];
-  for (const w of words) {
-    const s = wordToDisplayString(w);
-    if (s !== null) parts.push(s);
+function skipNice(words: string[], start: number): number {
+  if (words[start] === "-n") return start + 2;
+  if (words[start] && /^-\d+$/.test(words[start]!)) return start + 1;
+  return start;
+}
+
+function skipIonice(words: string[], start: number): number {
+  let i = start;
+  while (i < words.length && words[i]!.startsWith("-")) {
+    const w = words[i]!;
+    if (w === "-c" || w === "-n" || w === "-p") { i += 2; continue; }
+    i++;
   }
-  return parts.join(" ");
+  return i;
 }
 
-/** Append heredoc / here-string suffixes to a subcommand string.
- *
- *  `<<<` and `<<` redirects carry opaque content (scripts, data) that
- *  is not useful for permission matching but is important context for
- *  the user — they need to see that a command receives stdin input.
- *  We collapse the content to `'...'` so the subcommand reads like
- *  `bun -e <<< '...'` instead of just `bun -e` (content lost) or the
- *  full script body (unusable for editing).
- */
-function appendRedirectSuffix(
-  subcommand: string,
-  redirects: Array<{ op: string; target: Word }> | undefined,
-): string {
-  let suffix = "";
-  if (redirects) {
-    for (const r of redirects) {
-      if (r.op === "<<<") {
-        suffix += " <<< '...'";
-      } else if (r.op === "<<" || r.op === "<<-") {
-        suffix += " << '...'";
-      }
+/** Peel wrapper programs (`env`, `nice`, `nohup`, `command`, `setsid`,
+ *  `stdbuf`, `ionice`) that stand between the shell and the real command. */
+function skipWrappers(words: string[], start: number): number {
+  let i = start;
+  for (;;) {
+    const w = words[i];
+    if (w === "env") { i = skipEnv(words, i + 1); continue; }
+    if (w === "nice") { i = skipNice(words, i + 1); continue; }
+    if (w === "nohup" || w === "setsid" || w === "command" || w === "builtin") {
+      i = skipSimpleFlags(words, i + 1);
+      continue;
     }
+    if (w === "stdbuf") {
+      i++;
+      while (words[i]?.startsWith("-")) i++;
+      continue;
+    }
+    if (w === "ionice") { i = skipIonice(words, i + 1); continue; }
+    return i;
   }
-  return suffix ? subcommand + suffix : subcommand;
+}
+
+/** Index of the effective command after peeling sudo, wrappers, timeout and
+ *  xargs (in any order). */
+function effectiveCommandIndex(words: string[]): number {
+  let i = findEffectiveCommandIdx(words);
+  for (;;) {
+    const before = i;
+    i = skipWrappers(words, i);
+    if (i < words.length && words[i] === "timeout" && isTimeoutDuration(words[i + 1])) {
+      i += 2;
+    } else if (i < words.length && words[i] === "xargs") {
+      i = skipXargsFlags(words, i + 1);
+    }
+    if (i === before) break;
+  }
+  return i;
+}
+
+/** True iff `s` looks like a `timeout` DURATION operand
+ *  (GNU coreutils: NUMBER[SUFFIX], always digit-led). */
+function isTimeoutDuration(s: string | undefined): boolean {
+  return typeof s === "string" && /^\d/.test(s);
+}
+
+/** Test whether a single token acts as `flag`.  A token matches if it equals
+ *  the flag, or is the flag followed by a non-word suffix (so `-i.bak`
+ *  matches `-i`, but `-in` does not). */
+function tokenHasFlag(token: string, flag: string): boolean {
+  if (token === flag) return true;
+  if (!token.startsWith(flag)) return false;
+  const next = token[flag.length];
+  return next !== undefined && !/[A-Za-z0-9_]/.test(next);
+}
+
+/** True if a sed option token enables in-place editing.  Handles `-i`,
+ *  `-iSUFFIX`, short clusters (`-ni`, `-Ei`), and `--in-place[=SUFFIX]`.
+ *  `-e`/`-f` consume the rest of the token as their argument. */
+function sedHasInPlace(token: string): boolean {
+  if (token === "--in-place" || token.startsWith("--in-place=")) return true;
+  if (!token.startsWith("-") || token.startsWith("--") || token === "-") return false;
+  for (let i = 1; i < token.length; i++) {
+    const c = token[i]!;
+    if (c === "i") return true;
+    if (c === "e" || c === "f") return false;
+  }
+  return false;
+}
+
+/** True if a perl option token enables in-place editing (`-i`, `-pi`,
+ *  `-pie`, `-i.bak`).  `-e`/`-E`/`-I`/`-F`/`-M`/`-m`/`-d` consume the rest
+ *  of the token as an argument. */
+function perlHasInPlace(token: string): boolean {
+  if (!token.startsWith("-") || token.startsWith("--") || token === "-") return false;
+  for (let i = 1; i < token.length; i++) {
+    const c = token[i]!;
+    if (c === "i") return true;
+    if ("eEFIMmd".includes(c)) return false;
+  }
+  return false;
+}
+
+/** True when a dangerous verb (rm/chmod/chown) targets an operand we cannot
+ *  resolve statically — an expansion (`$…`, `$(…)`) or a quoted expansion
+ *  collapsed to `"..."`.  These must not be silently auto-approved. */
+function hasUnresolvedOperand(tokens: string[]): boolean {
+  const base = getBaseWord(tokens);
+  if (base !== "rm" && base !== "chmod" && base !== "chown") return false;
+  return getNonFlagArgs(tokens).some((a) => a.startsWith("$") || a === '"..."');
 }
 
 const SYSTEM_HALT_COMMANDS = new Set(["shutdown", "reboot", "halt", "poweroff", "init"]);
 
-function getBaseWord(cmd: SimpleCommand): string | null {
-  const words = cmd.words ?? [];
-  let i = 0;
+const PROTECTED_DIRS = new Set(
+  "/ /usr /usr/local /usr/bin /usr/lib /usr/sbin /usr/share /etc /var /bin /sbin /lib /lib64 /boot /sys /proc /dev /root /opt /home /srv /snap /tmp".split(" "),
+);
 
-  // Peel off sudo (and its flags)
-  if (wordToString(words[0] as Word) === "sudo") {
-    let skipNext = false;
-    for (i = 1; i < words.length; i++) {
-      const w = wordToString(words[i]!);
-      if (!w) continue;
-      if (skipNext) { skipNext = false; continue; }
-      if (w.startsWith("-")) {
-        if (SUDO_FLAGS_WITH_ARGS.has(w)) skipNext = true;
-        continue;
-      }
-      break;
-    }
-  }
-
-  // Peel off `timeout DURATION` (simple form: timeout <duration> cmd)
-  if (i < words.length && wordToString(words[i] as Word) === "timeout" &&
-      isTimeoutDuration(wordToString(words[i + 1] as Word))) {
-    i += 2;
-  }
-
-  // Peel off xargs (and its flags)
-  if (i < words.length && wordToString(words[i] as Word) === "xargs") {
-    i = skipXargsFlags(words, i + 1);
-  }
-
-  if (i >= words.length) return null;
-  return wordToString(words[i] as Word) ?? null;
+/** True when `arg` refers to a protected system dir, accounting for trailing
+ *  slashes, redundant separators, `..` traversal, and glob suffixes that still
+ *  resolve under a protected dir (e.g. `/usr/*`, `/var/**`). */
+function isProtectedPath(arg: string): boolean {
+  if (!arg.startsWith("/")) return false;
+  const literal = arg.split(/[*?\[]/)[0] ?? arg;
+  const normalized = path.posix.normalize(literal).replace(/\/+$/, "");
+  if (normalized === "" || normalized === "/") return true;
+  return PROTECTED_DIRS.has(normalized);
 }
 
-function getNonFlagArgsFromNode(cmd: SimpleCommand): string[] {
-  const words = cmd.words ?? [];
-  let i = 0;
+/** Device files that are always safe to use as redirect targets. */
+const SAFE_DEVICE_FILES = new Set([
+  "/dev/null",
+  "/dev/zero",
+  "/dev/urandom",
+  "/dev/random",
+  "/dev/stdin",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/dev/full",
+]);
 
-  // Peel off sudo
-  if (wordToString(words[0] as Word) === "sudo") {
-    let skipNext = false;
-    for (i = 1; i < words.length; i++) {
-      const w = wordToString(words[i]!);
-      if (!w) continue;
-      if (skipNext) { skipNext = false; continue; }
-      if (w.startsWith("-")) {
-        if (SUDO_FLAGS_WITH_ARGS.has(w)) skipNext = true;
-        continue;
-      }
-      break;
-    }
-  }
+function getBaseWord(words: string[]): string | null {
+  const i = effectiveCommandIndex(words);
+  if (i >= words.length) return null;
+  return words[i] ?? null;
+}
 
-  // Peel off `timeout DURATION` (simple form: timeout <duration> cmd)
-  if (i < words.length && wordToString(words[i] as Word) === "timeout" &&
-      isTimeoutDuration(wordToString(words[i + 1] as Word))) {
-    i += 2;
-  }
-
-  // Peel off xargs
-  if (i < words.length && wordToString(words[i] as Word) === "xargs") {
-    i = skipXargsFlags(words, i + 1);
-  }
-
-  // Skip the command name itself; collect non-flag args of the inner command
+function getNonFlagArgs(words: string[]): string[] {
+  const i = effectiveCommandIndex(words);
   const args: string[] = [];
-  for (i = i + 1; i < words.length; i++) {
-    const s = wordToString(words[i]!);
-    if (s !== null && !s.startsWith("-")) args.push(s);
+  for (let j = i + 1; j < words.length; j++) {
+    const s = words[j]!;
+    if (!s.startsWith("-")) args.push(s);
   }
   return args;
 }
 
-function isNodeCatastrophic(cmd: SimpleCommand): boolean {
-  const baseCmd = getBaseWord(cmd);
+function isCatastrophic(tokens: string[]): boolean {
+  const baseCmd = getBaseWord(tokens);
   if (!baseCmd) return false;
 
   if (SYSTEM_HALT_COMMANDS.has(baseCmd)) return true;
   if (/^mkfs\.?/.test(baseCmd)) return true;
 
-  const cmdStr = commandToString(cmd);
+  const cmdStr = tokens.join(" ");
   if (baseCmd === "dd" && /of=\/dev\//.test(cmdStr)) return true;
   if (baseCmd === "rm" && /--no-preserve-root/.test(cmdStr)) return true;
 
   if (baseCmd === "rm" || baseCmd === "chmod" || baseCmd === "chown") {
-    const args = getNonFlagArgsFromNode(cmd);
-    if (args.some((a) => PROTECTED_DIRS.has(a) || a === "~" || a === "/*" || a.startsWith("$"))) return true;
+    const args = getNonFlagArgs(tokens);
+    if (args.some((a) => a === "~" || a.startsWith("$") || isProtectedPath(a))) {
+      return true;
+    }
   }
-
   return false;
 }
 
-export interface RedirectTarget {
-  path: string;
-  direction: "input" | "output";
+// ---------------------------------------------------------------------------
+// token extraction for a `command` node
+// ---------------------------------------------------------------------------
+
+function commandTokens(cmd: Node): { tokens: string[]; displays: string[] } {
+  const tokens: string[] = [];
+  const displays: string[] = [];
+  for (let i = 0; i < cmd.childCount; i++) {
+    const child = cmd.child(i);
+    if (!child || !child.isNamed) continue;
+    if (isRedirectNode(child)) continue;
+    if (child.type === "comment") continue;
+    // Variable assignments prefixed to a command (`VAR=x cmd`) are not part
+    // of the command's word list — the effective command name comes first.
+    if (child.type === "variable_assignment") continue;
+    const target = child.type === "command_name"
+      ? (child.namedChildren[0] ?? child)
+      : child;
+    const r = renderNode(target);
+    if (r) {
+      tokens.push(r.canonical);
+      displays.push(r.display);
+    }
+  }
+  return { tokens, displays };
 }
 
-/** Classify a raw Redirect into a file-permission target, or null when it is
- *  not a file open (heredocs/here-strings carry their content directly and
- *  are surfaced as a `<< '...'` subcommand suffix instead). */
-function classifyRedirect(r: Redirect): RedirectTarget | null {
-  const target = wordToString(r.target);
-  if (!target) return null;
-  if (r.op === "<") return { path: target, direction: "input" };
-  if (r.op === ">" || r.op === ">>" || r.op === "&>" || r.op === "&>>" || r.op === ">|" || r.op === "<>") {
-    return { path: target, direction: "output" };
-  }
+// ---------------------------------------------------------------------------
+// Walker
+// ---------------------------------------------------------------------------
+
+interface Acc {
+  canonical: string[];
+  display: string[];
+  words: string[][];
+  redirects: RedirectTarget[];
+  catastrophic: boolean;
+  forceAsk: boolean;
+}
+
+function addSub(acc: Acc, tokens: string[], displays: string[], suffix = ""): void {
+  acc.canonical.push(tokens.join(" ") + suffix);
+  acc.display.push(displays.join(" ") + suffix);
+  acc.words.push(tokens);
+}
+
+function findDangerous(tokens: string[]): "exec" | "delete" | null {
+  const args = tokens.slice(1);
+  if (args.some((a) => a === "-exec" || a === "-execdir" || a === "-ok" || a === "-okdir")) return "exec";
+  if (args.some((a) => a === "-delete")) return "delete";
   return null;
 }
 
-/** Append every file-open redirect in `rs` to `out` (heredocs skipped). */
-function collectRedirects(rs: Redirect[] | undefined, out: RedirectTarget[]): void {
-  if (!rs?.length) return;
-  for (const r of rs) {
-    const t = classifyRedirect(r);
-    if (t) out.push(t);
+function emitCommand(cmd: Node, reds: RedirectInfo[], acc: Acc): void {
+  const { tokens, displays } = commandTokens(cmd);
+  if (!tokens.length) return;
+  const suffix = redirectSuffix(reds);
+  const name = tokens[0]!;
+
+  if (name === "find") {
+    const dangerous = findDangerous(tokens);
+    if (dangerous === "exec") {
+      addSub(acc, ["find:exec"], ["find:exec"], suffix);
+      return;
+    }
+    if (dangerous === "delete") {
+      addSub(acc, ["find:delete"], ["find:delete"], suffix);
+      return;
+    }
+  }
+
+  if (isCatastrophic(tokens)) acc.catastrophic = true;
+  if (hasUnresolvedOperand(tokens)) acc.forceAsk = true;
+
+  for (const r of reds) {
+    if (r.direction) acc.redirects.push({ path: r.target, direction: r.direction });
+  }
+
+  const effectiveIdx = findEffectiveCommandIdx(tokens);
+  const effective = tokens[effectiveIdx];
+
+  if (effective === "timeout" && isTimeoutDuration(tokens[effectiveIdx + 1])) {
+    const prefixT = tokens.slice(0, effectiveIdx);
+    const prefixD = displays.slice(0, effectiveIdx);
+    const wrapperT = [...prefixT, tokens[effectiveIdx]!, tokens[effectiveIdx + 1]!];
+    const wrapperD = [...prefixD, displays[effectiveIdx]!, displays[effectiveIdx + 1]!];
+    addSub(acc, wrapperT, wrapperD, suffix);
+    const innerT = tokens.slice(effectiveIdx + 2);
+    const innerD = displays.slice(effectiveIdx + 2);
+    if (innerT.length) {
+      addSub(acc, [...prefixT, ...innerT], [...prefixD, ...innerD], suffix);
+    }
+    return;
+  }
+
+  if (effective === "xargs") {
+    const innerStart = skipXargsFlags(tokens, effectiveIdx + 1);
+    const prefixT = tokens.slice(0, effectiveIdx);
+    const prefixD = displays.slice(0, effectiveIdx);
+    const innerT = tokens.slice(innerStart);
+    const innerD = displays.slice(innerStart);
+    const allT = [...prefixT, ...innerT];
+    const allD = [...prefixD, ...innerD];
+    if (allT.length) addSub(acc, allT, allD, suffix);
+    else addSub(acc, ["echo"], ["echo"], suffix);
+    return;
+  }
+
+  addSub(acc, tokens, displays, suffix);
+}
+
+function emitTest(cmd: Node, acc: Acc): void {
+  const rendered: Rendered[] = [];
+  for (const child of cmd.namedChildren) flattenTest(child, rendered);
+  const open = cmd.text.startsWith("[[") ? "[[" : "[";
+  const close = open === "[[" ? "]]" : "]";
+  const tokens = rendered.map((r) => r.canonical);
+  const displays = rendered.map((r) => r.display);
+  addSub(acc, [open, ...tokens, close], [open, ...displays, close]);
+  for (const p of extractTestFilePaths(tokens)) {
+    acc.redirects.push({ path: p, direction: "input" });
   }
 }
 
-export interface ParsedCommand {
-  subcommands: string[];
-  /** Per-subcommand structured token lists.  Parallel to `subcommands`
-   *  (same length/order).  Used by token-aware consumers that must not
-   *  re-derive intent from the canonical string (e.g. edit-like flag
-   *  detection). */
-  subcommandWords: Word[][];
-  /** Display form — preserves the user's original quoting for UI.  Parallel
-   *  to `subcommands` (same length/order). */
-  displaySubcommands: string[];
-  redirects: RedirectTarget[];
-  catastrophic: boolean;
+function recurseChildren(node: Node, acc: Acc): void {
+  for (const child of node.namedChildren) walk(child, acc);
 }
 
-/** Mutable accumulator for the three parallel per-subcommand arrays. */
-interface SubcommandAccum {
-  canonical: string[];
-  display: string[];
-  words: Word[][];
+function walk(node: Node, acc: Acc): void {
+  if (node.type === "redirected_statement") {
+    const body = node.childForFieldName("body");
+    const reds = collectRedirects(node);
+    if (body) {
+      if (body.type === "command") {
+        emitCommand(body, [...reds, ...directRedirectChildren(body)], acc);
+        recurseChildren(body, acc);
+      } else {
+        for (const r of reds) {
+          if (r.direction) acc.redirects.push({ path: r.target, direction: r.direction });
+        }
+        walk(body, acc);
+      }
+    }
+    for (const child of node.namedChildren) {
+      if (body && child.id === body.id) continue;
+      walk(child, acc);
+    }
+    return;
+  }
+
+  if (node.type === "command") {
+    emitCommand(node, directRedirectChildren(node), acc);
+    recurseChildren(node, acc);
+    return;
+  }
+
+  if (node.type === "test_command") {
+    emitTest(node, acc);
+    recurseChildren(node, acc);
+    return;
+  }
+
+  // Some nodes carry redirect children directly without a wrapping
+  // `redirected_statement` (e.g. function definitions: `f() { ...; } > out`).
+  // Surface their file targets; they belong to no single subcommand.
+  if (!isRedirectNode(node)) {
+    for (const child of node.namedChildren) {
+      if (isRedirectNode(child)) {
+        const info = parseRedirect(child);
+        if (info?.direction) acc.redirects.push({ path: info.target, direction: info.direction });
+      }
+    }
+  }
+
+  recurseChildren(node, acc);
 }
 
-/** Push one subcommand to all three parallel arrays, applying the heredoc
- *  / here-string suffix consistently to the canonical + display strings
- *  (the suffix is the same in both forms — it is our own placeholder, not
- *  a quoted token).  `wordList` may be empty for synthetic subcommands
- *  (find:exec / find:delete / bare echo) that carry no quoting. */
-function pushSubcommand(
-  acc: SubcommandAccum,
-  canonical: string,
-  display: string,
-  wordList: Word[],
-  redirects: Array<{ op: string; target: Word }> | undefined,
-): void {
-  acc.canonical.push(appendRedirectSuffix(canonical, redirects));
-  acc.display.push(appendRedirectSuffix(display, redirects));
-  acc.words.push(wordList);
-}
-
-/** Deduplicate the three parallel arrays together, keying on the canonical
- *  form (so identical canonical subcommands collapse, keeping their first
- *  display/words).  Returns fresh arrays. */
-function dedupParallel(acc: SubcommandAccum): void {
+function dedup(acc: Acc): void {
   const seen = new Set<string>();
   const canonical: string[] = [];
   const display: string[] = [];
-  const words: Word[][] = [];
+  const words: string[][] = [];
   for (let i = 0; i < acc.canonical.length; i++) {
     const key = acc.canonical[i]!;
     if (seen.has(key)) continue;
@@ -642,136 +786,87 @@ function dedupParallel(acc: SubcommandAccum): void {
   acc.words = words;
 }
 
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+export interface RedirectTarget {
+  path: string;
+  direction: "input" | "output";
+}
+
+export interface ParsedCommand {
+  subcommands: string[];
+  /** Per-subcommand canonical token lists, parallel to `subcommands`
+   *  (same length/order).  Used by token-aware consumers that must not
+   *  re-derive intent from the canonical string (e.g. edit-like flag
+   *  detection). */
+  subcommandWords: string[][];
+  /** Display form — preserves the user's original quoting for UI.  Parallel
+   *  to `subcommands` (same length/order). */
+  displaySubcommands: string[];
+  redirects: RedirectTarget[];
+  catastrophic: boolean;
+  /** True when a dangerous verb targets an operand that cannot be resolved
+   *  statically (e.g. `rm -rf "$DIR"`).  Callers must not silently allow it. */
+  forceAsk: boolean;
+  /** True when the parser could not produce a trustworthy result (null tree
+   *  or an unexpected internal failure).  Callers must fail CLOSED on this
+   *  rather than treating the empty/partial result as an allow. */
+  parseFailed: boolean;
+}
+
+/** Fail-closed result for a command the parser could not handle. */
+function failedResult(command: string): ParsedCommand {
+  const first = command.trim().split(/\s+/)[0] ?? "";
+  return {
+    subcommands: first ? [first] : [],
+    subcommandWords: first ? [[first]] : [],
+    displaySubcommands: first ? [first] : [],
+    redirects: [],
+    catastrophic: first ? SYSTEM_HALT_COMMANDS.has(first) : false,
+    forceAsk: false,
+    parseFailed: true,
+  };
+}
 
 export function parseCommand(command: string): ParsedCommand {
-  try {
-    // recoverErrors keeps malformed-but-common input (e.g. `node -e "a()"`,
-    // which is not valid bash but is a one-liner users paste) from throwing;
-    // the parser returns the closest valid AST for the parseable prefix.
-    const { ast } = parse(command, { recoverErrors: true });
-    const acc: SubcommandAccum = { canonical: [], display: [], words: [] };
-    const redirects: RedirectTarget[] = [];
-    let catastrophic = false;
-
-    for (const stmt of ast.body) {
-      walkCommands(stmt.command, (cmd) => {
-        collectRedirects(cmd.redirects, redirects);
-
-        const name = wordToString(cmd.words?.[0] as Word);
-        if (!name) return false;
-
-        if (name === "find") {
-          const dangerous = hasFindDangerousFlag(cmd);
-          if (dangerous === "exec") {
-            pushSubcommand(acc, "find:exec", "find:exec", [], cmd.redirects);
-            return true;
-          }
-          if (dangerous === "delete") {
-            pushSubcommand(acc, "find:delete", "find:delete", [], cmd.redirects);
-            return false;
-          }
-        }
-
-        if (isNodeCatastrophic(cmd)) catastrophic = true;
-
-        // Strip wrappers (timeout DURATION, xargs + flags) from the
-        // subcommand so permissions are checked against the inner command.
-        // Keep sudo prefix since sudo commands should always require approval.
-        const words = cmd.words ?? [];
-        const effectiveIdx = findEffectiveCommandIdx(words);
-        const effective = wordToString(words[effectiveIdx] as Word);
-
-        // `timeout <duration> cmd`: push the wrapper (preapproved via
-        // baseline `timeout *`) AND the inner command so the real
-        // command is what gets asked about.
-        if (effective === "timeout" &&
-            isTimeoutDuration(wordToString(words[effectiveIdx + 1] as Word))) {
-          const prefixWords = words.slice(0, effectiveIdx); // e.g. [sudo ...]
-          const wrapperWords = [...prefixWords, words[effectiveIdx]!, words[effectiveIdx + 1]!];
-          pushSubcommand(acc, wordsToString(wrapperWords), wordsToDisplayString(wrapperWords), wrapperWords, cmd.redirects);
-          const innerWords = words.slice(effectiveIdx + 2);
-          if (innerWords.length) {
-            const allInner = [...prefixWords, ...innerWords];
-            pushSubcommand(acc, wordsToString(allInner), wordsToDisplayString(allInner), allInner, cmd.redirects);
-          }
-        } else if (effective === "xargs") {
-          // findEffectiveCommandIdx already skipped any sudo prefix
-          const innerStart = skipXargsFlags(words, effectiveIdx + 1);
-          const prefixWords = words.slice(0, effectiveIdx); // e.g. [sudo ...]
-          const innerWords = words.slice(innerStart);
-          const allWords = [...prefixWords, ...innerWords];
-          if (allWords.length) {
-            pushSubcommand(acc, wordsToString(allWords), wordsToDisplayString(allWords), allWords, cmd.redirects);
-          } else {
-            // xargs with no command defaults to echo
-            pushSubcommand(acc, "echo", "echo", [], cmd.redirects);
-          }
-        } else {
-          pushSubcommand(acc, commandToString(cmd), commandToDisplayString(cmd), words, cmd.redirects);
-        }
-
-        // [ (test) and [[ check file existence/properties, which
-        // constitutes a file read. Extract file paths from test
-        // operators so they go through read-permission checks.
-        if (name === "[" || name === "[[") {
-          const wordStrs = (cmd.words ?? []).map((w: Word) => wordToString(w)).filter((s: string | null): s is string => s !== null);
-          for (const p of extractTestFilePaths(wordStrs)) {
-            redirects.push({ path: p, direction: "input" });
-          }
-        }
-
-        return true;
-      }, (expr, words) => {
-        // Reconstruct the display form of the [[ ... ]] expression from
-        // the raw words so quoted operands keep their quotes.
-        const displayExpr = `[[ ${wordsToDisplayString(words)} ]]`;
-        pushSubcommand(acc, expr, displayExpr, words, undefined);
-        // Same file-read extraction for [[ TestClause nodes
-        const wordStrs = words.map((w) => wordToString(w)).filter((s: string | null): s is string => s !== null);
-        for (const p of extractTestFilePaths(wordStrs)) {
-          redirects.push({ path: p, direction: "input" });
-        }
-      }, (rs) => collectRedirects(rs, redirects));
-    }
-
-    dedupParallel(acc);
-    return {
-      subcommands: acc.canonical,
-      subcommandWords: acc.words,
-      displaySubcommands: acc.display,
-      redirects,
-      catastrophic,
-    };
-  } catch {
-    // Unreachable for realistic input (recoverErrors is error-tolerant); kept
-    // as a last resort so a parser bug degrades to a first-token guess rather
-    // than throwing from inside a permission check.
-    const first = command.trim().split(/\s+/)[0] ?? "";
-    return {
-      subcommands: first ? [first] : [],
-      subcommandWords: [],
-      displaySubcommands: first ? [first] : [],
-      redirects: [],
-      catastrophic: first ? SYSTEM_HALT_COMMANDS.has(first) : false,
-    };
+  if (!parser) {
+    throw new Error("bash parser not initialized; call initBashParser() first");
   }
+  const acc: Acc = { canonical: [], display: [], words: [], redirects: [], catastrophic: false, forceAsk: false };
+  try {
+    const tree = parser.parse(command);
+    if (!tree) return failedResult(command);
+    try {
+      walk(tree.rootNode, acc);
+    } finally {
+      tree.delete();
+    }
+  } catch {
+    // tree-sitter is error-tolerant, so this is unexpected; fail closed rather
+    // than silently substituting a first-token guess that could allow execution.
+    return failedResult(command);
+  }
+
+  dedup(acc);
+  return {
+    subcommands: acc.canonical,
+    subcommandWords: acc.words,
+    displaySubcommands: acc.display,
+    redirects: acc.redirects,
+    catastrophic: acc.catastrophic,
+    forceAsk: acc.forceAsk,
+    parseFailed: false,
+  };
 }
 
 /** Per-subcommand canonical token lists for a command string. Parallel to
- *  `parseCommand().subcommands` (modulo words that have no canonical form,
- *  which are skipped the same way `commandToString` skips them). This is the
- *  token source for inferred-rule shape analysis — tokens may contain
- *  spaces (quoted words), so consumers must never re-split on whitespace. */
+ *  `parseCommand().subcommands`. This is the token source for inferred-rule
+ *  shape analysis — tokens may contain spaces (quoted words), so consumers
+ *  must never re-split on whitespace. */
 export function subcommandTokenLists(command: string): string[][] {
-  const parsed = parseCommand(command);
-  return parsed.subcommandWords.map((words) => {
-    const toks: string[] = [];
-    for (const w of words) {
-      const s = wordToString(w);
-      if (s !== null) toks.push(s);
-    }
-    return toks;
-  });
+  return parseCommand(command).subcommandWords;
 }
 
 export function isHazardousFile(filePath: string): boolean {
@@ -833,24 +928,21 @@ export function isEditLikeBashCommand(
   //    tokens (not the joined canonical string) means a quoted literal like
   //    `sed "we are -i today" file` is one token whose literal value is the
   //    whole sentence — it can never be mistaken for the `-i` flag.
-  for (const words of parsed.subcommandWords) {
-    if (!words.length) continue;
-    const base = wordToString(words[0] as Word);
+  for (const tokens of parsed.subcommandWords) {
+    if (!tokens.length) continue;
+    const base = tokens[0];
     if (!base) continue;
 
     // 3. In-place edit flags
     if (base === "sed") {
-      for (let i = 1; i < words.length; i++) {
-        const t = wordToString(words[i]!);
-        if (t === null) continue;
-        if (t === "-i" || t.startsWith("-i.") || t === "--in-place") return true;
+      for (let i = 1; i < tokens.length; i++) {
+        if (sedHasInPlace(tokens[i]!)) return true;
       }
     }
     if (base === "perl") {
-      for (let i = 1; i < words.length; i++) {
-        const t = wordToString(words[i]!);
-        if (t === null) continue;
-        if (tokenHasFlag(t, "-pi") || tokenHasFlag(t, "-pe")) return true;
+      for (let i = 1; i < tokens.length; i++) {
+        const t = tokens[i]!;
+        if (perlHasInPlace(t) || tokenHasFlag(t, "-pe")) return true;
       }
     }
 
@@ -858,18 +950,16 @@ export function isEditLikeBashCommand(
     if (base === "tee" || base === "truncate" || base === "install" || base === "dd") return true;
 
     // 5. Interpreter one-liner invocations that can embed arbitrary file I/O
-    //    python[3] -c, node -e, ruby -e, perl -e, php -r
     if (/^(python3?|node|ruby|perl|php)$/.test(base)) {
-      for (let i = 1; i < words.length; i++) {
-        const t = wordToString(words[i]!);
+      for (let i = 1; i < tokens.length; i++) {
+        const t = tokens[i]!;
         if (t === "-c" || t === "-e" || t === "-r") return true;
       }
     }
     // sh/bash/dash/zsh -c  (subshell execution with code string)
     if (/^(sh|bash|dash|zsh)$/.test(base)) {
-      for (let i = 1; i < words.length; i++) {
-        const t = wordToString(words[i]!);
-        if (t === "-c") return true;
+      for (let i = 1; i < tokens.length; i++) {
+        if (tokens[i] === "-c") return true;
       }
     }
   }

@@ -681,3 +681,26 @@ describe("stale cwd path normalization", () => {
     assert.ok(result.action === "allow" || result.action === "ask");
   });
 });
+
+describe("checkBashPermission force-ask on unresolvable dangerous operands", () => {
+  const ALLOW_RM: Ruleset = [
+    { permission: "bash", pattern: "rm *", action: "allow", modes: ["build", "plan", "ro", "rw"] },
+  ];
+  const ALLOW_ECHO: Ruleset = [
+    { permission: "bash", pattern: "echo *", action: "allow", modes: ["build", "plan", "ro", "rw"] },
+  ];
+
+  it("does not silently allow rm with a quoted expansion", () => {
+    const result = checkBashPermission('rm -rf "$HOME"', "build", ALLOW_RM, CWD);
+    assert.equal(result.action, "ask");
+    assert.ok(result.unapproved?.includes('rm -rf "..."'));
+  });
+
+  it("still allows a concrete rm target", () => {
+    assert.equal(checkBashPermission("rm -rf ./build", "build", ALLOW_RM, CWD).action, "allow");
+  });
+
+  it("does not force-ask harmless expansions", () => {
+    assert.equal(checkBashPermission('echo "$HOME"', "build", ALLOW_ECHO, CWD).action, "allow");
+  });
+});

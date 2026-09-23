@@ -172,6 +172,12 @@ export function checkBashPermission(
 ): PermissionCheck {
   const parsed = parseCommand(command);
 
+  // Fail closed: if the parser could not produce a trustworthy result, deny
+  // rather than treating an empty/partial parse as an allow.
+  if (parsed.parseFailed) {
+    return { action: "deny", reason: "Could not parse bash command; denied to be safe", unapproved: [] };
+  }
+
   if (parsed.catastrophic) {
     return { action: "deny", reason: "Catastrophic command", unapproved: [] };
   }
@@ -252,6 +258,20 @@ export function checkBashPermission(
     } else if (targetResult.action === "ask") {
       if (worstAction !== "deny") worstAction = "ask";
       redirectTargets.push({ permission: perm, path: target.path });
+    }
+  }
+
+  // A dangerous verb with an operand that cannot be resolved statically
+  // (e.g. `rm -rf "$DIR"`) must not be silently allowed by a broad rule —
+  // force approval instead.
+  if (parsed.forceAsk && worstAction === "allow") {
+    worstAction = "ask";
+    for (let i = 0; i < parsed.subcommands.length; i++) {
+      const sub = parsed.subcommands[i]!;
+      if (!unapproved.includes(sub)) {
+        unapproved.push(sub);
+        unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
+      }
     }
   }
 

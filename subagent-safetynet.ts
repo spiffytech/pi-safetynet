@@ -200,7 +200,8 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 				}
 			} catch (err) {
 				ctx.ui.notify(`Permission check error: ${err}`, "warning");
-				return undefined;
+				// Fail closed: a check that could not complete must not allow the call.
+				return { block: true, reason: `Permission check failed (${err}); blocked to be safe` };
 			}
 		});
 

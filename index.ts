@@ -49,6 +49,7 @@ import {
   type PermissionPromptResult,
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./core/check.ts";
+import { initBashParser } from "./core/bash-parser.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, strikeDeny, type HazardousDenyState } from "./pipeline.ts";
 import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./core/auto-config-state.ts";
@@ -372,7 +373,8 @@ async function handleToolCall(
     }
   } catch (err) {
     ctx.ui.notify(`Permission check error: ${err}`, "warning");
-    return undefined;
+    // Fail closed: a check that could not complete must not allow the call.
+    return { block: true, reason: `Permission check failed (${err}); blocked to be safe` };
   }
 }
 
@@ -972,7 +974,9 @@ async function restoreSessionState(ctx: ExtensionContext, opts?: RestoreOpts): P
   }
 }
 
-export default function safetynetExtension(api: ExtensionAPI) {
+export default async function safetynetExtension(api: ExtensionAPI) {
+  await initBashParser();
+
   pi = api;
 
   storage = new PermissionStorage(process.cwd());
