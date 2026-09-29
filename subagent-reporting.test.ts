@@ -127,4 +127,30 @@ describe("one-shot settle guard", () => {
 		const guard = (mock.handlers.get("agent_before_settle") ?? [])[0] as Function;
 		assert.equal(await guard(), undefined);
 	});
+
+	it("never re-nudges after a report, even when segment state resets", async () => {
+		// `subagent_send` always resets segment state (a steer is new work), so a
+		// child that already reported could otherwise be nudged again — and again
+		// — until its appendages loop away. A live child burned thousands of
+		// tokens on repeated empty continuations exactly this way.
+		const mock = createMockPi();
+		const segment = { reported: false, nudged: false };
+		const factory = createSubagentSafetynetExtension({
+			taskType: "explore",
+			cwd: "/tmp/test",
+			reporting: { send: () => {}, segment },
+		});
+		factory(mock as unknown as ExtensionAPI);
+
+		const tool = mock.tools.get(REPORT_TOOL_NAME);
+		assert.ok(tool);
+		await tool.execute("call", { summary: "done" }, undefined, undefined, createMockCtx());
+
+		// Simulate the reset beginSegment() applies mid-run.
+		segment.reported = false;
+		segment.nudged = false;
+
+		const guard = (mock.handlers.get("agent_before_settle") ?? [])[0] as Function;
+		assert.equal(await guard(), undefined, "a session that already reported is never nudged again");
+	});
 });

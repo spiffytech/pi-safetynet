@@ -18,6 +18,7 @@ import type { PermissionPromptOptions } from "./prompts.ts";
 import type { PromptKeybindings } from "./core/types.ts";
 import { showPermissionPrompt } from "./prompts.ts";
 import { capReportBody, capReportSummary } from "./core/report.ts";
+import { runResearchScript } from "./core/review-research.ts";
 import {
   PermissionStorage,
 } from "./core/permissions/index.ts";
@@ -85,11 +86,13 @@ const SUBAGENT_EPHEMERAL_CUSTOM_TYPE = "safetynet:subagent-ephemeral";
 
 /** Name of the child→parent report tool. */
 export const REPORT_TOOL_NAME = "report_to_parent";
+/** Name of the reviewer's model-authored research tool (QuickJS sandboxed). */
+export const RESEARCH_TOOL_NAME = "codemode_research";
 /** customType for the one-shot settle-guard reminder injected into the child. */
 const REPORT_REMINDER_CUSTOM_TYPE = "safetynet:report-reminder";
 
-const EXPLORE_TOOL_NAMES = ["read", "grep", "find", "ls"];
-const BUILD_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const EXPLORE_TOOL_NAMES = ["read", "grep", "find", "ls", RESEARCH_TOOL_NAME];
+const BUILD_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", RESEARCH_TOOL_NAME];
 
 // ─── Explore mode ──────────────────────────────────────────────────────────
 
@@ -105,6 +108,7 @@ function createExploreSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI)
 		});
 
 		registerCollaboration(pi, opts.reporting);
+		registerResearchTool(pi, opts.cwd);
 
 		// Defense-in-depth: block any tool outside the allowlist, and enforce the
 		// same sensitive-file block the main session applies to file reads. Without
@@ -182,6 +186,7 @@ function createBuildSafetynet(opts: SubagentSafetynetOpts): (pi: ExtensionAPI) =
 		});
 
 		registerCollaboration(pi, opts.reporting);
+		registerResearchTool(pi, opts.cwd);
 
 		pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => {
 			try {
@@ -337,6 +342,39 @@ function activeToolNames(taskType: "explore" | "build", reporting: boolean): str
 }
 
 /**
+ * Model-authored research: a QuickJS-sandboxed exploration program rather than
+ * host-decided "evidence gathering". Only the read-only bridges exist inside the
+ * sandbox, and each one refuses protected files exactly as the tool_call gate
+ * refuses them for direct reads. Registered on explore and build children alike:
+ * what to look at is the child's judgment either way.
+ */
+function registerResearchTool(pi: ExtensionAPI, cwd: string): void {
+	pi.registerTool({
+		name: RESEARCH_TOOL_NAME,
+		label: "Code Research",
+		description:
+			"Run a JavaScript research program against the repo to gather evidence in one shot. " +
+			"The program is an async function body with `tools.read(path)`, `tools.grep({pattern, path})`, " +
+			"`tools.find({path})`, `tools.ls({path})` and `text(value)`; `Promise.all` is allowed. " +
+			"Use this to chase imports, survey directories, or match patterns broadly before deciding.",
+		promptSnippet: "Explore the repo with a scripted batch of read-only calls",
+		parameters: Type.Object({
+			script: Type.String({ description: "Async function body that calls tools.read/grep/find/ls and ends with text(...)" }),
+		}),
+		async execute(_toolCallId, params) {
+			const output = await runResearchScript({
+				script: String(params.script ?? ""),
+				cwd,
+			});
+			return {
+				content: [{ type: "text", text: output || "(script produced no output)" }],
+				details: {},
+			};
+		},
+	});
+}
+
+/**
  * Register the child→parent mailbox surface for collaborative subagents:
  * the `report_to_parent` tool and the one-shot settle guard.
  *
@@ -347,6 +385,12 @@ function activeToolNames(taskType: "explore" | "build", reporting: boolean): str
  */
 function registerCollaboration(pi: ExtensionAPI, reporting: ReportingOptions | undefined): void {
 	if (!reporting) return;
+	// Session-wide latch, separate from the per-segment bookkeeping: once the
+	// child has ever produced a real report, it must never be nudged again —
+	// no matter how reporting.segment gets reset mid-run (steers, races) — or a
+	// nudge loop can burn a closed task for repeated empty "nothing to report"
+	// continuations, as a live build child demonstrated.
+	let everReported = false;
 
 	pi.registerTool({
 		name: REPORT_TOOL_NAME,
@@ -369,6 +413,7 @@ function registerCollaboration(pi: ExtensionAPI, reporting: ReportingOptions | u
 				...(params.urgent !== undefined ? { urgent: params.urgent } : {}),
 			});
 			reporting.segment.reported = true;
+			everReported = true;
 			return {
 				content: [{ type: "text", text: "Report delivered to parent." }],
 				details: {},
@@ -377,7 +422,7 @@ function registerCollaboration(pi: ExtensionAPI, reporting: ReportingOptions | u
 	});
 
 	pi.on("agent_before_settle", async () => {
-		if (reporting.segment.reported || reporting.segment.nudged) return undefined;
+		if (everReported || reporting.segment.reported || reporting.segment.nudged) return undefined;
 		reporting.segment.nudged = true;
 		return {
 			entries: [{

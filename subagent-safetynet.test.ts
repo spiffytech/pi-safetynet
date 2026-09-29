@@ -10,14 +10,19 @@ import type { Rule, Ruleset, TempRule } from "./core/types.ts";
 function createMockPi() {
 	const handlers = new Map<string, Function[]>();
 	const activeTools: string[] = [];
+	const registeredTools: Array<{ name: string }> = [];
 
 	return {
 		handlers,
 		activeTools,
+		registeredTools,
 		on(event: string, handler: Function) {
 			const list = handlers.get(event) ?? [];
 			list.push(handler);
 			handlers.set(event, list);
+		},
+		registerTool(tool: { name: string }) {
+			registeredTools.push({ name: tool.name });
 		},
 		setActiveTools(tools: string[]) {
 			activeTools.length = 0;
@@ -257,7 +262,7 @@ describe("createSubagentSafetynetExtension — explore", () => {
 		const handler = pi.handlers.get("session_start")![0]!;
 		await handler({}, createMockCtx());
 
-		assert.deepEqual(pi.activeTools, ["read", "grep", "find", "ls"]);
+		assert.deepEqual(pi.activeTools, ["read", "grep", "find", "ls", "codemode_research"]);
 	});
 
 	it("injects explore context message on context event", async () => {
@@ -355,7 +360,7 @@ describe("createSubagentSafetynetExtension — build", () => {
 		const handler = pi.handlers.get("session_start")![0]!;
 		await handler({}, createMockCtx());
 
-		assert.deepEqual(pi.activeTools, ["read", "bash", "edit", "write", "grep", "find", "ls"]);
+		assert.deepEqual(pi.activeTools, ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode_research"]);
 	});
 
 	it("injects build context message on context event", async () => {
@@ -509,3 +514,87 @@ function createMockStorage() {
 		async init() {},
 	};
 }
+
+// ─── nested tool-call parity (pi 0.99 ctx.executeTool) ───────────────────────
+//
+// pi 0.99 lets a tool call other tools (codemode scripts do this via
+// ctx.executeTool). Those nested calls arrive at the extension's `tool_call`
+// handler carrying `parentToolCallId`. Every gate here must treat them exactly
+// like a direct model call — a future change that special-cases nested calls
+// would reopen a whole bypass class without touching the direct path.
+
+describe("nested tool-call parity — parentToolCallId calls gate identically", () => {
+	async function buildChild(): Promise<ReturnType<typeof createMockPi>> {
+		const parentStorage = createMockStorage();
+		const factory = createSubagentSafetynetExtension({
+			taskType: "build",
+			cwd: "/tmp/test",
+			parentCtx: createMockCtx() as any,
+			parentStorage: parentStorage as any,
+		});
+		const pi = createMockPi();
+		factory(pi as unknown as ExtensionAPI);
+		await pi.handlers.get("session_start")![0]!({}, createMockCtx());
+		return pi;
+	}
+
+	it("build: a nested bash call is denied exactly like a direct one", async () => {
+		const pi = await buildChild();
+		const handler = pi.handlers.get("tool_call")![0]!;
+		const direct = await handler(
+			makeToolCallEvent("bash", { command: "cat .env" }),
+			createMockCtx(),
+		);
+		const nested = await handler(
+			{ ...makeToolCallEvent("bash", { command: "cat .env" }), parentToolCallId: "parent-1" },
+			createMockCtx(),
+		);
+		assert.deepEqual(nested, direct, "nested and direct calls resolve identically");
+		assert.equal(nested?.block, true, "a nested call is still gated");
+		assert.match(nested?.reason ?? "", /Sensitive file/);
+	});
+
+	it("explore: an out-of-allowlist tool is rejected identically whether nested or direct", async () => {
+		const factory = createSubagentSafetynetExtension({ taskType: "explore", cwd: "/tmp/test" });
+		const pi = createMockPi();
+		factory(pi as unknown as ExtensionAPI);
+		await pi.handlers.get("session_start")![0]!({}, createMockCtx());
+		const handler = pi.handlers.get("tool_call")![0]!;
+		const direct = await handler(
+			makeToolCallEvent("bash", { command: "ls" }),
+			createMockCtx(),
+		);
+		const nested = await handler(
+			{ ...makeToolCallEvent("bash", { command: "ls" }), parentToolCallId: "parent-1" },
+			createMockCtx(),
+		);
+		assert.deepEqual(nested, direct, "nested and direct calls resolve identically");
+		assert.ok(nested?.block, "explore rejects bash whether or not the call is nested");
+	});
+});
+
+describe("explore research tool (codemode_research)", () => {
+	async function exploreChild(): Promise<{ pi: ReturnType<typeof createMockPi> }> {
+		const factory = createSubagentSafetynetExtension({ taskType: "explore", cwd: "/tmp/test" });
+		const pi = createMockPi();
+		factory(pi as unknown as ExtensionAPI);
+		await pi.handlers.get("session_start")![0]!({}, createMockCtx());
+		return { pi };
+	}
+
+	it("registers a model-authored research tool alongside the read-only builtins", async () => {
+		const { pi } = await exploreChild();
+		const names = pi.registeredTools.map((t: { name: string }) => t.name);
+		// read/grep/find/ls are pi builtins filtered in by createAgentSession's
+		// allowlist, not registered here; codemode_research is ours.
+		assert.ok(names.includes("codemode_research"), "codemode_research is registered");
+		assert.equal(names.includes("bash"), false, "explore registers no write/shell tools");
+	});
+
+	it("rejects out-of-allowlist nested tool names, still gated", async () => {
+		const { pi } = await exploreChild();
+		const handler = pi.handlers.get("tool_call")![0]!;
+		const direct = await handler(makeToolCallEvent("codemode_research", { script: "text('x')" }), createMockCtx());
+		assert.equal(direct, undefined, "codemode_research itself is allowed in explore mode");
+	});
+});

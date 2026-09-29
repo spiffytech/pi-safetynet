@@ -199,8 +199,8 @@ export type CreateSubagentSessionResult =
  */
 export function subagentToolNames(taskType: "explore" | "build", reporting: boolean): string[] {
 	const base = taskType === "explore"
-		? ["read", "grep", "find", "ls"]
-		: ["read", "bash", "edit", "write", "grep", "find", "ls"];
+		? ["read", "grep", "find", "ls", "codemode_research"]
+		: ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode_research"];
 	return reporting ? [...base, REPORT_TOOL_NAME] : base;
 }
 
