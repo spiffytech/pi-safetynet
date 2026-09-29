@@ -159,7 +159,6 @@ export async function runPermissionReview(
   // No model configured → single attempt on the parent model (historical default).
   if (specs.length === 0) return runPermissionReviewWithModel(opts, deps, "");
   const failures: { spec: string; message: string }[] = [];
-  let lastVerdict: ReviewVerdict | undefined;
   for (let i = 0; i < specs.length; i++) {
     const spec = specs[i]!;
     const verdict = await runPermissionReviewWithModel(opts, deps, spec);
@@ -178,8 +177,13 @@ export async function runPermissionReview(
   }
   if (failures.length > 0) {
     deps.onDiagnostic?.(formatReviewerFallback(failures), "warning");
+    // Every configured model failed — say exactly that. "No reviewer model
+    // configured" here would be a lie the user can act on the wrong way.
+    return { kind: "transient", message: formatReviewerFallback(failures) };
   }
-  return lastVerdict ?? { kind: "transient", message: "No reviewer model configured" };
+  // Unreachable in practice (specs.length > 0 implies a failure was recorded),
+  // kept as a conservative fall-through.
+  return { kind: "transient", message: "No reviewer model configured" };
 }
 
 /** Run a single review attempt against one resolved model spec. */
