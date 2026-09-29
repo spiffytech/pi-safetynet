@@ -65,17 +65,17 @@ The reviewer returns a JSON assessment `{risk_level, user_authorization, outcome
 - It judges against the **user's own messages only** — the transcript it sees contains just the human conversation, never the assistant's tool calls or outputs, so its own momentum can't look like consent. It can still verify local state itself with read-only tools.
 - **Egress is high risk.** Pushing to a remote, connecting to a host, publishing, or deploying to a destination the user never named is treated as unauthorized egress and denied, not waved through as routine.
 - **Authorization defaults to `unknown`.** Only the user's own messages establish `user_authorization`; a missing score defaults to `unknown` rather than guessing lenient.
-- **Allow** — creates a turn-scoped temp rule so repeats in the same turn skip re-review. The model sees a hidden nudge.
+- **Allow** — creates a turn-scoped temp rule so repeats in the same turn skip re-review. The model sees a hidden nudge. A shell-glob command, or one where some subcommands were skipped, is approved for that call only — no rule is minted.
 - **Deny** — blocks with the rationale, keeps the turn alive so the model can try a safer alternative. After `autoApprove.maxDenials` consecutive reviewer denials (default 3) the turn is aborted. Denials that touch a sensitive file (e.g. `cat .env`) are exempt from that budget. Ruleset, read-only/mode, and headless denials use a separate per-turn budget (`autoDeny.maxStrikes`); hazardous-file denials never abort at all.
 Every denial is surfaced in two places:
 - **On the rejected tool call** — the blocked call's error result reads `Auto-denied <permission>: <target> — <rationale>` (a `Ruleset denied …` or `Denied …` prefix for deny-rule/headless denials). The reviewer's internal risk/authorization scores are not shown.
 - **To the model** — a hidden transcript message carries the same line so the reason reaches the model even when the denial aborts the turn, plus a one-line corrective instruction keyed to the denial source (mode denials: propose the change and let the user switch modes; ruleset/headless denials: stop retrying, explain what you need). When the denial aborts, the message is also rendered as a visible transcript entry next to the rejected call.
-- **Infrastructure failure** (timeout, API error, unparseable) — falls back to the interactive permission prompt with a notice, while retrying the reviewer every 30s. If a retry succeeds the prompt is dismissed automatically.
+- **Infrastructure failure** (timeout, API error, unparseable) — falls back to the interactive permission prompt with a notice. The reviewer does not retry and cannot auto-resolve the prompt: once escalated, the user decides. A stale or delayed model verdict can never convert a prompt dismissal into an approval.
 
 Configure which model handles review and timeouts in global config:
 
 ```json
-{ "autoApprove": { "model": "provider/model-id", "timeoutMs": 90000, "maxDenials": 3, "retryIntervalMs": 30000, "maxRetries": 2 } }
+{ "autoApprove": { "model": "provider/model-id", "timeoutMs": 90000, "maxDenials": 3 } }
 ```
 
 
@@ -118,6 +118,12 @@ pi-safetynet automatically denies access to sensitive files, regardless of tool:
 - Anything under `.ssh/`, `.gnupg/`, `.aws/credentials`, `.docker/config.json`
 
 These are blocked at the file-permission level — whether accessed via `read`, `edit`, `bash`, or redirect.
+
+Bash operands are only inspected for file-touching commands (`cat`/`head`/`grep`/`cp`/…): text arguments like `echo .env` or `git commit -m 'update .env'` are never treated as paths, and pattern/script arguments of `grep`/`rg`/`sed`/`awk`/`find` are skipped too (`grep -e '.env' f` is safe, `grep x .env` is not).
+
+Operands built from shell variables are resolved statically: in-command assignments (`F=.env; cat $F`), exported environment variables (pi runs `bash -c <cmd>` in a fresh shell per tool call, so `process.env` is the shell's environment), and `$PWD`. An operand that cannot be pinned down — `$(…)`, arithmetic, unknown variables — asks rather than runs.
+
+Globs are checked for reachability under bash's dot rule (a pattern without a leading `.` can never match a hidden name, unless `shopt -s dotglob` is set in the same command): `cat .e*`, `cat .*`, `cat *` (which reaches `id_rsa`) are denied flat, since `cat id_rsa` is non-askable itself; `cat *.env`, `cat README*`, `cat dist/*` are not.
 
 Hazardous-file denials **never abort the conversation and never consume a budget**. The read/write stays blocked, but the turn continues so the model can recover (ask the user, use an env var) — ending the turn wouldn't stop it retrying next turn and would only strand you mid-task. This covers file-tool and redirect access, which are denied mechanically, and bash commands that merely name a secret (`cat .env`), where the auto-reviewer denies but is exempted from its abort budget. Every other auto-denial — explicit `deny` rules, read-only/mode write denials, and headless (no-TUI) denials — draws from one per-turn strike budget: each strike nudges the model, and the strike that exhausts the budget (`autoDeny.maxStrikes`, default **3**) aborts the turn. Each scope (main session, and each subagent independently) has its own budget, and the counter resets on `agent_end`.
 
@@ -266,25 +272,26 @@ You can define rules that apply across all projects via the global config file a
     { "permission": "bash", "pattern": "cargo test", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "npm publish *", "action": "deny", "modes": ["build", "plan"] }
   ],
-  "subagents": ["subagent_explore", "subagent_build"]
+  "subagents": ["subagent_run"]
 }
 ```
 
 #### `subagents`
 
-Controls which subagent tools are available to the agent. The value is an array of tool names:
+An on/off switch for the background subagent tools: an empty array `[]` disables them, any non-empty array enables the whole set (`subagent_run`, `subagent_status`, `subagent_send`, `subagent_close`, `subagent_bash_output`). The array's contents are not a per-tool selector — `["subagent_run"]` is the documented value, but any non-empty value is treated the same.
 
-- `"subagent_explore"` — read-only subagent for codebase inspection
-- `"subagent_build"` — full build-access subagent
-
-If the key is omitted or `null`, all subagent tools are enabled (the default). An empty array `[]` disables all subagent tools.
+If the key is omitted or `null`, subagents are enabled (the default).
 
 Examples:
 
 ```json
-{ "subagents": ["subagent_explore"] }
+{ "subagents": ["subagent_run"] }
 { "subagents": [] }
 ```
+
+##### Async two-way subagents
+
+`subagent_run` returns a job id immediately and keeps the subagent alive across turns. The parent keeps talking while it works and is woken when the child reports or goes idle. Companion tools: `subagent_send` (message the child), `subagent_status` (bounded state view — never the child's transcript; also returns any reports not yet delivered, so findings are recoverable if a push is missed), `subagent_bash_output` (tail the child's current/most-recent bash command), `subagent_close` (end it). Children may call `report_to_parent` to send findings upward; `urgent: true` wakes the parent immediately. Children are killed on the next user message sent under a different mode. Up to 8 live jobs; the footer shows how many are running/idle.
 
 #### `keybindings`
 
