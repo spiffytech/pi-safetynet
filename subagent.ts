@@ -13,11 +13,11 @@ import {
 	type CreateAgentSessionResult,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
-import type { AutoDenyConfig, Paradigm, ProfileName, ModeAliases, Ruleset } from "./core/types.ts";
+import type { AutoDenyConfig, Paradigm, ProfileName, ModeAliases } from "./core/types.ts";
 import type { PromptKeybindings } from "./core/types.ts";
 import type { PermissionStorage } from "./core/permissions/index.ts";
 import { toDisplayPath } from "./core/project.ts";
-import { createSubagentSafetynetExtension } from "./subagent-safetynet.ts";
+import { createSubagentSafetynetExtension, REPORT_TOOL_NAME, type ReportingOptions } from "./subagent-safetynet.ts";
 
 /** Extension factory that overrides the system prompt via before_agent_start return. */
 function createSystemPromptExtension(systemPrompt: string): (pi: ExtensionAPI) => void {
@@ -41,6 +41,17 @@ export function zeroUsage(): Usage {
 		totalTokens: 0,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
+}
+
+/** Whether an accumulator has seen no billable activity yet. */
+export function isZeroUsage(usage: Usage): boolean {
+	return (
+		(usage.input || 0) === 0 &&
+		(usage.output || 0) === 0 &&
+		(usage.cacheRead || 0) === 0 &&
+		(usage.cacheWrite || 0) === 0 &&
+		(usage.cost?.total || 0) === 0
+	);
 }
 
 /**
@@ -67,6 +78,24 @@ export function accumulateUsage(target: Usage, usage: Usage): void {
 /** Deep copy of an accumulator, safe to hand to pi as a tool-result `usage`. */
 export function snapshotUsage(usage: Usage): Usage {
 	return { ...usage, cost: { ...usage.cost } };
+}
+
+/** Field-wise `total - part`; used to emit only the not-yet-delivered usage delta. */
+export function subtractUsage(total: Usage, part: Usage): Usage {
+	return {
+		input: (total.input || 0) - (part.input || 0),
+		output: (total.output || 0) - (part.output || 0),
+		cacheRead: (total.cacheRead || 0) - (part.cacheRead || 0),
+		cacheWrite: (total.cacheWrite || 0) - (part.cacheWrite || 0),
+		totalTokens: (total.totalTokens || 0) - (part.totalTokens || 0),
+		cost: {
+			input: (total.cost?.input || 0) - (part.cost?.input || 0),
+			output: (total.cost?.output || 0) - (part.cost?.output || 0),
+			cacheRead: (total.cost?.cacheRead || 0) - (part.cost?.cacheRead || 0),
+			cacheWrite: (total.cost?.cacheWrite || 0) - (part.cost?.cacheWrite || 0),
+			total: (total.cost?.total || 0) - (part.cost?.total || 0),
+		},
+	};
 }
 
 /**
@@ -99,7 +128,6 @@ export interface SubagentOptions {
 	prompt: string;
 	parentCtx: ExtensionContext;
 	parentStorage: PermissionStorage;
-	initialRules: Ruleset;
 	signal?: AbortSignal | undefined;
 	onUpdate?: AgentToolUpdateCallback<unknown> | undefined;
 	cwd: string;
@@ -141,138 +169,126 @@ function formatActivity(toolName: string, args: Record<string, unknown>, cwd: st
 	}
 }
 
-export async function runSubagent(opts: SubagentOptions): Promise<{
-	content: { type: "text"; text: string }[];
-	details: Record<string, unknown>;
-	/** Usage accumulated by the subagent. Pi persists this on the parent's toolResult
-	 *  entry, which is what puts delegated spend into the normal stats line and
-	 *  /session without any extension-side bookkeeping. */
-	usage: Usage;
-}> {
-	// Declared before any early return so every exit path can attach it.
-	const usage = zeroUsage();
-	const { taskType, prompt, parentCtx, parentStorage, initialRules, signal, onUpdate, cwd } = opts;
+export interface SubagentSessionConfig {
+	taskType: "explore" | "build";
+	cwd: string;
+	parentCtx: ExtensionContext;
+	parentStorage: PermissionStorage;
+	model?: Model<any> | undefined;
+	thinkingLevel?: string | undefined;
+	trustExternalPaths?: boolean;
+	promptKeybindings: PromptKeybindings;
+	autoDenyConfig: AutoDenyConfig;
+	paradigm?: Paradigm;
+	modeAliases?: ModeAliases;
+	systemPrompt?: string;
+	reporting?: ReportingOptions;
+	/** Persistent jobs keep pi's compaction on; the one-shot reviewer turns it off. */
+	compactionEnabled?: boolean;
+	onPermissionDenied: () => void;
+}
 
-	const agentDir = process.env.PI_AGENT_DIR ?? `${process.env.HOME}/.pi/agent`;
+export type CreateSubagentSessionResult =
+	| { ok: true; session: CreateAgentSessionResult["session"] }
+	| { ok: false; kind: "no_model" | "create"; message: string };
 
-	// Build a ModelRuntime from the same agentDir that `createAgentSession` would use
-	// internally if we passed none. Constructing it explicitly lets us pass the async
-	// `modelRuntime` option (0.80.8 replaced the sync `modelRegistry` option).
-	const authPath = `${agentDir}/auth.json`;
-	const modelsPath = `${agentDir}/models.json`;
-	const modelRuntime = await ModelRuntime.create({ authPath, modelsPath });
-
-	const settingsManager = SettingsManager.create(cwd, agentDir);
-	settingsManager.setCompactionEnabled(false);
-
-	const tools = taskType === "explore"
+/**
+ * `createAgentSession`'s `tools` option is an allowlist, so extension tools
+ * must be listed here or they are filtered out of the registry and cannot be
+ * activated later via setActiveTools. Exported for regression testing.
+ */
+export function subagentToolNames(taskType: "explore" | "build", reporting: boolean): string[] {
+	const base = taskType === "explore"
 		? ["read", "grep", "find", "ls"]
 		: ["read", "bash", "edit", "write", "grep", "find", "ls"];
+	return reporting ? [...base, REPORT_TOOL_NAME] : base;
+}
 
-	let hitPermissionDenied = false;
+/**
+ * Create (but do not prompt) a subagent AgentSession.
+ *
+ * Shared by the one-shot reviewer path (`runSubagent`) and the persistent
+ * two-way runner so provider/auth/session setup lives in exactly one place.
+ */
+export async function createSubagentSession(cfg: SubagentSessionConfig): Promise<CreateSubagentSessionResult> {
+	const agentDir = process.env.PI_AGENT_DIR ?? `${process.env.HOME}/.pi/agent`;
 
-	// Session needs to exist before we can create the onPermissionDenied callback,
-	// but the extension factory runs during loader.reload() which is before the session
-	// is created. So we use an indirection: the extension captures the ref, and we
-	// set it after the session is created.
+	const modelRuntime = await ModelRuntime.create({
+		authPath: `${agentDir}/auth.json`,
+		modelsPath: `${agentDir}/models.json`,
+	});
+
+	const settingsManager = SettingsManager.create(cfg.cwd, agentDir);
+	if (!cfg.compactionEnabled) settingsManager.setCompactionEnabled(false);
+
+	const tools = subagentToolNames(cfg.taskType, cfg.reporting !== undefined);
+
 	let sessionRef: { abort: () => void } | null = null;
-	const onPermissionDenied = () => {
-		hitPermissionDenied = true;
-		sessionRef?.abort();
-	};
-	const loaderOpts: ConstructorParameters<typeof DefaultResourceLoader>[0] = {
-		cwd,
+	const loader = new DefaultResourceLoader({
+		cwd: cfg.cwd,
 		agentDir,
 		settingsManager,
 		noExtensions: true,
 		extensionFactories: [
-		createSubagentSafetynetExtension({
-			taskType,
-			parentCtx,
-			parentStorage,
-			initialRules,
-			cwd,
-			onPermissionDenied,
-			trustExternalPaths: opts.trustExternalPaths ?? false,
-			promptKeybindings: opts.promptKeybindings,
-			autoDenyConfig: opts.autoDenyConfig,
-			paradigm: opts.paradigm ?? "plan-build",
-			modeAliases: opts.modeAliases ?? {},
-			// A custom system prompt marks a specialized subagent (permission
-			// reviewer / inferred-rule judge). It must not inherit the generic
-			// explore/build role message, which the reviewer otherwise mistakes
-			// for the session it is judging.
-			omitContextMessage: opts.systemPrompt !== undefined,
-		}),
-		opts.systemPrompt ? createSystemPromptExtension(opts.systemPrompt) : null,
+			createSubagentSafetynetExtension({
+				taskType: cfg.taskType,
+				parentCtx: cfg.parentCtx,
+				parentStorage: cfg.parentStorage,
+				cwd: cfg.cwd,
+				onPermissionDenied: () => {
+					cfg.onPermissionDenied();
+					sessionRef?.abort();
+				},
+				trustExternalPaths: cfg.trustExternalPaths ?? false,
+				promptKeybindings: cfg.promptKeybindings,
+				autoDenyConfig: cfg.autoDenyConfig,
+				paradigm: cfg.paradigm ?? "plan-build",
+				modeAliases: cfg.modeAliases ?? {},
+				omitContextMessage: cfg.systemPrompt !== undefined,
+				...(cfg.reporting ? { reporting: cfg.reporting } : {}),
+			}),
+			cfg.systemPrompt ? createSystemPromptExtension(cfg.systemPrompt) : null,
 		].filter(Boolean) as any[],
-	};
-
-	const loader = new DefaultResourceLoader(loaderOpts);
+	});
 	await loader.reload();
 
+	const model = cfg.model ?? cfg.parentCtx.model;
+	if (!model) return { ok: false, kind: "no_model", message: "No model available in parent context." };
 
-	const model = opts.model ?? parentCtx.model;
-	if (!model) {
-		return {
-			content: [{ type: "text", text: "Error: No model available in parent context." }],
-			details: { error: "no_model" },
-			usage: snapshotUsage(usage),
-		};
-	}
-
-	// Forward extension-registered providers from the parent ModelRegistry so the
-	// subagent can resolve auth for non-built-in providers (e.g. hyper).
-	// - Config-registered providers are re-registered as config.
-	// - Native providers (full Provider objects, e.g. hyper/neuralwatt registered via
-	//   pi.registerProvider(Provider)) are passed through as-is — re-composing them from
-	//   parts loses streamSimple/refreshModels/headers and can mislabel OAuth as unconfigured.
 	const providerId = model.provider;
-	const config = parentCtx.modelRegistry.getRegisteredProviderConfig(providerId);
-	const native = parentCtx.modelRegistry.getRegisteredNativeProvider(providerId);
+	const config = cfg.parentCtx.modelRegistry.getRegisteredProviderConfig(providerId);
+	const native = cfg.parentCtx.modelRegistry.getRegisteredNativeProvider(providerId);
 	if (config) {
 		modelRuntime.registerProvider(providerId, config);
 	} else if (native) {
 		modelRuntime.registerNativeProvider(native);
 	}
 
-	// Runtime API keys (set via setRuntimeApiKey, e.g. /apikey or another extension) live
-	// only in the parent's runtime and are invisible to the fresh subagent ModelRuntime,
-	// which reads auth.json. Forward them so a runtime-keyed provider doesn't fail with
-	// "No API key found". OAuth providers are excluded — they keep full refresh semantics.
-	const authStatus = parentCtx.modelRegistry.getProviderAuthStatus(providerId);
+	const authStatus = cfg.parentCtx.modelRegistry.getProviderAuthStatus(providerId);
 	if (authStatus.source === "runtime") {
-		const runtimeKey = await parentCtx.modelRegistry.getApiKeyForProvider(providerId);
+		const runtimeKey = await cfg.parentCtx.modelRegistry.getApiKeyForProvider(providerId);
 		if (runtimeKey) await modelRuntime.setRuntimeApiKey(providerId, runtimeKey);
 	}
-
-	// Settle the snapshot (provider configured + auth type) before createAgentSession
-	// asserts auth on it; otherwise the first prompt can race an unawaited refresh.
 	await modelRuntime.refresh({ allowNetwork: false });
 
 	let result: CreateAgentSessionResult;
 	try {
 		result = await createAgentSession({
-			cwd,
+			cwd: cfg.cwd,
 			model,
 			tools,
-			thinkingLevel: opts.thinkingLevel as any,
+			thinkingLevel: cfg.thinkingLevel as any,
 			modelRuntime,
 			resourceLoader: loader,
-			sessionManager: SessionManager.inMemory(cwd),
+			sessionManager: SessionManager.inMemory(cfg.cwd),
 			settingsManager,
 		});
 	} catch (err) {
-		return {
-			content: [{ type: "text", text: `Error creating subagent session: ${err}` }],
-			details: { error: String(err) },
-			usage: snapshotUsage(usage),
-		};
+		return { ok: false, kind: "create", message: String(err) };
 	}
 
-	const { session } = result;
-	sessionRef = session; // wire up the abort target for onPermissionDenied
-
+	const session = result.session;
+	sessionRef = session;
 	await session.bindExtensions({
 		commandContextActions: {
 			waitForIdle: () => session.agent.waitForIdle(),
@@ -283,6 +299,55 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			reload: async () => {},
 		},
 	});
+	return { ok: true, session };
+}
+
+
+export async function runSubagent(opts: SubagentOptions): Promise<{
+	content: { type: "text"; text: string }[];
+	details: Record<string, unknown>;
+	/** Usage accumulated by the subagent. Pi persists this on the parent's toolResult
+	 *  entry, which is what puts delegated spend into the normal stats line and
+	 *  /session without any extension-side bookkeeping. */
+	usage: Usage;
+}> {
+	// Declared before any early return so every exit path can attach it.
+	const usage = zeroUsage();
+	const { taskType, prompt, parentCtx, parentStorage, signal, onUpdate, cwd } = opts;
+
+	let hitPermissionDenied = false;
+	const created = await createSubagentSession({
+		taskType,
+		cwd,
+		parentCtx,
+		parentStorage,
+		...(opts.model !== undefined ? { model: opts.model } : {}),
+		...(opts.thinkingLevel !== undefined ? { thinkingLevel: opts.thinkingLevel } : {}),
+		...(opts.trustExternalPaths !== undefined ? { trustExternalPaths: opts.trustExternalPaths } : {}),
+		promptKeybindings: opts.promptKeybindings,
+		autoDenyConfig: opts.autoDenyConfig,
+		...(opts.paradigm !== undefined ? { paradigm: opts.paradigm } : {}),
+		...(opts.modeAliases !== undefined ? { modeAliases: opts.modeAliases } : {}),
+		...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
+		compactionEnabled: false,
+		onPermissionDenied: () => {
+			hitPermissionDenied = true;
+		},
+	});
+	if (!created.ok) {
+		return {
+			content: [{
+				type: "text",
+				text: created.kind === "no_model"
+					? "Error: No model available in parent context."
+					: `Error creating subagent session: ${created.message}`,
+			}],
+			details: { error: created.kind === "no_model" ? "no_model" : created.message },
+			usage: snapshotUsage(usage),
+		};
+	}
+	const { session } = created;
+
 	// bindExtensions resets active tools to defaults.
 	// The subagent safetynet extension fixes this in its session_start handler
 	// via pi.setActiveTools().

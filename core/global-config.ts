@@ -142,7 +142,7 @@ export function saveDefaultProfile(profile: ProfileName): void {
 /** Which subagent tools to enable. Defaults to all if key is omitted or null. Empty array disables all. */
 export function loadSubagentsConfig(): string[] {
   const config = loadConfig();
-  if (config.subagents == null) return ["subagent_explore", "subagent_build"];
+  if (config.subagents == null) return ["subagent_run"];
   return config.subagents;
 }
 

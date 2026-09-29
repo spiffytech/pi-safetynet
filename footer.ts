@@ -26,7 +26,7 @@ import type { SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
  * if the line ever truncates it cuts from the right of this list. It currently
  * holds only the mode label — the read-only indicator must never be hidden.
  */
-export const SAFETYNET_STATUS_KEYS = ["safetynet"] as const;
+export const SAFETYNET_STATUS_KEYS = ["safetynet", "safetynet-jobs"] as const;
 export type SafetynetStatusKey = (typeof SAFETYNET_STATUS_KEYS)[number];
 
 export interface CustomFooterDeps {

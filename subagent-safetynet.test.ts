@@ -406,31 +406,68 @@ describe("createSubagentSafetynetExtension — build", () => {
 	});
 });
 
-// ─── agent_end does not clear parent temp rules ────────────────────────────
+// ─── build subagent shares the parent permission pool ────────────────────────
 
-describe("subagent agent_end does NOT clear parent temp rules", () => {
-	it("agent_end clears subagent temp rules but not parent's", async () => {
+describe("build subagent shares the parent's permission pool", () => {
+	async function buildWithParent() {
 		const parentStorage = createMockStorage();
-		const subagentStorage = createMockStorage();
+		const factory = createSubagentSafetynetExtension({
+			taskType: "build",
+			cwd: "/tmp/test",
+			parentCtx: createMockCtx() as any,
+			parentStorage: parentStorage as any,
+		});
+		const pi = createMockPi();
+		factory(pi as unknown as ExtensionAPI);
+		await pi.handlers.get("session_start")![0]!({}, createMockCtx());
+		return { pi, parentStorage };
+	}
 
-		// Simulate both storages having temp rules
-		const tempRule: TempRule = {
-			rule: { permission: "bash", pattern: "npm test", action: "allow", modes: ["build"] },
-			expiry: { type: "turn" },
-		};
-		parentStorage.temp.addRules([tempRule]);
-		subagentStorage.temp.addRules([tempRule]);
+	it("honors a rule already granted in the parent (no re-prompt)", async () => {
+		const { pi, parentStorage } = await buildWithParent();
+		parentStorage.temp.addRules([
+			{ rule: { permission: "bash", pattern: "npm test", action: "allow", modes: ["build"] }, expiry: { type: "turn" } },
+		]);
+		const result = await pi.handlers.get("tool_call")![0]!(
+			makeToolCallEvent("bash", { command: "npm test" }),
+			createMockCtx(),
+		);
+		assert.equal(result, undefined, "a parent-granted rule authorizes the child");
+	});
 
-		assert.equal(parentStorage.temp.getRules().length, 1, "parent has temp rules before agent_end");
-		assert.equal(subagentStorage.temp.getRules().length, 1, "subagent has temp rules before agent_end");
+	it("a child's agent_end leaves the shared pool's turn rules intact", async () => {
+		const { pi, parentStorage } = await buildWithParent();
+		parentStorage.temp.addRules([
+			{ rule: { permission: "bash", pattern: "npm test", action: "allow", modes: ["build"] }, expiry: { type: "turn" } },
+		]);
+		await pi.handlers.get("agent_end")![0]!();
+		assert.equal(parentStorage.temp.getRules().length, 1, "a child must not clear the shared pool mid-turn");
+	});
+});
 
-		// Simulate what the subagent-safetynet agent_end handler does:
-		// it calls subagentStorage.temp.clearTurnRules() but NOT parentStorage.temp.clearTurnRules()
-		subagentStorage.temp.clearTurnRules();
-		// (parentStorage.temp.clearTurnRules() is intentionally NOT called)
+// ─── explore subagents block hazardous reads ──────────────────────────────
 
-		assert.equal(subagentStorage.temp.getRules().length, 0, "subagent temp rules cleared");
-		assert.equal(parentStorage.temp.getRules().length, 1, "parent temp rules NOT cleared");
+describe("explore subagent hazardous-read guard", () => {
+	async function callExplore(toolName: string, input: Record<string, unknown>) {
+		const factory = createSubagentSafetynetExtension({ taskType: "explore", cwd: "/tmp/test" });
+		const pi = createMockPi();
+		factory(pi as unknown as ExtensionAPI);
+		await pi.handlers.get("session_start")![0]!({}, createMockCtx());
+		const toolHandler = pi.handlers.get("tool_call")![0]!;
+		return toolHandler(makeToolCallEvent(toolName, input), createMockCtx());
+	}
+
+	it("blocks reading a hazardous file the parent itself would deny", async () => {
+		for (const p of [".env", "@.env", ".ssh/id_rsa", ".npmrc", ".ENV"]) {
+			const result = await callExplore("read", { path: p });
+			assert.ok(result, `${p} must be blocked`);
+			assert.equal(result!.block, true);
+			assert.match(result!.reason, /Sensitive file/);
+		}
+	});
+
+	it("still allows a normal read", async () => {
+		assert.equal(await callExplore("read", { path: "src/app.ts" }), undefined);
 	});
 });
 
