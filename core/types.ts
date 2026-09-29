@@ -80,8 +80,6 @@ export interface AutoApproveConfig {
   model?: string | string[];
   timeoutMs?: number;
   maxDenials?: number;
-  retryIntervalMs?: number;
-  maxRetries?: number;
   /** Warn (sticky UI widget) when the reviewer-latency EMA exceeds this many
    *  milliseconds. Default 8000. */
   latencyWarnEmaMs?: number;

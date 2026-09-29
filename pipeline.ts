@@ -18,7 +18,7 @@ import { showPermissionPrompt } from "./prompts.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import { PermissionStorage } from "./core/permissions/index.ts";
 import type { PermissionCheck } from "./core/check.ts";
-import { actionWrites } from "./core/check.ts";
+import { actionWrites, patternHasBashGlob } from "./core/check.ts";
 import { isHazardousFile, subcommandTokenLists } from "./core/bash-parser.ts";
 import { isAutoEnabled, loadAutoApproveConfig, setAutoEnabled } from "./core/auto-config-state.ts";
 import type { InferredEngine } from "./core/inferred/engine.ts";
@@ -26,7 +26,6 @@ import {
   runPermissionReview, reviewConsecutiveDenies, reviewResetDenies,
   reviewIncrementDenies, reviewTurnToken, reviewBumpTurnToken,
   reviewIsActive, reviewSetActive,
-  getPendingAutoResult, clearPendingAutoResult, setPendingAutoResult,
   resetReviewStateForTests,
 } from "./core/reviewer-state.ts";
 
@@ -35,15 +34,17 @@ import {
 export interface PipelineDeps {
   /** Where prompts + notifies render (main ctx, or parentCtx for bridged). */
   displayCtx: ExtensionContext;
-  /** Primary permission storage. */
+  /** Primary permission storage (the session tree's single pool). */
   storage: PermissionStorage;
-  /** Additional storages receiving the same rules (bridged: [subagent, parent]). */
-  dualWrite?: PermissionStorage[];
   /** Called when non-once, non-turn session rules are created (index.ts only). */
   appendSessionRules?: (rules: Ruleset, cwd: string) => void;
   cwd: string;
   /** Rule modes keyed on profile: ["plan","build"] in plan, ["build"] in build. */
   allowModes: ProfileName[];
+  /** Re-read the current session mode at decision time. A flip to read-only
+   *  during the awaited review invalidates a write approval taken under
+   *  read-write. Omit (tests) to skip the guard. */
+  currentReviewProfile?: () => "ro" | "rw";
   /** Extra abort on deny (bridged: also kill the subagent). */
   onDenied?: () => void;
   keybindings: PromptKeybindings;
@@ -64,8 +65,6 @@ export interface PipelineDeps {
   hazardousDenyState?: DenyStrikeState;
   /** Reviewer subagent spawner. Defaults to runSubagent; injectable for tests. */
   reviewSpawn?: (opts: any) => Promise<any>;
-  /** Optional abort signal to pass into the prompt loop (auto escalation). */
-  promptAbortSignal?: AbortSignal;
   /** Optional reason text to show in the prompt header (auto escalation). */
   promptReason?: string;
   /** Inferred-rules engine (bash shape counters → judge → proposal queue).
@@ -358,6 +357,21 @@ export async function resolvePermission(
     return undefined;
   };
 
+  /** Re-read the session mode at decision time. A flip to read-only while the
+   *  reviewer was running (e.g. the mode-toggle shortcut) invalidates a write
+   *  approval taken under read-write. */
+  const modeFlipBlock = (): { block: true; reason: string } | undefined => {
+    if (!deps.currentReviewProfile) return undefined;
+    if (reviewProfile === "rw" && deps.currentReviewProfile() === "ro") {
+      return {
+        block: true,
+        reason:
+          "Session switched to read-only while this action was being reviewed; the approval no longer applies. Re-run it in read-write mode.",
+      };
+    }
+    return undefined;
+  };
+
   // ── Allow / Deny short-circuits ──────────────────────────────────────────
   if (action === "allow") return undefined;
 
@@ -388,8 +402,6 @@ export async function resolvePermission(
     const config = loadAutoApproveConfig();
     const timeoutMs = config.timeoutMs ?? 90000;
     const maxDenials = config.maxDenials ?? 3;
-    const retryIntervalMs = config.retryIntervalMs ?? 30000;
-    const maxRetries = config.maxRetries ?? 2;
 
     // One-shot review attempt
     const ctl = new AbortController();
@@ -432,9 +444,19 @@ export async function resolvePermission(
       if (v.kind === "assessment" && v.assessment.outcome === "allow") {
         // Approve
         reviewResetDenies();
+        // A mode flip during the awaited review invalidates the write approval.
+        const staleMode = modeFlipBlock();
+        if (staleMode) return staleMode;
+        // A glob in an approved command would mint a rule matching a broader
+        // family (`rm -rf *` \u2192 `rm -rf .*`). Approve this invocation only.
+        if (opts.permission === "bash" && (opts.check.unapproved ?? []).some(patternHasBashGlob)) {
+          deps.displayCtx.ui.notify(` Reviewer allowed (risk: ${v.assessment.risk_level}, auth: ${v.assessment.user_authorization})`, "info");
+          deps.sendAutoApproval?.(v.assessment.risk_level, v.assessment.user_authorization);
+          return undefined;
+        }
         const tempRules = buildApprovalRules(opts.check, opts.permission, deps.cwd, deps.allowModes, opts.target);
-        const allStorages = [deps.storage, ...(deps.dualWrite ?? [])];
-        for (const s of allStorages) s.addTempRules(tempRules);
+        // Turn-scoped: the shared pool, expired by the root session's agent_end.
+        deps.storage.addTempRules(tempRules);
         if (opts.permission === "bash") deps.inferred?.recordApproval(opts.check.unapproved ?? [], deps.allowModes);
 
         const recheckResult = opts.recheck();
@@ -476,30 +498,13 @@ export async function resolvePermission(
         // Fall through to normal prompt
       }
 
-      // Transient — start background retries and fall through to prompt
+      // Transient — the reviewer could not produce a verdict. Fall through to
+      // the manual prompt and let the USER decide. Deliberately do NOT retry and
+      // auto-approve: once the pipeline has escalated to the human, a later (or
+      // stale) model verdict must never dismiss that prompt. Auto-approval
+      // requires a verdict from THIS action's own review, handled above.
       if (v.kind === "transient") {
-        const promptCtl = new AbortController();
-        let retriesDone = 0;
-        clearPendingAutoResult();
-        const retryInterval = setInterval(async () => {
-          if (retriesDone >= maxRetries) { clearInterval(retryInterval); return; }
-          retriesDone++;
-          const verdict = await runPermissionReview(
-            { permission: opts.permission, target: opts.target, check: opts.check, cwd: deps.cwd, parentCtx: deps.displayCtx, profile: reviewProfile, timeoutMs, ...(config.model ? { model: config.model } : {}) },
-            {
-              spawn: deps.reviewSpawn ?? (await import("./subagent.ts").then((m) => m.runSubagent)),
-              onDiagnostic: (msg, level) => deps.displayCtx.ui.notify(msg, level),
-            },
-          ).catch(() => ({ kind: "transient" as const, message: "retry failed" }));
-          if (verdict.kind === "assessment") {
-            clearPendingAutoResult();
-            // STORE verdict first, THEN abort the prompt
-            setPendingAutoResult(verdict);
-            promptCtl.abort(); // dismiss the prompt — done(null) fires, pipeline checks getPendingAutoResult
-          }
-        }, retryIntervalMs);
-
-        deps = { ...deps, promptAbortSignal: promptCtl.signal, promptReason: ` Auto-review unavailable (${v.message}); background retries active. Decide manually or wait.` };
+        deps = { ...deps, promptReason: ` Auto-review unavailable (${v.message}); decide manually.` };
       }
     } catch {
       reviewSetActive(false);
@@ -543,59 +548,13 @@ export async function resolvePermission(
     } else if (opts.check.reason) {
       promptOpts.reason = opts.check.reason;
     }
-    if (deps.promptAbortSignal) promptOpts.abortSignal = deps.promptAbortSignal;
 
     const result = await showPermissionPrompt(deps.displayCtx, promptOpts);
 
-    // A null prompt result is ambiguous between two very different situations:
-    //  (a) the user pressed the deny-abort key (Esc) — deny and abort the turn;
-    //  (b) the background auto-review retry resolved while the prompt was open,
-    //      which aborts the prompt controller (promptCtl.abort()) and resolves
-    //      the prompt with null. In case (b) a pending verdict exists and must
-    //      be processed BEFORE the null is mistaken for a user deny-abort —
-    //      otherwise a successful auto-approval kills the whole turn with
-    //      "Operation aborted" (regression: session 019fd4a1 write aborts).
+    // The reviewer never auto-resolves a prompt (transient reviews fall through
+    // to the user and retries are not started), so a null result is
+    // unambiguously a user deny-abort (Esc).
     if (result === null) {
-      const pending = getPendingAutoResult();
-      if (pending && pending.kind === "assessment") {
-        clearPendingAutoResult();
-        if (pending.assessment.outcome === "allow") {
-          // A background-retry verdict can land after the session flipped to
-          // read-only; never mint write temp rules from it either.
-          const modeDenied = rejectWriteInReadOnly();
-          if (modeDenied) return modeDenied;
-          reviewResetDenies();
-          const tempRules = buildApprovalRules(opts.check, opts.permission, deps.cwd, deps.allowModes, opts.target);
-          const allStorages = [deps.storage, ...(deps.dualWrite ?? [])];
-          for (const s of allStorages) s.addTempRules(tempRules);
-          const r = opts.recheck();
-          if (r.action === "allow") {
-            deps.displayCtx.ui.notify(` Reviewer allowed (risk: ${pending.assessment.risk_level}, auth: ${pending.assessment.user_authorization})`, "info");
-            deps.sendAutoApproval?.(pending.assessment.risk_level, pending.assessment.user_authorization);
-            return undefined;
-          }
-          return { block: true, reason: "Auto-approval rules did not satisfy recheck" };
-        } else {
-          const cfg = loadAutoApproveConfig();
-          deps.displayCtx.ui.notify(` Reviewer denied: ${pending.assessment.rationale}`, "warning");
-          const detail = denialMessage(opts.permission, opts.target, pending.assessment.rationale);
-          // Secret-touching denials never abort or consume the reviewer budget.
-          if (targetTouchesHazardousPath(opts.permission, opts.target)) {
-            deps.sendDenial?.(detail, "hidden");
-            return { block: true, reason: detail };
-          }
-          const denies = reviewIncrementDenies();
-          deps.sendDenial?.(detail, "hidden");
-          if (denies >= (cfg.maxDenials ?? 3)) {
-            deps.sendDenial?.(detail, "visible");
-            deps.displayCtx.abort(); deps.onDenied?.();
-          }
-          return { block: true, reason: detail };
-        }
-      }
-      // No pending auto verdict and the prompt was dismissed (Esc / abort):
-      // this is a genuine user deny-abort. denyResultFromPrompt(null) always
-      // yields { block: true, abort: true }, so this path always returns.
       const d0 = denyResultFromPrompt(null, opts.permission)!;
       if (d0.abort) deps.displayCtx.abort();
       deps.onDenied?.();
@@ -638,6 +597,8 @@ export async function resolvePermission(
         reprompt = true;
         continue;
       }
+      const staleOnce = modeFlipBlock();
+      if (staleOnce) return staleOnce;
       deps.sendManualApproval();
       return undefined;
     }
@@ -653,10 +614,25 @@ export async function resolvePermission(
         patterns.push(edited);
       }
     }
+    const globApproved = opts.permission === "bash" && patterns.some(patternHasBashGlob);
+    // A shell glob can't be persisted as a rule without authorizing a broader
+    // family (`rm -rf *` → `rm -rf .*`). When nothing was skipped, approve this
+    // invocation only; when items were skipped, drop the glob from the rule set
+    // and let the recheck reprompt for it rather than silently approving the
+    // skipped items.
+    if (globApproved && skipped.length === 0) {
+      const staleGlob = modeFlipBlock();
+      if (staleGlob) return staleGlob;
+      deps.displayCtx.ui.notify("Approved for this call only: a shell glob can't be saved as a rule.", "warning");
+      deps.sendManualApproval();
+      return undefined;
+    }
+    const rulePatterns = globApproved ? patterns.filter((p) => !patternHasBashGlob(p)) : patterns;
+
     // Counters only consume durable bash approvals ("once" declined persistence),
     // and only the subcommands that were actually subject to approval.
     if (opts.permission === "bash") {
-      deps.inferred?.recordApproval(opts.check.unapproved ?? [], deps.allowModes);
+      deps.inferred?.recordApproval((opts.check.unapproved ?? []).filter((s) => !patternHasBashGlob(s)), deps.allowModes);
     }
 
     const redirectPatterns: Array<{ permission: "read" | "edit"; pattern: string }> = [];
@@ -672,10 +648,8 @@ export async function resolvePermission(
       }
     }
 
-    const allStorages = [deps.storage, ...(deps.dualWrite ?? [])];
-
     if (duration === "session" || duration === "project" || duration === "global") {
-      const newRules: Ruleset = patterns.map((p) => ({
+      const newRules: Ruleset = rulePatterns.map((p) => ({
         permission: opts.permission as Rule["permission"],
         pattern: p,
         action: "allow" as const,
@@ -690,14 +664,12 @@ export async function resolvePermission(
         });
       }
 
-      for (const s of allStorages) {
-        if (duration === "project") {
-          await s.addPersistedRules(newRules);
-        } else if (duration === "global") {
-          await s.addGlobalRules(newRules);
-        } else {
-          s.addSessionRules(newRules);
-        }
+      if (duration === "project") {
+        await deps.storage.addPersistedRules(newRules);
+      } else if (duration === "global") {
+        await deps.storage.addGlobalRules(newRules);
+      } else {
+        deps.storage.addSessionRules(newRules);
       }
 
       if (duration === "session" && deps.appendSessionRules) {
@@ -705,23 +677,22 @@ export async function resolvePermission(
       }
     } else {
       // "turn"
-      const tempRules: TempRule[] = patterns.map((p) =>
+      const tempRules: TempRule[] = rulePatterns.map((p) =>
         makeTempRule(opts.permission, p, deps.allowModes),
       );
       for (const rp of redirectPatterns) {
         tempRules.push(makeTempRule(rp.permission, rp.pattern, deps.allowModes));
       }
 
-      for (const s of allStorages) {
-        s.addTempRules(tempRules);
-      }
+      // Turn-scoped: the shared pool, expired by the root session's agent_end.
+      deps.storage.addTempRules(tempRules);
     }
 
     // Recheck
     const recheckResult = opts.recheck();
     opts.check = recheckResult;
     deps.sendManualApproval();
-    if (recheckResult.action === "allow") return undefined;
+    if (recheckResult.action === "allow") return modeFlipBlock();
     if (recheckResult.action === "deny") {
       deps.displayCtx.ui.notify("Rule(s) added but still denied.", "warning");
       return { block: true, reason: "Still denied after rule update" };

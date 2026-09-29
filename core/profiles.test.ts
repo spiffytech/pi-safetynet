@@ -144,10 +144,9 @@ describe("profiles", () => {
       assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("/safetynet:ro"));
     });
 
-    it("contains the Subagents section with both subagent types", () => {
+    it("contains the Subagents section with the dispatch tool", () => {
       assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("## Subagents"));
-      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("subagent_explore"));
-      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("subagent_build"));
+      assert.ok(READ_WRITE_SYSTEM_PROMPT_BLOCK.includes("subagent_run"));
     });
   });
 
@@ -180,16 +179,15 @@ describe("profiles", () => {
 
     it("forbids delegating implementation to a subagent and points to the rw switch", () => {
       assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("delegating implementation to a subagent"));
-      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("Do not spawn subagent_build to implement changes while in read-only mode"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("Do not spawn a subagent to implement changes while in read-only mode"));
       assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("/safetynet:rw"));
     });
 
-    it("contains the ruleset and both subagent types like the rw stanza", () => {
+    it("contains the ruleset and the dispatch tool like the rw stanza", () => {
       assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("Allowlisted commands run silently"));
       assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("Unknown commands prompt the user for approval"));
       assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("Dangerous commands are blocked"));
-      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("subagent_explore"));
-      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("subagent_build"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("subagent_run"));
     });
   });
 

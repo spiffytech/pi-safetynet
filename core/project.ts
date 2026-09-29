@@ -11,7 +11,8 @@ export function expandHome(path: string): string {
 export function isExternalPath(filePath: string, cwd: string): boolean {
   const expanded = expandHome(filePath);
   const absCwd = cwd.startsWith("/") ? cwd : join(process.cwd(), cwd);
-  const resolvedPath = resolve(expanded);
+  // Resolve relative inputs against the session cwd, not process.cwd().
+  const resolvedPath = expanded.startsWith("/") ? resolve(expanded) : resolve(absCwd, expanded);
   return !resolvedPath.startsWith(absCwd + "/") && resolvedPath !== absCwd;
 }
 
@@ -116,4 +117,23 @@ export function normalizePathForMatching(filePath: string, cwd: string): string 
   }
 
   return normalized || ".";
+}
+
+/** Unicode whitespace the file-tool path resolver folds before opening a path
+ *  (mirrors pi's `normalizeUnicodeSpaces`). */
+const TOOL_UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/** Normalize a file-tool path argument the way the harness's path resolver does
+ *  before it opens the file: strip a single leading `@` and fold unicode
+ *  spaces. The permission check and any minted rule must name the path actually
+ *  touched — otherwise `read @.env` opens `.env` while the hazardous-file check
+ *  and rules see the inert string `@.env` (baseline `read: **` allows it).
+ *
+ *  Applies to the file tools (read/edit/write/grep/find/ls) and their omp
+ *  equivalents. Do NOT apply to bash redirect targets: bash treats `@`
+ *  literally, so `> @foo` writes a file named `@foo`. */
+export function normalizeToolPath(filePath: string): string {
+  let normalized = filePath;
+  if (normalized.startsWith("@")) normalized = normalized.slice(1);
+  return normalized.replace(TOOL_UNICODE_SPACES, " ");
 }

@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { checkBashPermission, checkFileTarget, checkToolPermission, actionWrites } from "./check.ts";
+import { checkBashPermission, checkFileTarget, checkToolPermission, actionWrites, patternHasBashGlob } from "./check.ts";
+import { normalizeToolPath } from "./project.ts";
 import { parseCommand } from "./bash-parser.ts";
 import { getBaselineRules } from "./permissions/index.ts";
 import type { Ruleset } from "./types.ts";
@@ -702,5 +703,228 @@ describe("checkBashPermission force-ask on unresolvable dangerous operands", () 
 
   it("does not force-ask harmless expansions", () => {
     assert.equal(checkBashPermission('echo "$HOME"', "build", ALLOW_ECHO, CWD).action, "allow");
+  });
+});
+
+describe("normalizeToolPath — the prefix the file-tool resolver strips", () => {
+  it("strips a single leading @ the file tools honor before opening", () => {
+    assert.equal(normalizeToolPath("@.env"), ".env");
+    assert.equal(normalizeToolPath("@src/app.ts"), "src/app.ts");
+  });
+
+  it("folds the unicode spaces the harness resolver folds", () => {
+    assert.equal(normalizeToolPath("a\u00A0b.ts"), "a b.ts");
+  });
+
+  it("leaves paths without the prefix untouched", () => {
+    assert.equal(normalizeToolPath("foo@bar"), "foo@bar");
+    assert.equal(normalizeToolPath("~/.env"), "~/.env");
+  });
+});
+
+describe("checkFileTarget — @-prefixed hazardous paths", () => {
+  // Hazardous names whose detection keys on the basename's leading dot: the
+  // raw `@`-prefixed string is NOT hazardous, so the baseline `read: **` allow
+  // matches it and the file opens (the pre-fix fail-open). Normalizing the way
+  // the file tools resolve must flip it to a hazardous deny.
+  const basenameHazardous = ["@.env", "@.npmrc", "@.envrc", "@.netrc", "@credentials.json", "@secrets.yml"];
+
+  it("denies once the @ prefix is stripped, and documents the raw hole", () => {
+    for (const p of basenameHazardous) {
+      assert.equal(checkFileTarget(p, "read", "build", RULES, CWD).action, "allow", `${p} is the raw hole`);
+      const r = checkFileTarget(normalizeToolPath(p), "read", "build", RULES, CWD);
+      assert.equal(r.action, "deny", `${p} must deny once normalized`);
+      assert.equal(r.hazardous, true, `${p} must be flagged hazardous`);
+    }
+  });
+
+  it("normalizes a benign @-prefixed path to the file the tool opens", () => {
+    assert.equal(checkFileTarget(normalizeToolPath("@src/app.ts"), "read", "build", RULES, CWD).action, "allow");
+  });
+
+  it("detects hazardous basenames case-insensitively (case-insensitive filesystems)", () => {
+    assert.equal(checkFileTarget(normalizeToolPath("@.ENV"), "read", "build", RULES, CWD).action, "deny");
+    assert.equal(checkFileTarget(".Env", "read", "build", RULES, CWD).action, "deny");
+  });
+});
+
+describe("checkToolPermission — unknown tools ask in every mode", () => {
+  it("asks for an unknown tool in build (write) mode, not just read-only", () => {
+    const r = checkToolPermission("mcp_deploy", "build", RULES);
+    assert.equal(r.action, "ask");
+    assert.match(r.reason ?? "", /build mode/);
+  });
+});
+
+describe("checkBashPermission — hazardous-file arguments to allowlisted verbs", () => {
+  it("does not silently allow reading a secret through cat/head/grep/awk/sed", () => {
+    for (const cmd of [
+      "cat .env",
+      "head .env",
+      "grep SECRET .env",
+      "awk '{print}' .env",
+      "sed -n '1p' .env",
+      "cat .ssh/id_rsa",
+    ]) {
+      const r = checkBashPermission(cmd, "build", RULES, CWD);
+      assert.equal(r.action, "deny", `${cmd} must deny`);
+      assert.equal(r.hazardous, true, `${cmd} must be flagged hazardous`);
+    }
+  });
+
+  it("still allows an allowlisted read that names no hazardous file", () => {
+    assert.equal(checkBashPermission("cat README.md", "build", RULES, CWD).action, "allow");
+  });
+
+  it("still allows .env.example, which is explicitly safe", () => {
+    assert.equal(checkBashPermission("cat .env.example", "build", RULES, CWD).action, "allow");
+  });
+});
+
+describe("checkBashPermission — external paths to allowlisted verbs", () => {
+  it("asks instead of allowing a read outside the project root", () => {
+    const r = checkBashPermission("cat /etc/passwd", "build", RULES, CWD);
+    assert.equal(r.action, "ask");
+    assert.ok((r.unapproved ?? []).length > 0, "the external subcommand is surfaced for approval");
+  });
+
+  it("does not flag in-project paths or bare names", () => {
+    assert.equal(checkBashPermission("cat README.md", "build", RULES, CWD).action, "allow");
+    assert.equal(checkBashPermission("cat ./src/app.ts", "build", RULES, CWD).action, "allow");
+  });
+
+  it("honours an explicit user-approved rule for an external path", () => {
+    const explicit = [
+      ...RULES,
+      { permission: "bash" as const, pattern: "cat /etc/passwd", action: "allow" as const, modes: ["build" as const] },
+      { permission: "bash" as const, pattern: "cd /etc", action: "allow" as const, modes: ["build" as const] },
+    ];
+    assert.equal(checkBashPermission("cat /etc/passwd", "build", explicit, CWD).action, "allow");
+    assert.equal(checkBashPermission("cd /etc && ls", "build", explicit, CWD).action, "allow");
+  });
+
+  it("an explicit rule does not bypass the hazardous block", () => {
+    const sneaky = [
+      ...RULES,
+      { permission: "bash" as const, pattern: "cat .env", action: "allow" as const, modes: ["build" as const] },
+    ];
+    const r = checkBashPermission("cat .env", "build", sneaky, CWD);
+    assert.equal(r.action, "deny");
+    assert.equal(r.hazardous, true);
+  });
+
+  it("honors trustExternalPaths", () => {
+    assert.equal(checkBashPermission("cat /etc/passwd", "build", RULES, CWD, true).action, "allow");
+  });
+});
+
+describe("checkBashPermission — glob/option hazardous operands and interior traversal", () => {
+  it("denies glob-suffixed secret names under the baseline cat allow", () => {
+    for (const cmd of ["cat .env*", "cat id_rsa*", "cat .npmrc*", "cat .ssh/*"]) {
+      const r = checkBashPermission(cmd, "build", RULES, CWD);
+      assert.equal(r.action, "deny", `${cmd} must deny`);
+      assert.equal(r.hazardous, true, `${cmd} must be flagged hazardous`);
+    }
+  });
+
+  it("denies a hazardous operand even when the ruleset verdict is ask", () => {
+    for (const cmd of ["rm .env", "tee .env"]) {
+      const r = checkBashPermission(cmd, "build", RULES, CWD);
+      assert.equal(r.action, "deny", `${cmd} must deny, not merely ask`);
+      assert.equal(r.hazardous, true, `${cmd} must be flagged hazardous`);
+    }
+  });
+
+  it("denies a hazardous filename glued to a short option", () => {
+    assert.equal(checkBashPermission("grep -f.env x", "build", RULES, CWD).action, "deny");
+  });
+
+  it("denies any glob that can reach a protected name", () => {
+    for (const cmd of ["cat .e*", "cat .*", "cat .en?", "cat .env.*", "cat *", "cat i*"]) {
+      const r = checkBashPermission(cmd, "build", RULES, CWD);
+      assert.equal(r.action, "deny", `${cmd} must deny`);
+      assert.equal(r.hazardous, true);
+    }
+    // bash globs never match a leading dot unless the pattern has one, so
+    // `*.env` cannot reach `.env`; confined globs reach no protected name.
+    assert.equal(checkBashPermission("cat *.env", "build", RULES, CWD).action, "allow");
+    assert.equal(checkBashPermission("cat README*", "build", RULES, CWD).action, "allow");
+    assert.equal(checkBashPermission("cat dist/*", "build", RULES, CWD).action, "allow");
+    // shopt -s dotglob makes `*` reach `.env` too.
+    assert.equal(checkBashPermission("shopt -s dotglob; cat *.env", "build", RULES, CWD).action, "deny");
+  });
+
+  it("asks for a relative path that escapes via interior ..", () => {
+    for (const cmd of ["cat foo/../../etc/passwd", "cat subdir/../../etc/passwd", "cat /etc/*"]) {
+      assert.equal(checkBashPermission(cmd, "build", RULES, CWD).action, "ask", `${cmd} must ask`);
+    }
+  });
+
+  it("does not flag an in-project relative path with ..", () => {
+    assert.equal(checkBashPermission("cat src/../README.md", "build", RULES, CWD).action, "allow");
+  });
+});
+
+describe("checkBashPermission — operand scanning scoped to file verbs and resolved expansions", () => {
+  it("ignores text arguments to non-file verbs", () => {
+    for (const cmd of ["echo .env", "printf .env", "git log --grep .env", "git commit -m 'update .env'"]) {
+      const r = checkBashPermission(cmd, "build", RULES, CWD);
+      assert.ok(r.action !== "deny", `${cmd} must not deny`);
+    }
+    assert.equal(checkBashPermission("echo .env", "build", RULES, CWD).action, "allow");
+    assert.equal(checkBashPermission("printf .env", "build", RULES, CWD).action, "allow");
+  });
+
+  it("ignores grep/sed/awk/find pattern and script arguments", () => {
+    for (const cmd of ["grep .env f", "grep -e '.env' f", "sed -e '.env' f", "awk '.env' f", "find . -name .env"]) {
+      const r = checkBashPermission(cmd, "build", RULES, CWD);
+      assert.ok(r.action !== "deny", `${cmd} must not deny`);
+    }
+  });
+
+  it("still catches file operands of those verbs", () => {
+    for (const cmd of ["grep secret .env", "grep -f .env x", "xargs cat .env"]) {
+      const r = checkBashPermission(cmd, "build", RULES, CWD);
+      assert.equal(r.action, "deny", `${cmd} must deny`);
+      assert.equal(r.hazardous, true);
+    }
+  });
+
+  it("denies a hazardous file reached through a variable assignment", () => {
+    const r = checkBashPermission("F=.env; cat $F", "build", RULES, CWD);
+    assert.equal(r.action, "deny");
+    assert.equal(r.hazardous, true);
+  });
+
+  it("denies a hazardous file reached through chained and defaulted variables", () => {
+    assert.equal(checkBashPermission("G=.env; F=$G; cat ${F}", "build", RULES, CWD).action, "deny");
+    assert.equal(checkBashPermission("cat ${PI_SAFETYNET_NOPE:-.env}", "build", RULES, CWD).action, "deny");
+  });
+
+  it("asks for an external path built from an exported variable", () => {
+    assert.equal(checkBashPermission("cat $HOME/notes.md", "build", RULES, CWD).action, "ask");
+    assert.equal(checkBashPermission("cat $PWD/README.md", "build", RULES, CWD).action, "allow");
+  });
+
+  it("asks when the variable cannot be pinned down", () => {
+    assert.equal(checkBashPermission("cat $PI_SAFETYNET_NOPE/notes.md", "build", RULES, CWD).action, "ask");
+    assert.equal(checkBashPermission("cat $(echo notes.md)", "build", RULES, CWD).action, "ask");
+  });
+
+  it("does not expand single-quoted literals", () => {
+    assert.equal(checkBashPermission("cat '$PATH'", "build", RULES, CWD).action, "allow");
+    assert.equal(checkBashPermission("F=.env; cat '$F'", "build", RULES, CWD).action, "allow");
+  });
+});
+
+describe("patternHasBashGlob", () => {
+  it("flags the metacharacters that would broaden a minted rule", () => {
+    assert.equal(patternHasBashGlob("rm -rf *"), true);
+    assert.equal(patternHasBashGlob("curl https://x?y"), true);
+  });
+
+  it("leaves literal commands alone", () => {
+    assert.equal(patternHasBashGlob("npm test"), false);
+    assert.equal(patternHasBashGlob("git commit -m 'x'"), false);
   });
 });

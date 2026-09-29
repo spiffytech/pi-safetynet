@@ -81,8 +81,6 @@ export function loadAutoApproveConfig(): AutoApproveConfig {
       ...(model !== undefined ? { model } : {}),
       timeoutMs: typeof raw.timeoutMs === "number" ? raw.timeoutMs : 90000,
       maxDenials: typeof raw.maxDenials === "number" ? raw.maxDenials : 3,
-      retryIntervalMs: typeof raw.retryIntervalMs === "number" ? raw.retryIntervalMs : 30000,
-      maxRetries: typeof raw.maxRetries === "number" ? raw.maxRetries : 2,
       latencyWarnEmaMs: typeof raw.latencyWarnEmaMs === "number" ? raw.latencyWarnEmaMs : 8000,
     };
   } catch {

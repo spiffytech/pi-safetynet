@@ -111,9 +111,8 @@ Commands are evaluated against the permission ruleset:
 The user can switch to read-only mode with /safetynet:ro.
 
 ## Subagents
-You may spawn subagents for parallel or delegated work:
-- subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands.
-- subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval.
+You may spawn background subagents for parallel or delegated work:
+- subagent_run: spawn a persistent subagent that inherits your current mode. It returns immediately and reports back or wakes you when it goes idle. Use subagent_send, subagent_status, subagent_bash_output, and subagent_close to interact with it.
 
 Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.`;
 
@@ -138,10 +137,9 @@ The user can switch to read-write mode with /safetynet:rw.
 
 ## Subagents
 You may spawn subagents for parallel or delegated work:
-- subagent_explore: read-only subagent for inspection and search. Cannot modify files or run commands.
-- subagent_build: full build subagent. Permission prompts are shown to the parent session's user for approval.
+- subagent_run: spawn a subagent that inherits read-only mode (inspection and search; it cannot modify files or run commands).
 
-Do not spawn subagent_build to implement changes while in read-only mode — propose the changes instead and let the user switch to read-write mode.
+Do not spawn a subagent to implement changes while in read-only mode — propose the changes instead and let the user switch to read-write mode.
 
 Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.`;
 

@@ -3,7 +3,8 @@ import type { ProfileName, PermissionAction, Ruleset, ModeAliases } from "./type
 import { evaluatePermission } from "./permissions/ruleset.ts";
 import { getBaselineRules } from "./permissions/index.ts";
 import { parseCommand, subcommandTokenLists, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
-import { normalizePathForMatching, expandHome } from "./project.ts";
+import { normalizePathForMatching, expandHome, isExternalPath } from "./project.ts";
+import { newVarMap, resolveDisplayWord, recordAssignment } from "./expansion.ts";
 import { patternMatches } from "./inferred/shapes.ts";
 import type { InferredBashRule } from "./inferred/store.ts";
 /** Device files that are always safe to use as redirect targets. */
@@ -48,6 +49,15 @@ export function actionWrites(permission: "bash" | "read" | "edit", check: Permis
     return (check.redirectTargets ?? []).some((rt) => rt.permission === "edit");
   }
   return false;
+}
+
+/** True when a bash pattern contains glob/regex metacharacters the matcher
+ *  broadens (`*` → `.*`; `?` acts as a regex quantifier). A rule minted from an
+ *  approved command that contains one would authorize a *family* of commands
+ *  (`rm -rf *` → `rm -rf .*`), not the single command the user/reviewer
+ *  approved, so those approvals must stay invocation-only. */
+export function patternHasBashGlob(pattern: string): boolean {
+  return /[*?]/.test(pattern);
 }
 
 export function checkFileTarget(
@@ -159,6 +169,169 @@ function inferredRuleApplies(
   return false;
 }
 
+/**
+ * Verbs whose operands are file paths — the only ones whose arguments can name
+ * a secured file or escape the project root. Everything else (`echo`, `git`,
+ * `printf`, …) carries text, and its arguments are never scanned, so passing a
+ * hazardous name as message/pattern text is not a false positive.
+ */
+const FILE_VERBS = new Set([
+  "cat", "head", "tail", "tac", "less", "more", "nl", "column",
+  "grep", "rg", "sed", "awk", "mawk", "gawk",
+  "cp", "mv", "rm", "ln", "link", "install", "tee", "dd", "truncate", "shred",
+  "chmod", "chown",
+  "scp", "rsync", "tar", "zip", "unzip", "gzip", "gunzip", "bzip2", "xz",
+  "sort", "cut", "wc", "paste", "join", "comm", "diff", "diff3", "patch",
+  "strings", "xxd", "od", "hexdump", "file", "stat", "split", "iconv",
+  "base64", "md5sum", "sha1sum", "sha256sum", "realpath", "readlink",
+  "basename", "dirname", "du", "find", "xargs",
+]);
+
+/** First word of a subcommand that names a file-touching verb, else null. */
+function firstFileVerb(tokens: string[]): string | null {
+  for (const t of tokens) if (FILE_VERBS.has(t)) return t;
+  return null;
+}
+
+/** Flags whose VALUE is pattern/script text rather than a path, by verb. */
+const TEXT_VALUE_FLAGS: Record<string, string[]> = {
+  grep: ["-e", "-E", "-P", "--regexp", "--include", "--exclude", "--exclude-dir"],
+  rg: ["-e", "-E", "-F", "-P", "--regexp", "--glob", "--iglob", "--sort"],
+  sed: ["-e", "--expression"],
+  find: ["-name", "-iname", "-path", "-ipath", "-regex", "-iregex"],
+};
+
+/** Verbs whose first non-flag operand is text (pattern/program), not a path. */
+const TEXT_FIRST_OPERAND = new Set(["grep", "rg", "sed", "awk", "mawk", "gawk", "jq", "yq"]);
+
+/** Word indexes of a subcommand that carry text (pattern/script), not paths. */
+function textOperandIndexes(verb: string, tokens: string[]): Set<number> {
+  const text = new Set<number>();
+  const flags = TEXT_VALUE_FLAGS[verb] ?? [];
+  let textFromFlag = false;
+  let fileFromFlag = false;
+  for (let i = 1; i < tokens.length; i++) {
+    const w = tokens[i]!;
+    if (w === "-f" || w === "--file") fileFromFlag = true; // pattern/program file: a real read
+    if (flags.includes(w)) {
+      if (i + 1 < tokens.length) text.add(i + 1);
+      textFromFlag = true;
+      continue;
+    }
+    const eq = w.indexOf("=");
+    if (eq > 1 && flags.includes(w.slice(0, eq))) {
+      text.add(i);
+      textFromFlag = true;
+    }
+  }
+  if (TEXT_FIRST_OPERAND.has(verb) && !textFromFlag && !fileFromFlag) {
+    for (let i = 1; i < tokens.length; i++) {
+      if (!tokens[i]!.startsWith("-")) {
+        text.add(i);
+        break;
+      }
+    }
+  }
+  return text;
+}
+
+/** Shared hazardous-file message for bash operands, file tools, and redirects. */
+const HAZARDOUS_REASON =
+  "Sensitive file (e.g., .env, .ssh, credentials): contains secrets, access blocked. Don't read or write it. If you need a secret value, ask the user or use an already-set environment variable instead.";
+
+/** Strip a single layer of matching quotes. */
+function unquote(token: string): string {
+  return token.replace(/^['"]+|['"]+$/g, "").trim();
+}
+
+/**
+ * Find a token naming a hazardous file, tolerating the shapes bash operands
+ * take: quoted (`cat '.env'`), glob-suffixed (`cat .env*`), and glued to a short
+ * option (`grep -f.env`). Returns the offending token, or undefined.
+ */
+function findHazardousOperand(tokens: string[], dotglob = false): string | undefined {
+  for (const raw of tokens) {
+    if (!raw) continue;
+    const t = unquote(raw);
+    if (!t) continue;
+    const candidates = new Set<string>([t]);
+    const eq = t.indexOf("=");
+    if (eq >= 0) candidates.add(t.slice(eq + 1)); // --file=.env
+    const glued = /^-[A-Za-z]+(.+)$/.exec(t);
+    if (glued) candidates.add(glued[1]!); // -f.env
+    for (const c of candidates) {
+      if (c && isHazardousFile(c)) return raw;
+    }
+    for (const c of candidates) {
+      if (globHazard(c, dotglob)) return raw; // broad or dot-targeted: a glob is a path token too
+    }
+  }
+  return undefined;
+}
+
+/** Basenames/paths `isHazardousFile` protects — used to decide whether a glob
+ *  operand could match one of them at runtime. */
+const HAZARDOUS_SAMPLES = [
+  ".env", ".env.local", ".env.prod", ".envrc", ".npmrc", ".pypirc", ".netrc", ".dockercfg",
+  "id_rsa", "id_ed25519", "id_ecdsa", "key.pem", "credentials.json", "credentials.yaml",
+  "credentials.yml", "secrets.json", "secrets.yaml", "secrets.yml",
+  ".ssh/id_rsa", ".gnupg/gpg-agent.conf", ".aws/credentials", ".docker/config.json",
+];
+
+/** Ordinary names a glob may legitimately reach — their presence in the match
+ *  set means the glob is broad (`cat *`), not aimed at a protected name. */
+const GLOB_BENIGN_SAMPLES = ["a", "README.md", "foo.txt", "x.ts", "node_modules", "package.json"];
+
+function globToRegex(pattern: string): RegExp {
+  let out = "";
+  for (const ch of pattern) {
+    if (ch === "*") out += ".*";
+    else if (ch === "?") out += ".";
+    else out += ch.replace(/[.+^${}()|\\]/, "\\$&");
+  }
+  return new RegExp(`^${out}$`);
+}
+
+/** Classify a glob operand: `hazard` when the names it can reach are all
+ *  protected (`cat .e*`, `cat .*`), `broad` when it reaches protected names and
+ *  plain files alike (`cat *` — bash globs reach `id_rsa`, `credentials.json`),
+ *  null when it cannot reach a protected name at all. Flat-denied either way:
+ *  `cat id_rsa` is non-askable, so `cat *` must not smuggle it in.
+ *  Matching follows bash's dot rule per segment: a pattern segment that does
+ *  not start with a dot never matches a name that does (so `*` cannot reach
+ *  `.env`; `*.env` is likewise safe).
+ */
+function globHazard(pattern: string, dotglob = false): "hazard" | "broad" | null {
+  if (!/[*?\[]/.test(pattern)) return null;
+  const pSegs = pattern.split("/");
+  const reaches = (sample: string) => {
+    const sSegs = sample.split("/");
+    if (pSegs.length !== sSegs.length) return false;
+    return pSegs.every((seg, i) => {
+      const s = sSegs[i]!;
+      if (s.startsWith(".") && !seg.startsWith(".") && !dotglob) return false; // bash dot rule
+      return globToRegex(seg).test(s);
+    });
+  };
+  if (!HAZARDOUS_SAMPLES.some(reaches)) return null;
+  return GLOB_BENIGN_SAMPLES.some(reaches) ? "broad" : "hazard";
+}
+
+/**
+ * Whether a bash token names a path outside `cwd`. Loose on purpose: it treats
+ * any non-flag token containing a slash as a path and lets `isExternalPath`
+ * resolve it, so interior `..` segments are normalized before comparison.
+ * A glob token is probed by its non-glob prefix (`/etc/*` -> `/etc/`).
+ */
+function isExternalPathOperand(raw: string, cwd: string): boolean {
+  const t = unquote(raw);
+  if (!t || t.startsWith("-") || t.includes("://")) return false;
+  const globAt = t.search(/[*?[\]{}]/);
+  const probe = globAt >= 0 ? t.slice(0, globAt) : t;
+  if (!probe.includes("/")) return false;
+  return isExternalPath(probe, cwd);
+}
+
 export function checkBashPermission(
   command: string,
   profile: ProfileName,
@@ -203,6 +376,9 @@ export function checkBashPermission(
   let hazardous = false;
 
   const absCwd = cwd ?? process.cwd();
+  // Variable state for `$F`-shaped operands: bare assignments update it in
+  // order, everything else is resolver from the ambient environment.
+  const vars = newVarMap(absCwd);
 
   for (let i = 0; i < parsed.subcommands.length; i++) {
     const sub = parsed.subcommands[i]!;
@@ -211,13 +387,81 @@ export function checkBashPermission(
     // frequently emits it as a preamble (e.g. "cd <cwd> && git diff").
     if (isCdWithinProject(sub, absCwd, trustExternalPaths)) continue;
 
-    // Bare variable assignments (e.g. ORDER_ID=abc) are always safe.
+    const tokens = parsed.subcommandWords[i] ?? [];
+    const dwords = parsed.subcommandDisplayWords[i] ?? tokens;
+
+    // Bare variable assignments (e.g. ORDER_ID=abc) update the resolution state
+    // for later subcommands in the same command string — this is how
+    // `F=.env; cat $F` gets caught — and are always safe themselves.
     // Command substitutions in values are extracted as separate subcommands.
-    if (isBareAssignment(sub)) continue;
+    const bareUpdatesState =
+      isBareAssignment(sub) ||
+      (tokens[0] === "export" && dwords.slice(1).every((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w)));
+    if (bareUpdatesState) {
+      for (const w of dwords) recordAssignment(w, vars, absCwd);
+      continue;
+    }
 
     const displaySub = parsed.displaySubcommands[i] ?? sub;
     const result = evaluatePermission("bash", sub, profile, rules, displaySub, modeAliases);
-    if (result.action === "deny") {
+    // Only file-touching verbs' operands can name a secured file or point
+    // outside the project; text args (echo/git/printf/…) are never scanned.
+    const verb = firstFileVerb(tokens);
+    const candidates: string[] = [];
+    let unresolvedOperand = false;
+    if (verb) {
+      const textSlots = textOperandIndexes(verb, tokens);
+      for (let j = 0; j < dwords.length; j++) {
+        if (textSlots.has(j)) continue;
+        const resolved = resolveDisplayWord(dwords[j]!, vars, absCwd);
+        if (resolved === undefined) {
+          // A `$F` operand we cannot pin down could be a secured file or an
+          // external path — escalate, never allow silently.
+          unresolvedOperand = true;
+          continue;
+        }
+        // Unquoted expansions word-split; check each would-be word. Source
+        // words without `$` are literal and check as a whole.
+        const segments = dwords[j]!.includes("$") ? resolved.split(/\s+/) : [resolved];
+        for (const part of segments) if (part) candidates.push(part);
+      }
+    }
+    // A hazardous file named anywhere in the subcommand is a hard deny, whatever
+    // the ruleset verdict — the file tools and bash redirects block these, and an
+    // allowlisted verb must not read them silently. Runs before the action branch
+    // so `rm .env` (verdict ask) is blocked too.
+    if (verb && findHazardousOperand(candidates, command.includes("dotglob"))) {
+      worstAction = "deny";
+      hazardous = true;
+      if (!denyReasons.includes(HAZARDOUS_REASON)) denyReasons.push(HAZARDOUS_REASON);
+      if (!unapproved.includes(sub)) {
+        unapproved.push(sub);
+        unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
+      }
+    } else if (verb && unresolvedOperand) {
+      if (worstAction !== "deny") worstAction = "ask";
+      if (!unapproved.includes(sub)) {
+        unapproved.push(sub);
+        unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
+      }
+    } else if (result.action === "allow") {
+      // Parity with the file tools: an allowlisted verb that names a path
+      // outside the project root must be approved, not run silently. But only
+      // baseline catch-all rules are downgraded (mirrors checkFileTarget) — a
+      // rule the user explicitly approved must override, or approval could
+      // never stick and every recheck would re-ask forever.
+      const explicitRule =
+        result.matchedRule !== undefined &&
+        (!/[*?]/.test(result.matchedRule.pattern) || !getBaselineRules().includes(result.matchedRule));
+      const externalOperand = !trustExternalPaths && candidates.some((tok) => isExternalPathOperand(tok, absCwd));
+      if (!explicitRule && externalOperand) {
+        if (worstAction !== "deny") worstAction = "ask";
+        if (!unapproved.includes(sub)) {
+          unapproved.push(sub);
+          unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
+        }
+      }
+    } else if (result.action === "deny") {
       worstAction = "deny";
       if (!unapproved.includes(sub)) {
         unapproved.push(sub);
@@ -306,7 +550,8 @@ export function checkToolPermission(
         )
       : false;
     if (inferredAllow) return { action: "allow" };
-    return { action: "ask", reason: profile === "plan" ? "Unknown tool in plan mode requires approval" : "Unknown tool in read-only mode requires approval" };
+    const modeLabel = profile === "plan" ? "plan mode" : profile === "ro" ? "read-only mode" : `${profile} mode`;
+    return { action: "ask", reason: `Unknown tool in ${modeLabel} requires approval` };
   }
   return { action: result.action };
 }

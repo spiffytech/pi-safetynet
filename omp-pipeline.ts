@@ -17,10 +17,12 @@ import type {
 import { PermissionStorage } from "./core/permissions/index.ts";
 import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
 import type { PermissionCheck } from "./core/check.ts";
-import { actionWrites } from "./core/check.ts";
+import { actionWrites, patternHasBashGlob } from "./core/check.ts";
 import { isReadOnly } from "./core/profiles.ts";
-import { showOmpPermissionPrompt } from "./omp-permission-prompt.ts";
-import { spawnReviewer } from "./omp-subagent.ts";
+// omp's SDK is TS-source (Bun-only); keep these two imports lazy so this
+// pipeline module loads under Node for tests. Production resolves them at the
+// call sites below (reviewer spawn and the interactive prompt).
+import type { SpawnResult } from "./core/reviewer-state.ts";
 import type { InferredEngine } from "./core/inferred/engine.ts";
 
 /** Hard cap on one auto-review attempt. The reviewer runs inside the
@@ -84,6 +86,8 @@ export interface OmpPipelineDeps {
 	storage: PermissionStorage;
 	ctx: ExtensionContext;
 	profile: ProfileName;
+	/** Re-read the current session mode at decision time (mode-flip guard). */
+	currentProfile?: () => ProfileName;
 	trustExternalPaths: boolean;
 	modeAliases: ModeAliases;
 	/** Persist session-scoped rules as a journal entry for resume reconstruction. */
@@ -91,6 +95,9 @@ export interface OmpPipelineDeps {
 	/** Inferred-rules engine (bash shape counters → judge → proposal queue).
 	 *  Optional; absent when the feature has no session to bind to. */
 	inferred?: InferredEngine;
+	/** Test seam for the auto-review spawn. Production leaves this unset and the
+	 *  omp reviewer session is spawned lazily at call time. */
+	reviewSpawn?: (opts: any) => Promise<SpawnResult>;
 }
 
 export interface ResolveOpts {
@@ -210,16 +217,20 @@ export async function resolveOmpPermission(
 						signal: capController.signal,
 						...(modelSpecs.length > 0 ? { model: modelSpecs } : {}),
 					},
-					{ spawn: (o) =>
-						spawnReviewer({
-							...o,
-							cwd: deps.ctx.cwd,
-							// `o.model` is core's registry-resolved partial for the CURRENT
-							// chain spec; translate it to a full Model the isolated child
-							// can use, falling back to the parent session's own model when
-							// the spec isn't in the catalog at all.
-							...reviewerSpawnModelOpts(deps.ctx, o.model),
-							...(o.signal ? { signal: o.signal } : {}),
+					{ spawn:
+						deps.reviewSpawn ??
+						(async (o) => {
+							const { spawnReviewer } = await import("./omp-subagent.ts");
+							return spawnReviewer({
+								...o,
+								cwd: deps.ctx.cwd,
+								// `o.model` is core's registry-resolved partial for the CURRENT
+								// chain spec; translate it to a full Model the isolated child
+								// can use, falling back to the parent session's own model when
+								// the spec isn't in the catalog at all.
+								...reviewerSpawnModelOpts(deps.ctx, o.model),
+								...(o.signal ? { signal: o.signal } : {}),
+							});
 						}),
 						// Fallback diagnostics go to the TUI, not the terminal stream.
 						onDiagnostic: (msg, level) => deps.ctx.ui.notify(msg, level) },
@@ -229,6 +240,16 @@ export async function resolveOmpPermission(
 				if (token === reviewTurnToken() && verdict.kind === "assessment") {
 					if (verdict.assessment.outcome === "allow") {
 						reviewResetDenies();
+						// A flip to read-only during the review invalidates the approval.
+						if (deps.currentProfile && !isReadOnly(deps.profile) && isReadOnly(deps.currentProfile())) {
+							return { block: true, reason: "Session switched to read-only while this action was being reviewed; the approval no longer applies." };
+						}
+						// A glob would mint a rule matching a broader family; approve this
+						// invocation only.
+						if (opts.permission === "bash" && (check.unapproved ?? []).some(patternHasBashGlob)) {
+							deps.ctx.ui.notify("Auto-review allowed this call only: a shell glob can't be saved as a rule.", "info");
+							return undefined;
+						}
 						// Turn-scoped rules so the approval dies with the turn.
 						const tempRules = buildApprovalTempRules(opts.permission, check, opts.target, deps.ctx.cwd, [deps.profile]);
 						deps.storage.addTempRules(tempRules);
@@ -239,7 +260,8 @@ export async function resolveOmpPermission(
 						const count = reviewIncrementDenies();
 						const maxDenials = config.maxDenials ?? 3;
 						if (count >= maxDenials) {
-							return { block: true, reason: `Auto-review denied ${count} consecutive actions; disabling auto-approve for this session.` };
+							deps.ctx.abort();
+							return { block: true, reason: `Auto-review denied ${count} consecutive actions; ending the turn.` };
 						}
 						return { block: true, reason: `Auto-review denied: ${verdict.assessment.rationale}` };
 					}
@@ -260,6 +282,17 @@ export async function resolveOmpPermission(
 		}
 
 		const isFile = opts.permission !== "bash";
+		/** A flip to read-only while the prompt was open invalidates the approval. */
+		const modeFlipBlock = (): { block: true; reason: string } | undefined => {
+			if (deps.currentProfile && !isReadOnly(deps.profile) && isReadOnly(deps.currentProfile())) {
+				return {
+					block: true,
+					reason:
+						"Session switched to read-only while this action was being approved; the approval no longer applies.",
+				};
+			}
+			return undefined;
+		};
 		const canonical: string[] = [];
 		const display: string[] = [];
 
@@ -277,6 +310,7 @@ export async function resolveOmpPermission(
 			display.push(opts.target);
 		}
 
+		const { showOmpPermissionPrompt } = await import("./omp-permission-prompt.ts");
 		const result = await showOmpPermissionPrompt(deps.ctx, {
 			permission: opts.permission,
 			target: opts.target,
@@ -316,7 +350,7 @@ export async function resolveOmpPermission(
 				};
 				continue;
 			}
-			return undefined;
+			return modeFlipBlock();
 		}
 
 		// Build rules from approved items (mirrors pi pipeline semantics).
@@ -342,10 +376,23 @@ export async function resolveOmpPermission(
 		}
 		void duration; // scope handled below
 
-		const newRules: Ruleset = patterns.map(
+		// A shell glob can't be persisted as a rule without authorizing a broader
+		// family of commands. When nothing was skipped, approve this invocation
+		// only; when items were skipped, drop the glob and let the recheck reprompt
+		// rather than silently approving the skipped items.
+		const globApproved = opts.permission === "bash" && patterns.some((p) => patternHasBashGlob(p.pattern));
+		if (globApproved && skipped.length === 0) {
+			const staleGlob = modeFlipBlock();
+			if (staleGlob) return staleGlob;
+			deps.ctx.ui.notify("Approved for this call only: a shell glob can't be saved as a rule.", "warning");
+			return undefined;
+		}
+		const rulePatterns = globApproved ? patterns.filter((p) => !patternHasBashGlob(p.pattern)) : patterns;
+
+		const newRules: Ruleset = rulePatterns.map(
 			(p): Rule => ({ permission: p.permission, pattern: p.pattern, action: "allow", modes: [deps.profile] }),
 		);
-		const tempRules: TempRule[] = patterns.map((p) => makeTempRule(p.permission, p.pattern, [deps.profile]));
+		const tempRules: TempRule[] = rulePatterns.map((p) => makeTempRule(p.permission, p.pattern, [deps.profile]));
 
 		if (duration === "turn") {
 			deps.storage.addTempRules(tempRules);
@@ -361,12 +408,15 @@ export async function resolveOmpPermission(
 		// persistence, so it is not evidence of a wanted rule. (Unreachable for
 		// "once": that branch continues or returns above.)
 		if (opts.permission === "bash") {
-			deps.inferred?.recordApproval(check.unapproved ?? [], [deps.profile]);
+			deps.inferred?.recordApproval(
+				(check.unapproved ?? []).filter((s) => !patternHasBashGlob(s)),
+				[deps.profile],
+			);
 		}
 
 		// Recheck after rule creation.
 		check = opts.recheck();
-		if (check.action === "allow") return undefined;
+		if (check.action === "allow") return modeFlipBlock();
 		if (check.action === "deny") {
 			deps.ctx.ui.notify("Rule(s) added but still denied.", "warning");
 			return { block: true, reason: "Still denied after rule update" };

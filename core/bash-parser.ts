@@ -157,7 +157,10 @@ function renderNode(node: Node): Rendered | null {
     }
     case "simple_expansion":
     case "expansion":
-      return { canonical: "${...}", display: "${...}" };
+      // Canonical stays a recipe-agnostic placeholder for ruleset matching, but
+      // display keeps the raw reference ($F / ${F:-x}) so consumers can resolve
+      // the variable and the prompt shows what actually runs.
+      return { canonical: "${...}", display: node.text };
     case "arithmetic_expansion":
       return { canonical: "$((...))", display: "$((...))" };
     case "command_substitution":
@@ -626,6 +629,7 @@ interface Acc {
   canonical: string[];
   display: string[];
   words: string[][];
+  displayWords: string[][];
   redirects: RedirectTarget[];
   catastrophic: boolean;
   forceAsk: boolean;
@@ -635,6 +639,7 @@ function addSub(acc: Acc, tokens: string[], displays: string[], suffix = ""): vo
   acc.canonical.push(tokens.join(" ") + suffix);
   acc.display.push(displays.join(" ") + suffix);
   acc.words.push(tokens);
+  acc.displayWords.push(displays);
 }
 
 function findDangerous(tokens: string[]): "exec" | "delete" | null {
@@ -720,6 +725,26 @@ function recurseChildren(node: Node, acc: Acc): void {
 }
 
 function walk(node: Node, acc: Acc): void {
+  if (node.type === "variable_assignment") {
+    // Bare assignments (`F=.env`) are their own subcommand so the variable
+    // can be resolved against later operands. Prefixed assignments (`F=x cmd`)
+    // do not exist to the shell as separate state and are skipped by
+    // commandTokens.
+    if (node.parent?.type !== "command") addSub(acc, [node.text], [node.text]);
+    recurseChildren(node, acc);
+    return;
+  }
+
+  if (node.type === "declaration_command") {
+    // export/declare/readonly NAME=VALUE: record each assignment, but only as
+    // state – its own values may hide a command substitution below.
+    for (const child of node.namedChildren) {
+      if (child.type === "variable_assignment") addSub(acc, [child.text], [child.text]);
+    }
+    recurseChildren(node, acc);
+    return;
+  }
+
   if (node.type === "redirected_statement") {
     const body = node.childForFieldName("body");
     const reds = collectRedirects(node);
@@ -773,6 +798,7 @@ function dedup(acc: Acc): void {
   const canonical: string[] = [];
   const display: string[] = [];
   const words: string[][] = [];
+  const displayWords: string[][] = [];
   for (let i = 0; i < acc.canonical.length; i++) {
     const key = acc.canonical[i]!;
     if (seen.has(key)) continue;
@@ -780,10 +806,12 @@ function dedup(acc: Acc): void {
     canonical.push(key);
     display.push(acc.display[i]!);
     words.push(acc.words[i]!);
+    displayWords.push(acc.displayWords[i]!);
   }
   acc.canonical = canonical;
   acc.display = display;
   acc.words = words;
+  acc.displayWords = displayWords;
 }
 
 // ---------------------------------------------------------------------------
@@ -802,6 +830,10 @@ export interface ParsedCommand {
    *  re-derive intent from the canonical string (e.g. edit-like flag
    *  detection). */
   subcommandWords: string[][];
+  /** Per-subcommand display token lists, parallel to `subcommandWords`.
+   *  Preserves the user's original quoting and expansion references ($F),
+   *  which canonical erases — variable resolution needs them. */
+  subcommandDisplayWords: string[][];
   /** Display form — preserves the user's original quoting for UI.  Parallel
    *  to `subcommands` (same length/order). */
   displaySubcommands: string[];
@@ -822,6 +854,7 @@ function failedResult(command: string): ParsedCommand {
   return {
     subcommands: first ? [first] : [],
     subcommandWords: first ? [[first]] : [],
+    subcommandDisplayWords: first ? [[first]] : [],
     displaySubcommands: first ? [first] : [],
     redirects: [],
     catastrophic: first ? SYSTEM_HALT_COMMANDS.has(first) : false,
@@ -834,7 +867,7 @@ export function parseCommand(command: string): ParsedCommand {
   if (!parser) {
     throw new Error("bash parser not initialized; call initBashParser() first");
   }
-  const acc: Acc = { canonical: [], display: [], words: [], redirects: [], catastrophic: false, forceAsk: false };
+  const acc: Acc = { canonical: [], display: [], words: [], displayWords: [], redirects: [], catastrophic: false, forceAsk: false };
   try {
     const tree = parser.parse(command);
     if (!tree) return failedResult(command);
@@ -853,6 +886,7 @@ export function parseCommand(command: string): ParsedCommand {
   return {
     subcommands: acc.canonical,
     subcommandWords: acc.words,
+    subcommandDisplayWords: acc.displayWords,
     displaySubcommands: acc.display,
     redirects: acc.redirects,
     catastrophic: acc.catastrophic,
@@ -870,10 +904,15 @@ export function subcommandTokenLists(command: string): string[][] {
 }
 
 export function isHazardousFile(filePath: string): boolean {
-  const basename = filePath.split("/").pop() ?? filePath;
+  // Case-folded: on case-insensitive filesystems (macOS/Windows) `.ENV` opens
+  // the same file as `.env`, so a case-sensitive check is a bypass. On
+  // case-sensitive filesystems an uppercase name is a different file; denying
+  // it is fail-closed, which the hazardous path tolerates by design.
+  const lower = filePath.toLowerCase();
+  const basename = lower.split("/").pop() ?? lower;
 
   const allowed = [".env.example", ".env.sample", ".env.template", ".sample.env"];
-  if (allowed.some((e) => filePath.endsWith(e))) return false;
+  if (allowed.some((e) => lower.endsWith(e))) return false;
 
   if (/^\.env(\.[^.]+)*$/.test(basename)) return true;
   if (basename === ".envrc") return true;
@@ -888,10 +927,10 @@ export function isHazardousFile(filePath: string): boolean {
   if (/^credentials\.(json|ya?ml)$/.test(basename)) return true;
   if (/^secrets\.(json|ya?ml)$/.test(basename)) return true;
 
-  if (/\.ssh[\\/]/.test(filePath)) return true;
-  if (/\.gnupg[\\/]/.test(filePath)) return true;
-  if (/\.aws[\\/]credentials/.test(filePath)) return true;
-  if (/\.docker[\\/]config\.json/.test(filePath)) return true;
+  if (/\.ssh[\\/]/.test(lower)) return true;
+  if (/\.gnupg[\\/]/.test(lower)) return true;
+  if (/\.aws[\\/]credentials/.test(lower)) return true;
+  if (/\.docker[\\/]config\.json/.test(lower)) return true;
 
   return false;
 }

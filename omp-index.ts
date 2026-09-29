@@ -21,6 +21,7 @@ import {
 } from "./core/global-config.ts";
 import type { ProfileName, Ruleset } from "./core/types.ts";
 import { checkBashPermission, checkFileTarget, checkToolPermission } from "./core/check.ts";
+import { normalizeToolPath } from "./core/project.ts";
 import {
 	getCurrentProfile,
 	setCurrentProfile,
@@ -71,6 +72,7 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 			storage,
 			ctx,
 			profile: getCurrentProfile(),
+			currentProfile: () => getCurrentProfile(),
 			trustExternalPaths,
 			modeAliases: getModeAliases(),
 			...(inferred ? { inferred: wireInferred(ctx) } : {}),
@@ -233,6 +235,7 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 	// leaks across sessions: profile, auto-approve, and in-memory session rules.
 	pi.on("session_switch", async (event, ctx) => {
 		if (!storage) return; // no session yet
+		storage.temp.clearTurnRules(); // turn rules never cross a session switch
 		// Counters are session evidence — never leak across sessions.
 		inferred = new InferredEngine(ctx.cwd);
 		storage.persisted.setCwd(ctx.cwd); // project scope follows the session cwd
@@ -380,10 +383,10 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 					? "read"
 					: undefined;
 		if (!perm) {
-			// Unknown tools get the same affordances as bash in read-only sessions
-			// (pi parity): explicit rules, auto-review, and inferred `tool:<name>`
-			// rules. Read-write sessions leave unknown tools ungated.
-			if (!readOnly) return;
+			// Unknown tools get the same affordances as bash (pi parity): explicit
+			// rules, auto-review, and inferred `tool:<name>` rules — in every mode.
+			// Leaving them ungated in read-write let any registered tool outside
+			// this mapping (e.g. omp's `ast_edit`) mutate files unreviewed.
 			const runToolCheck = () =>
 				checkToolPermission(
 					event.toolName,
@@ -401,9 +404,9 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 		}
 		const input = event.input as Record<string, unknown>;
 		const paths: string[] = [];
-		if (typeof input.path === "string") paths.push(input.path);
+		if (typeof input.path === "string") paths.push(normalizeToolPath(input.path));
 		if (Array.isArray(input.paths)) {
-			for (const p of input.paths) if (typeof p === "string") paths.push(p);
+			for (const p of input.paths) if (typeof p === "string") paths.push(normalizeToolPath(p));
 		}
 		if (paths.length === 0) return;
 

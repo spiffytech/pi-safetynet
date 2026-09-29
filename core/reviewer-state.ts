@@ -55,14 +55,7 @@ export function resetReviewStateForTests(): void {
   turnToken = 0;
   reviewActive = false;
   latencyEmaMs = null;
-  pendingAutoResult = null;
 }
-
-// ─── Pending auto result (for background retry store-then-abort) ──────
-let pendingAutoResult: any = null;
-export function setPendingAutoResult(value: any): void { pendingAutoResult = value; }
-export function getPendingAutoResult(): any { return pendingAutoResult; }
-export function clearPendingAutoResult(): void { pendingAutoResult = null; }
 
 // ─── Review execution ──────────────────────────────────────────────────────
 
@@ -99,7 +92,6 @@ export interface SpawnOpts {
     modelRegistry?: { getAll(): Array<{ id: string; provider?: string }> };
   };
   parentStorage?: any;
-  initialRules?: any[];
   promptKeybindings?: any;
   autoDenyConfig?: any;
   trustExternalPaths?: boolean;

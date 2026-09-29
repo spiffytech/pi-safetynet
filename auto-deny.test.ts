@@ -17,7 +17,7 @@ const TMP_HOME = join(process.cwd(), ".test-tmp-home-deny");
 const originalHome = process.env.HOME;
 
 const CONFIG = {
-  autoApprove: { timeoutMs: 100, maxDenials: 3, retryIntervalMs: 50, maxRetries: 1 },
+  autoApprove: { timeoutMs: 100, maxDenials: 3 },
 };
 
 beforeEach(() => {
@@ -769,51 +769,146 @@ describe("resolvePermission — auto allow satisfies recheck for file write", ()
   });
 });
 
-describe("resolvePermission — delayed pending auto verdict on null prompt", () => {
-  it("processes pending allow before treating null as a user Esc-abort", async () => {
+describe("resolvePermission — glob approvals are invocation-only", () => {
+  it("a reviewer allow of a glob command runs it but mints no broadening rule", async () => {
     setAutoEnabled(true, { appendEntry: () => {} } as any);
     const ctx = makeCtx();
     const storage = makeStorage();
-
-    // The real bug: with auto on, the first review attempt fails (infra
-    // hiccup) so the pipeline falls to the interactive prompt while
-    // background retries run. When a retry succeeds it stores the verdict
-    // and aborts the prompt controller; the prompt resolves null. The old
-    // code treated that null as a user Esc-abort and killed the turn.
-    // Make the reviewer permanently transient so we control when the
-    // verdict lands, then simulate a completed background retry.
-    const transientSpawn = async () => ({ content: [], details: { error: "simulated infrastructure failure" } });
-    let resolvePrompt: (v: null) => void = () => {};
-    ctx.ui.custom = () => new Promise<null>((res) => { resolvePrompt = res; });
-    ctx.ui.getToolsExpanded = () => true;
-
-    const promise = resolvePermission(
+    const result = await resolvePermission(
       baseDeps({
         displayCtx: ctx,
         storage,
-        cwd: "/tmp/regression-pending",
+        cwd: "/tmp",
+        reviewSpawn: makeReviewSpawn([allowAssessment()]),
+        sendAutoApproval: () => {},
+      }),
+      {
+        permission: "bash",
+        target: "rm -rf *",
+        check: { action: "ask", unapproved: ["rm -rf *"], unapprovedDisplay: ["rm -rf *"] },
+        recheck: () => ({ action: "ask" }),
+      },
+    );
+    assert.equal(result, undefined, "the reviewed invocation runs");
+    assert.equal(storage.temp.getRules().length, 0, "no rule is minted from a glob command");
+  });
+});
+
+describe("resolvePermission — mode flip during review", () => {
+  it("blocks a write the reviewer allowed if the session flipped to read-only", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const storage = makeStorage();
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        storage,
+        cwd: "/tmp",
+        allowModes: ["build"],
+        currentReviewProfile: () => "ro",
+        reviewSpawn: makeReviewSpawn([allowAssessment()]),
+        sendAutoApproval: () => {},
+      }),
+      {
+        permission: "edit",
+        target: "/tmp/x.ts",
+        check: { action: "ask" },
+        recheck: () => ({ action: "allow" }),
+      },
+    );
+    assert.equal(result?.block, true, "a stale write approval is blocked after the flip");
+    assert.match(result?.reason ?? "", /read-only/);
+    assert.equal(storage.temp.getRules().length, 0, "no rule is minted from a stale approval");
+  });
+
+  it("blocks a bash approval after a flip to read-only (fail-closed)", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const storage = makeStorage();
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        storage,
+        cwd: "/tmp",
+        allowModes: ["build"],
+        currentReviewProfile: () => "ro",
+        reviewSpawn: makeReviewSpawn([allowAssessment()]),
+        sendAutoApproval: () => {},
+      }),
+      {
+        permission: "bash",
+        target: "touch x",
+        check: { action: "ask" },
+        recheck: () => ({ action: "allow" }),
+      },
+    );
+    assert.equal(result?.block, true, "any approval taken under rw is discarded after a flip to ro");
+  });
+});
+
+describe("resolvePermission — reviewer unavailable is fail-closed", () => {
+  it("escalates to the user and denies on a dismissed prompt (never auto-approves)", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const storage = makeStorage();
+    // Reviewer permanently transient: the pipeline must fall through to the
+    // prompt and must NOT schedule a retry that could approve behind the user.
+    const transientSpawn = async () => ({ content: [], details: { error: "simulated infrastructure failure" } });
+    ctx.ui.custom = () => Promise.resolve(null);
+    ctx.ui.getToolsExpanded = () => true;
+
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        storage,
+        cwd: "/tmp/regression-fail-closed",
         reviewSpawn: transientSpawn,
         sendAutoApproval: () => {},
       }),
       {
         permission: "edit",
-        target: "/tmp/regression-pending/package.json",
+        target: "/tmp/regression-fail-closed/package.json",
         check: { action: "ask" },
-        recheck: () => {
-          return checkFileTarget("/tmp/regression-pending/package.json", "edit", "build", storage.getAllRules(), "/tmp/regression-pending");
-        },
+        recheck: () =>
+          checkFileTarget("/tmp/regression-fail-closed/package.json", "edit", "build", storage.getAllRules(), "/tmp/regression-fail-closed"),
       },
     );
+    assert.equal(result?.block, true, "unavailable reviewer + dismissed prompt must block");
+    assert.equal(ctx.aborted.value, true, "Esc denies and aborts the turn");
+  });
 
-    // Wait for the pipeline to reach the prompt, then deliver the verdict
-    // the way the background retry would: store it, then dismiss the prompt.
-    await new Promise((r) => setTimeout(r, 5));
-    const { setPendingAutoResult } = await import("./core/reviewer-state.ts");
-    setPendingAutoResult(allowAssessment());
-    resolvePrompt(null);
+  it("a stale pending verdict cannot convert a prompt dismissal into an approval", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const storage = makeStorage();
+    const transientSpawn = async () => ({ content: [], details: { error: "simulated infrastructure failure" } });
+    ctx.ui.custom = () => Promise.resolve(null);
+    ctx.ui.getToolsExpanded = () => true;
 
-    const result = await promise;
-    assert.equal(ctx.aborted.value, false, "pending allow must not abort the turn");
-    assert.equal(result, undefined, "pending allow must proceed (no block)");
+    // The removed fail-open: a global pending allow left over from a previous
+    // action's background retry could be consumed by this action's null prompt.
+    // Seed it if the (now-deleted) setter is somehow present; it must be inert.
+    const mod: Record<string, unknown> = await import("./core/reviewer-state.ts");
+    if (typeof mod.setPendingAutoResult === "function") {
+      (mod.setPendingAutoResult as (v: unknown) => void)(allowAssessment());
+    }
+
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        storage,
+        cwd: "/tmp/regression-stale",
+        reviewSpawn: transientSpawn,
+        sendAutoApproval: () => {},
+      }),
+      {
+        permission: "edit",
+        target: "/tmp/regression-stale/package.json",
+        check: { action: "ask" },
+        recheck: () =>
+          checkFileTarget("/tmp/regression-stale/package.json", "edit", "build", storage.getAllRules(), "/tmp/regression-stale"),
+      },
+    );
+    assert.equal(result?.block, true, "a stale pending verdict must not allow the action");
   });
 });
