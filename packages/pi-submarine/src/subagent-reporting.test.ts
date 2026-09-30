@@ -1,7 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createSubagentSafetynetExtension, REPORT_TOOL_NAME } from "./subagent-safetynet.ts";
-import { subagentToolNames } from "./subagent.ts";
+import { createChildExtension, REPORT_TOOL_NAME, subagentToolNames, type ChildExtensionOpts } from "pi-submarine-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal extension API mock: captures tools and event handlers. */
@@ -50,6 +49,17 @@ async function runHandlers(mock: ReturnType<typeof createMockPi>, event: string)
 	for (const h of mock.handlers.get(event) ?? []) await h();
 }
 
+/** createChildExtension with the always-required fields filled with dummies. */
+function makeFactory(opts: Partial<ChildExtensionOpts> & { taskType: "explore" | "build"; cwd: string }) {
+	return createChildExtension({
+		parentCtx: createMockCtx(),
+		onPermissionDenied: () => {},
+		services: () => ({ gate: async () => undefined }),
+		serviceInputs: { trustExternalPaths: false, paradigm: "plan-build", modeAliases: {} },
+		...opts,
+	});
+}
+
 describe("subagent tool allowlist", () => {
 	it("includes report_to_parent only for collaborative children", () => {
 		assert.ok(subagentToolNames("explore", true).includes(REPORT_TOOL_NAME));
@@ -64,7 +74,7 @@ describe("report_to_parent registration", () => {
 		const mock = createMockPi();
 		const segment = { reported: false, nudged: false };
 		const sent: Array<{ summary: string; body?: string; urgent?: boolean }> = [];
-		const factory = createSubagentSafetynetExtension({
+		const factory = makeFactory({
 			taskType: "explore",
 			cwd: "/tmp/test",
 			reporting: { send: (r) => sent.push(r), segment },
@@ -83,7 +93,7 @@ describe("report_to_parent registration", () => {
 
 	it("is NOT registered for internal (non-collaborative) subagents", () => {
 		const mock = createMockPi();
-		const factory = createSubagentSafetynetExtension({
+		const factory = makeFactory({
 			taskType: "explore",
 			cwd: "/tmp/test",
 			omitContextMessage: true,
@@ -98,7 +108,7 @@ describe("one-shot settle guard", () => {
 	it("nudges exactly once, then lets the child settle", async () => {
 		const mock = createMockPi();
 		const segment = { reported: false, nudged: false };
-		const factory = createSubagentSafetynetExtension({
+		const factory = makeFactory({
 			taskType: "explore",
 			cwd: "/tmp/test",
 			reporting: { send: () => {}, segment },
@@ -118,7 +128,7 @@ describe("one-shot settle guard", () => {
 	it("does not nudge after the child reports", async () => {
 		const mock = createMockPi();
 		const segment = { reported: true, nudged: false };
-		const factory = createSubagentSafetynetExtension({
+		const factory = makeFactory({
 			taskType: "explore",
 			cwd: "/tmp/test",
 			reporting: { send: () => {}, segment },
@@ -135,7 +145,7 @@ describe("one-shot settle guard", () => {
 		// tokens on repeated empty continuations exactly this way.
 		const mock = createMockPi();
 		const segment = { reported: false, nudged: false };
-		const factory = createSubagentSafetynetExtension({
+		const factory = makeFactory({
 			taskType: "explore",
 			cwd: "/tmp/test",
 			reporting: { send: () => {}, segment },

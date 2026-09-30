@@ -1,43 +1,40 @@
 {
-  "name": "extensions",
-  "version": "1.0.0",
-  "type": "module",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "node --experimental-strip-types --import ./core/test-setup.ts --test *.test.ts core/*.test.ts core/inferred/*.test.ts",
-    "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "@earendil-works/pi-agent-core": "^0.99.0",
-    "@earendil-works/pi-ai": "^0.99.0",
-    "@earendil-works/pi-coding-agent": "^0.99.0",
-    "@earendil-works/pi-tui": "^0.99.0",
-    "@oh-my-pi/pi-coding-agent": "^18.2.6",
-    "picomatch": "^4.0.7",
-    "proper-lockfile": "^4.1.2",
-    "tree-sitter-bash": "0.25.1",
-    "typebox": "^1.3.34",
-    "typescript": "^7.0.2",
-    "valibot": "^1.5.0",
-    "web-tree-sitter": "0.27.0",
-    "@earendil-works/pi-codemode": "^0.99.0"
-  },
-  "devDependencies": {
-    "@types/picomatch": "^4.0.3"
-  },
-  "pi": {
-    "extensions": [
-      "./index.ts"
-    ]
-  },
-  "omp": {
-    "extensions": [
-      "./omp-index.ts"
-    ]
-  }
+	"name": "pi-extras-workspace",
+	"version": "1.0.0",
+	"private": true,
+	"type": "module",
+	"description": "Monorepo for pi-safetynet and pi-submarine (packages/*)",
+	"workspaces": ["packages/*"],
+	"scripts": {
+		"test": "node --experimental-strip-types --import ./packages/pi-safetynet/core/test-setup.ts --test packages/pi-safetynet/*.test.ts packages/pi-safetynet/core/*.test.ts packages/pi-safetynet/core/inferred/*.test.ts packages/pi-submarine/*.test.ts packages/pi-submarine/src/*.test.ts packages/pi-submarine-core/src/*.test.ts",
+		"typecheck": "tsc --noEmit",
+		"check": "npm run typecheck && npm test"
+	},
+	"keywords": [],
+	"author": "",
+	"license": "ISC",
+	"pi": {
+		"extensions": [
+			"./packages/pi-safetynet/index.ts",
+			"./packages/pi-submarine/index.ts"
+		]
+	},
+	"dependencies": {
+		"@earendil-works/pi-agent-core": "^0.99.0",
+		"@earendil-works/pi-ai": "^0.99.0",
+		"@earendil-works/pi-codemode": "^0.99.0",
+		"@earendil-works/pi-coding-agent": "^0.99.0",
+		"@earendil-works/pi-tui": "^0.99.0",
+		"@oh-my-pi/pi-coding-agent": "^18.2.6",
+		"picomatch": "^4.0.7",
+		"proper-lockfile": "^4.1.2",
+		"tree-sitter-bash": "0.25.1",
+		"typebox": "^1.3.34",
+		"typescript": "^7.0.2",
+		"valibot": "^1.5.0",
+		"web-tree-sitter": "0.27.0"
+	},
+	"devDependencies": {
+		"@types/picomatch": "^4.0.3"
+	}
 }

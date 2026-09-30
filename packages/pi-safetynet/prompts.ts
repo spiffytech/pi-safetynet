@@ -26,7 +26,7 @@ export interface DenyEditor {
   invalidate(): void;
 }
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { toDisplayPath } from "./core/project.ts";
+import { toDisplayPath } from "pi-submarine-core";
 import type { PromptKeybindings, PermissionDuration } from "./core/types.ts";
 import { uiArbiter } from "./core/ui-arbiter.ts";
 

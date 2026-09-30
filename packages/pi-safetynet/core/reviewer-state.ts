@@ -148,9 +148,20 @@ export function resolveModelSpec<M extends { id: string; provider?: string }>(
   return found;
 }
 
-/** Run a permission review and classify the result. When `opts.model` is a
- *  list, each spec is tried in order until one produces a usable verdict;
- *  the last failure is returned otherwise. */
+/** Whether a provider error is a credential rejection — a per-model condition
+ *  the fallback chain can route around, unlike a transport blip. */
+function isAuthFailure(message: string): boolean {
+  return /\b401\b|unauthori[sz]ed|authentication failed|not authenticated|invalid.?api.?key|incorrect.?api.?key/i.test(message);
+}
+
+/** Run a permission review and classify the result.
+ *
+ *  When `opts.model` is a list, each spec is tried in order — but only for
+ *  failures that mean the model cannot produce a verdict (unknown provider,
+ *  missing model, rejected credential, unusable output). A retryable transport
+ *  failure (connection error, timeout, abort) stops the chain: pi already
+ *  retried that model inside the subagent, and the next model would ride the
+ *  same network, so spending a fallback on it would just hide the blip. */
 export async function runPermissionReview(
   opts: ReviewCallOpts,
   deps: ReviewDeps,
@@ -160,6 +171,12 @@ export async function runPermissionReview(
   if (specs.length === 0) return runPermissionReviewWithModel(opts, deps, "");
   const failures: { spec: string; message: string }[] = [];
   for (let i = 0; i < specs.length; i++) {
+    // The caller aborts this signal at its review deadline. Stop before
+    // spawning another model: a cancelled review must not start new work, and
+    // the pipeline has already fallen through to the manual prompt.
+    if (opts.signal?.aborted) {
+      return { kind: "transient", message: "Reviewer was aborted" };
+    }
     const spec = specs[i]!;
     const verdict = await runPermissionReviewWithModel(opts, deps, spec);
     if (verdict.kind === "assessment") {
@@ -170,16 +187,23 @@ export async function runPermissionReview(
       }
       return verdict;
     }
+    // A retryable transport failure is not a model-availability problem. pi
+    // already retried inside the subagent; stop here and let the user decide
+    // rather than spending a fallback on a blip.
+    if (verdict.kind === "transient") {
+      return verdict;
+    }
+    // fatal → this model cannot produce a verdict. Try the next configured one.
     failures.push({ spec, message: verdict.message });
     if (i < specs.length - 1) {
-      debugLog(`safetynet: reviewer model "${spec}" failed (${verdict.message}); falling back to next model.`);
+      debugLog(`safetynet: reviewer model "${spec}" unavailable (${verdict.message}); falling back to next model.`);
     }
   }
   if (failures.length > 0) {
     deps.onDiagnostic?.(formatReviewerFallback(failures), "warning");
-    // Every configured model failed — say exactly that. "No reviewer model
-    // configured" here would be a lie the user can act on the wrong way.
-    return { kind: "transient", message: formatReviewerFallback(failures) };
+    // Every configured model was unavailable. Report fatal so the pipeline can
+    // disable auto-approve — a chain with no usable model cannot gate actions.
+    return { kind: "fatal", message: formatReviewerFallback(failures) };
   }
   // Unreachable in practice (specs.length > 0 implies a failure was recorded),
   // kept as a conservative fall-through.
@@ -276,13 +300,22 @@ async function runPermissionReviewWithModel(
     if (errMsg.includes("No model selected")) {
       return { kind: "transient", message: errMsg };
     }
-    // Fatal only when recovery in-session is impossible (structural/session
-    // creation failures). Auth/credential failures are transient: an expired or
-    // rejected token can refresh on a later retry, so they must flow to the
-    // background-retry path instead of permanently disabling auto-approve.
-    if (errMsg.includes("create") || errMsg.includes("not found") || errMsg.includes("Unknown provider")) {
+    // The model cannot produce a verdict at all: unknown provider, model
+    // missing from the catalog, session-creation failure, or a rejected
+    // credential. The fallback chain exists for exactly this — advance to the
+    // next configured model.
+    if (
+      errMsg.includes("create") ||
+      errMsg.includes("not found") ||
+      errMsg.includes("Unknown provider") ||
+      isAuthFailure(errMsg)
+    ) {
       return { kind: "fatal", message: errMsg };
     }
+    // Everything else is a retryable infrastructure failure (connection error,
+    // timeout, 5xx, …). pi already retried this model inside the subagent; a
+    // fallback would ride the same network, so classify it transient — the
+    // chain stops and the user decides.
     return { kind: "transient", message: errMsg };
   }
   if (result.details.hitTimeout) {
@@ -292,12 +325,14 @@ async function runPermissionReviewWithModel(
     return { kind: "transient", message: "Reviewer was aborted" };
   }
   if (!text) {
-    return { kind: "transient", message: "Reviewer returned empty output" };
+    // Reached the model but got nothing usable back — a model problem the chain
+    // can route around.
+    return { kind: "fatal", message: "Reviewer returned empty output" };
   }
 
   const assessment = parseAssessment(text);
   if (!assessment) {
-    return { kind: "transient", message: "Could not parse reviewer JSON output" };
+    return { kind: "fatal", message: "Could not parse reviewer JSON output" };
   }
 
   return { kind: "assessment", assessment };

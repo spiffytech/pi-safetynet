@@ -13,7 +13,6 @@ import { resolveOmpPermission, type OmpPipelineDeps } from "./omp-pipeline.ts";
 import { PermissionStorage, reconstructSessionRules } from "./core/permissions/index.ts";
 import { debugLog } from "./core/debug-log.ts";
 import {
-	loadSubagentsConfig,
 	loadTrustExternalPaths,
 	loadDefaultProfile,
 	loadParadigm,
@@ -21,7 +20,7 @@ import {
 } from "./core/global-config.ts";
 import type { ProfileName, Ruleset } from "./core/types.ts";
 import { checkBashPermission, checkFileTarget, checkToolPermission } from "./core/check.ts";
-import { normalizeToolPath } from "./core/project.ts";
+import { normalizeToolPath } from "pi-submarine-core";
 import {
 	getCurrentProfile,
 	setCurrentProfile,

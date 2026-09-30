@@ -3,7 +3,7 @@ import type { ProfileName, PermissionAction, Rule, Ruleset, ModeAliases } from "
 import { evaluatePermission } from "./permissions/ruleset.ts";
 import { getBaselineRules } from "./permissions/index.ts";
 import { parseCommand, subcommandTokenLists, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
-import { normalizePathForMatching, expandHome, isExternalPath } from "./project.ts";
+import { normalizePathForMatching, expandHome, isExternalPath } from "pi-submarine-core";
 import { newVarMap, resolveDisplayWord, recordAssignment } from "./expansion.ts";
 import { patternMatches } from "./inferred/shapes.ts";
 import type { InferredBashRule } from "./inferred/store.ts";

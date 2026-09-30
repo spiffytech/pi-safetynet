@@ -9,8 +9,8 @@
  */
 
 import type { Usage } from "@earendil-works/pi-ai";
-import { accumulateUsage, isZeroUsage, snapshotUsage, subtractUsage, zeroUsage } from "./subagent.ts";
-import { capBashTail, capReportMessage, capReportSummary } from "./core/report.ts";
+import { accumulateUsage, isZeroUsage, snapshotUsage, subtractUsage, zeroUsage } from "pi-submarine-core";
+import { capBashTail, capReportMessage, capReportSummary } from "pi-submarine-core";
 
 export type JobState = "starting" | "running" | "idle" | "closed" | "failed";
 

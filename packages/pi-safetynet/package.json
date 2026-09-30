@@ -1,0 +1,32 @@
+{
+	"name": "pi-safetynet",
+	"version": "1.0.0",
+	"type": "module",
+	"description": "Permission enforcement layer for pi: rulesets, prompts, modes, auto-approve reviewer",
+	"main": "./index.ts",
+	"license": "SEE LICENSE.md",
+	"keywords": ["pi-package"],
+	"pi": {
+		"extensions": ["./index.ts"]
+	},
+	"omp": {
+		"extensions": ["./omp-index.ts"]
+	},
+	"dependencies": {
+		"pi-submarine-core": "^1.0.0",
+		"picomatch": "^4.0.7",
+		"proper-lockfile": "^4.1.2",
+		"tree-sitter-bash": "0.25.1",
+		"valibot": "^1.5.0",
+		"web-tree-sitter": "0.27.0"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-agent-core": "*",
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-codemode": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"@oh-my-pi/pi-coding-agent": "*",
+		"typebox": "*"
+	}
+}

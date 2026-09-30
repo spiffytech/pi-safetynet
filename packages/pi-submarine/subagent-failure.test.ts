@@ -1,11 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { isSubagentFailure } from "./subagent.ts";
+import { isSubagentFailure } from "pi-submarine-core";
 import {
   recordSubagentFailure,
   consumeSubagentFailure,
   clearSubagentFailures,
-} from "./index.ts";
+} from "./src/failure.ts";
 
 describe("isSubagentFailure", () => {
   it("treats a clean completion as success", () => {

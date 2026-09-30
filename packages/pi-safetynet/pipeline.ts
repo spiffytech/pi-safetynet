@@ -15,7 +15,7 @@ import type {
 import type { PermissionPromptOptions, PermissionPromptResult, PermissionDuration } from "./prompts.ts";
 import type { PromptKeybindings } from "./core/types.ts";
 import { showPermissionPrompt } from "./prompts.ts";
-import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
+import { normalizePathForMatching, toRecursiveGlob } from "pi-submarine-core";
 import { PermissionStorage } from "./core/permissions/index.ts";
 import type { PermissionCheck } from "./core/check.ts";
 import { actionWrites, patternHasBashGlob } from "./core/check.ts";
@@ -423,7 +423,13 @@ export async function resolvePermission(
             ...(config.model ? { model: config.model } : {}),
           },
           {
-            spawn: deps.reviewSpawn ?? (await import("./subagent.ts").then((m) => m.runSubagent)),
+            spawn: deps.reviewSpawn ?? (async (spawnOpts: any) => {
+              // Reviewer children run explore-style (read-only) but still get the
+              // host's research tool; sessions come from the shared runtime package.
+              const { runSubagent } = await import("pi-submarine-core");
+              const { createSafetynetChildServices } = await import("./src/child-services.ts");
+              return runSubagent({ ...spawnOpts, services: createSafetynetChildServices(deps.storage) });
+            }),
             // Route reviewer fallback diagnostics to the TUI via notify — the
             // render-safe channel. console.warn here would corrupt the display.
             onDiagnostic: (msg, level) => deps.displayCtx.ui.notify(msg, level),

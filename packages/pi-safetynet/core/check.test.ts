@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { checkBashPermission, checkFileTarget, checkToolPermission, actionWrites, patternHasBashGlob } from "./check.ts";
-import { normalizeToolPath } from "./project.ts";
+import { normalizeToolPath } from "pi-submarine-core";
 import { parseCommand } from "./bash-parser.ts";
 import { getBaselineRules } from "./permissions/index.ts";
 import type { Ruleset } from "./types.ts";

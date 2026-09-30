@@ -1,0 +1,22 @@
+{
+	"name": "pi-submarine",
+	"version": "1.0.0",
+	"type": "module",
+	"description": "Persistent two-way background subagents for pi (subagent_run and friends)",
+	"main": "./index.ts",
+	"license": "SEE LICENSE.md",
+	"keywords": ["pi-package"],
+	"pi": {
+		"extensions": ["./index.ts"]
+	},
+	"dependencies": {
+		"pi-submarine-core": "^1.0.0"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-agent-core": "*",
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	}
+}

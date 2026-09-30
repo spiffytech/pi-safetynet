@@ -15,7 +15,7 @@ import type {
 	TempRule,
 } from "./core/types.ts";
 import { PermissionStorage } from "./core/permissions/index.ts";
-import { normalizePathForMatching, toRecursiveGlob } from "./core/project.ts";
+import { normalizePathForMatching, toRecursiveGlob } from "pi-submarine-core";
 import type { PermissionCheck } from "./core/check.ts";
 import { actionWrites, patternHasBashGlob } from "./core/check.ts";
 import { isReadOnly } from "./core/profiles.ts";

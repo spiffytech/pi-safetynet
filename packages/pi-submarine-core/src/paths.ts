@@ -137,3 +137,40 @@ export function normalizeToolPath(filePath: string): string {
   if (normalized.startsWith("@")) normalized = normalized.slice(1);
   return normalized.replace(TOOL_UNICODE_SPACES, " ");
 }
+
+/**
+ * Sensitive-file guard: true for paths whose contents are secrets (`.env`,
+ * keys, credential files). Pure path matching — shared by every child session
+ * so a read-only child cannot exfiltrate what the parent would deny.
+ */
+export function isSensitivePath(filePath: string): boolean {
+  // Case-folded: on case-insensitive filesystems (macOS/Windows) `.ENV` opens
+  // the same file as `.env`, so a case-sensitive check is a bypass. On
+  // case-sensitive filesystems an uppercase name is a different file; denying
+  // it is fail-closed, which the hazardous path tolerates by design.
+  const lower = filePath.toLowerCase();
+  const basename = lower.split("/").pop() ?? lower;
+
+  const allowed = [".env.example", ".env.sample", ".env.template", ".sample.env"];
+  if (allowed.some((e) => lower.endsWith(e))) return false;
+
+  if (/^\.env(\.[^.]+)*$/.test(basename)) return true;
+  if (basename === ".envrc") return true;
+  if (basename === ".npmrc") return true;
+  if (basename === ".pypirc") return true;
+  if (basename === ".netrc") return true;
+  if (basename === ".dockercfg") return true;
+
+  if (/^id_(rsa|ed25519|ecdsa)$/.test(basename)) return true;
+  if (/\.pem$/.test(basename)) return true;
+
+  if (/^credentials\.(json|ya?ml)$/.test(basename)) return true;
+  if (/^secrets\.(json|ya?ml)$/.test(basename)) return true;
+
+  if (/\.ssh[\\/]/.test(lower)) return true;
+  if (/\.gnupg[\\/]/.test(lower)) return true;
+  if (/\.aws[\\/]credentials/.test(lower)) return true;
+  if (/\.docker[\\/]config\.json/.test(lower)) return true;
+
+  return false;
+}

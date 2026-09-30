@@ -8,7 +8,7 @@ import {
 import type { Rule, Ruleset, ProfileName } from "./types.ts";
 import baselineData from "./permissions/baseline.json" with { type: "json" };
 import { checkBashPermission, checkFileTarget } from "./check.ts";
-import { toRecursiveGlob, normalizePathForMatching } from "./project.ts";
+import { toRecursiveGlob, normalizePathForMatching } from "pi-submarine-core";
 
 const BASELINE: Ruleset = baselineData.rules as Ruleset;
 const ALL_MODES: ProfileName[] = ["build", "plan"];

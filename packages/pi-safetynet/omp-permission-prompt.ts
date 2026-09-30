@@ -22,7 +22,7 @@ import {
 	type KeyId,
 } from "@oh-my-pi/pi-tui";
 import { DynamicBorder, getEditorTheme, Settings, type Theme, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { toDisplayPath } from "./core/project.ts";
+import { toDisplayPath } from "pi-submarine-core";
 import type { PromptKeybindings, PermissionDuration } from "./core/types.ts";
 import { uiArbiter } from "./core/ui-arbiter.ts";
 

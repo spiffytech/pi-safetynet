@@ -116,3 +116,67 @@ describe("runPermissionReview — fallback diagnostics", () => {
     assert.notEqual(v.kind, "assessment");
   });
 });
+
+describe("runPermissionReview — transient failures do not consume fallbacks", () => {
+  it("stops at the first transport blip instead of trying the next model", async () => {
+    const seen: Array<[string, string]> = [];
+    let calls = 0;
+    const v = await runPermissionReview(opts(["a/one", "b/two"]), {
+      spawn: async () => {
+        calls++;
+        return { content: [], details: { error: "Connection error." } };
+      },
+      onDiagnostic: (m, l) => seen.push([m, l]),
+    });
+    assert.equal(v.kind, "transient");
+    assert.equal(calls, 1, "a connection error must not advance to the fallback model");
+    assert.deepEqual(seen, [], "no fallback happened → no diagnostic");
+  });
+
+  it("advances past an unavailable model, then stops at a transport blip", async () => {
+    let calls = 0;
+    const v = await runPermissionReview(opts(["a/one", "b/two"]), {
+      spawn: async () => {
+        calls++;
+        return calls === 1
+          ? { content: [], details: { error: "Unknown provider: a" } }
+          : { content: [], details: { error: "Connection error." } };
+      },
+    });
+    assert.equal(v.kind, "transient");
+    assert.equal(calls, 2, "the unavailable model is skipped; the transient one is not");
+  });
+
+  it("advances past an unavailable model when the next one produces a verdict", async () => {
+    let calls = 0;
+    const v = await runPermissionReview(opts(["a/one", "b/two"]), {
+      spawn: async () => {
+        calls++;
+        return calls === 1 ? { content: [], details: { error: "Unknown provider: a" } } : ALLOW("b/two");
+      },
+    });
+    assert.equal(v.kind, "assessment");
+    assert.equal(calls, 2);
+  });
+
+  it("reports fatal when every model is unavailable", async () => {
+    const v = await runPermissionReview(opts(["a/one", "b/two"]), {
+      spawn: async () => ({ content: [], details: { error: "Unknown provider: nope" } }),
+    });
+    assert.equal(v.kind, "fatal", "an all-unavailable chain must disable auto-approve, not look transient");
+  });
+
+  it("stops before spawning the next model once the review signal is aborted", async () => {
+    let calls = 0;
+    const ctl = new AbortController();
+    const v = await runPermissionReview(opts(["a/one", "b/two"], { signal: ctl.signal }), {
+      spawn: async () => {
+        calls++;
+        ctl.abort(); // the pipeline's deadline fires mid-review
+        return { content: [], details: { error: "Unknown provider: a" } };
+      },
+    });
+    assert.equal(calls, 1, "an aborted review must not spawn the fallback model");
+    assert.equal(v.kind, "transient");
+  });
+});

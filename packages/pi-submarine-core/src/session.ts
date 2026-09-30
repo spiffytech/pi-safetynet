@@ -1,5 +1,10 @@
 /**
- * Subagent orchestration — spawn in-process AgentSessions via the SDK.
+ * session.ts — spawn in-process subagent AgentSessions via the SDK.
+ *
+ * Shared by the one-shot reviewer path (`runSubagent`, pi-safetynet) and
+ * pi-submarine's persistent two-way runner, so provider/auth/session setup
+ * lives in exactly one place. Pure orchestration: permission enforcement is
+ * whatever `ChildServices` the caller injects (see host-api.ts).
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -13,11 +18,11 @@ import {
 	type CreateAgentSessionResult,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
-import type { AutoDenyConfig, Paradigm, ProfileName, ModeAliases } from "./core/types.ts";
-import type { PromptKeybindings } from "./core/types.ts";
-import type { PermissionStorage } from "./core/permissions/index.ts";
-import { toDisplayPath } from "./core/project.ts";
-import { createSubagentSafetynetExtension, REPORT_TOOL_NAME, type ReportingOptions } from "./subagent-safetynet.ts";
+import type { ChildServicesFactory } from "./host-api.ts";
+import type { ReportingOptions } from "./reporting.ts";
+import { createChildExtension, REPORT_TOOL_NAME, RESEARCH_TOOL_NAME } from "./child-ext.ts";
+import { toDisplayPath } from "./paths.ts";
+import { accumulateUsage, snapshotUsage, zeroUsage } from "./usage.ts";
 
 /** Extension factory that overrides the system prompt via before_agent_start return. */
 function createSystemPromptExtension(systemPrompt: string): (pi: ExtensionAPI) => void {
@@ -28,164 +33,24 @@ function createSystemPromptExtension(systemPrompt: string): (pi: ExtensionAPI) =
 	};
 }
 
-
-export type SubagentTaskType = "explore" | "build";
-
-/** Zeroed pi-ai `Usage` accumulator. */
-export function zeroUsage(): Usage {
-	return {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-}
-
-/** Whether an accumulator has seen no billable activity yet. */
-export function isZeroUsage(usage: Usage): boolean {
-	return (
-		(usage.input || 0) === 0 &&
-		(usage.output || 0) === 0 &&
-		(usage.cacheRead || 0) === 0 &&
-		(usage.cacheWrite || 0) === 0 &&
-		(usage.cost?.total || 0) === 0
-	);
-}
-
-/**
- * Fold one assistant message's usage into an accumulator.
- *
- * `totalTokens` mirrors pi's own fallback (`usage.totalTokens || sum of parts`), so a
- * provider that reports no total still contributes a sensible figure. This value is
- * never used for context accounting — pi reads usage only from assistant messages in
- * the main session — it just has to be present on the `Usage` we hand back.
- */
-export function accumulateUsage(target: Usage, usage: Usage): void {
-	target.input += usage.input || 0;
-	target.output += usage.output || 0;
-	target.cacheRead += usage.cacheRead || 0;
-	target.cacheWrite += usage.cacheWrite || 0;
-	target.totalTokens += usage.totalTokens || (usage.input || 0) + (usage.output || 0) + (usage.cacheRead || 0) + (usage.cacheWrite || 0);
-	target.cost.input += usage.cost?.input || 0;
-	target.cost.output += usage.cost?.output || 0;
-	target.cost.cacheRead += usage.cost?.cacheRead || 0;
-	target.cost.cacheWrite += usage.cost?.cacheWrite || 0;
-	target.cost.total += usage.cost?.total || 0;
-}
-
-/** Deep copy of an accumulator, safe to hand to pi as a tool-result `usage`. */
-export function snapshotUsage(usage: Usage): Usage {
-	return { ...usage, cost: { ...usage.cost } };
-}
-
-/** Field-wise `total - part`; used to emit only the not-yet-delivered usage delta. */
-export function subtractUsage(total: Usage, part: Usage): Usage {
-	return {
-		input: (total.input || 0) - (part.input || 0),
-		output: (total.output || 0) - (part.output || 0),
-		cacheRead: (total.cacheRead || 0) - (part.cacheRead || 0),
-		cacheWrite: (total.cacheWrite || 0) - (part.cacheWrite || 0),
-		totalTokens: (total.totalTokens || 0) - (part.totalTokens || 0),
-		cost: {
-			input: (total.cost?.input || 0) - (part.cost?.input || 0),
-			output: (total.cost?.output || 0) - (part.cost?.output || 0),
-			cacheRead: (total.cost?.cacheRead || 0) - (part.cost?.cacheRead || 0),
-			cacheWrite: (total.cost?.cacheWrite || 0) - (part.cost?.cacheWrite || 0),
-			total: (total.cost?.total || 0) - (part.cost?.total || 0),
-		},
-	};
-}
-
-/**
- * Whether a subagent's result should be reported to the model as a tool error.
- *
- * `AgentToolResult` has no `isError` field — pi derives it solely from whether
- * `execute()` throws — so a non-throwing tool always looks successful. We can't
- * throw instead: the agent loop discards the whole result on throw, taking the
- * partial findings and the `usage` we attach with it. So failures are flagged
- * out-of-band and applied by a `tool_result` handler (see the safetynet extension).
- *
- * Matches pi's own convention, where a blocked tool call and a timed-out bash
- * command are both errors. Anything short of the subagent doing its job counts:
- * the parent should see a red result and re-plan, not a green one that happens to
- * contain the word "Error". Partial output and details survive either way.
- */
-export function isSubagentFailure(details: Record<string, unknown> | undefined): boolean {
-	if (!details) return false;
-	return Boolean(
-		details.error ||
-		details.aborted ||
-		details.hitPermissionDenied ||
-		details.hitTurnLimit ||
-		details.hitTimeout,
-	);
-}
-
-export interface SubagentOptions {
-	taskType: SubagentTaskType;
-	prompt: string;
-	parentCtx: ExtensionContext;
-	parentStorage: PermissionStorage;
-	signal?: AbortSignal | undefined;
-	onUpdate?: AgentToolUpdateCallback<unknown> | undefined;
-	cwd: string;
-	model?: Model<any> | undefined;
-	thinkingLevel?: string | undefined;
-	trustExternalPaths?: boolean;
-	/** Inherited from parent: prompt keybindings for the bridged permission prompt. */
-	promptKeybindings: PromptKeybindings;
-	/** Inherited from parent: auto-deny behaviour for rule-denies. */
-	autoDenyConfig: AutoDenyConfig;
-	/** Active paradigm (ro-rw vs plan-build) for canonical subagent mode names. */
-	paradigm?: Paradigm;
-	/** Mode-name aliasing for rule matching (plan→ro / build→rw bijection). */
-	modeAliases?: ModeAliases;
-	/** Custom system prompt to replace the default (applied via before_agent_start return). */
-	systemPrompt?: string;
-	/** Override the default 300s timeout. */
-	timeoutMs?: number;
-}
-
-/** Max agent turns before we abort the subagent. */
-const MAX_TURNS = 50;
-/** Wall-clock timeout in ms before we abort the subagent. */
-const TIMEOUT_MS = 300_000;
-
-/** Format a subagent tool invocation as a concise activity label. */
-function formatActivity(toolName: string, args: Record<string, unknown>, cwd: string): string {
-	const truncate = (s: string, max = 60) => s.length > max ? s.slice(0, max - 1) + "…" : s;
-	const displayPath = (p: unknown) => truncate(toDisplayPath(String(p ?? ""), { cwd }));
-	switch (toolName) {
-		case "read": return `Reading ${displayPath(args.file_path ?? args.path)}`;
-		case "bash": return `Running: ${truncate(String(args.command ?? ""))}`;
-		case "grep": return `Searching: ${truncate(String(args.pattern ?? ""))}`;
-		case "find": return `Finding: ${truncate(String(args.pattern ?? ""))}`;
-		case "ls": return `Listing: ${displayPath(args.path ?? ".")}`;
-		case "write": return `Writing: ${displayPath(args.file_path ?? args.path)}`;
-		case "edit": return `Editing: ${displayPath(args.file_path ?? args.path)}`;
-		default: return toolName;
-	}
-}
-
 export interface SubagentSessionConfig {
 	taskType: "explore" | "build";
 	cwd: string;
 	parentCtx: ExtensionContext;
-	parentStorage: PermissionStorage;
 	model?: Model<any> | undefined;
 	thinkingLevel?: string | undefined;
-	trustExternalPaths?: boolean;
-	promptKeybindings: PromptKeybindings;
-	autoDenyConfig: AutoDenyConfig;
-	paradigm?: Paradigm;
-	modeAliases?: ModeAliases;
 	systemPrompt?: string;
 	reporting?: ReportingOptions;
 	/** Persistent jobs keep pi's compaction on; the one-shot reviewer turns it off. */
 	compactionEnabled?: boolean;
 	onPermissionDenied: () => void;
+	/** Permission enforcement for the child. Required for build sessions. */
+	services?: ChildServicesFactory | undefined;
+	trustExternalPaths?: boolean | undefined;
+	/** Active paradigm ("plan-build" | "ro-rw" by convention). */
+	paradigm?: string | undefined;
+	/** Mode-name aliasing for rule matching. */
+	modeAliases?: Record<string, string> | undefined;
 }
 
 export type CreateSubagentSessionResult =
@@ -199,8 +64,8 @@ export type CreateSubagentSessionResult =
  */
 export function subagentToolNames(taskType: "explore" | "build", reporting: boolean): string[] {
 	const base = taskType === "explore"
-		? ["read", "grep", "find", "ls", "codemode_research"]
-		: ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode_research"];
+		? ["read", "grep", "find", "ls", RESEARCH_TOOL_NAME]
+		: ["read", "bash", "edit", "write", "grep", "find", "ls", RESEARCH_TOOL_NAME];
 	return reporting ? [...base, REPORT_TOOL_NAME] : base;
 }
 
@@ -211,6 +76,9 @@ export function subagentToolNames(taskType: "explore" | "build", reporting: bool
  * two-way runner so provider/auth/session setup lives in exactly one place.
  */
 export async function createSubagentSession(cfg: SubagentSessionConfig): Promise<CreateSubagentSessionResult> {
+	if (cfg.taskType === "build" && !cfg.services) {
+		return { ok: false, kind: "create", message: "Build subagent requires permission services (ChildServicesFactory)" };
+	}
 	const agentDir = process.env.PI_AGENT_DIR ?? `${process.env.HOME}/.pi/agent`;
 
 	const modelRuntime = await ModelRuntime.create({
@@ -230,20 +98,20 @@ export async function createSubagentSession(cfg: SubagentSessionConfig): Promise
 		settingsManager,
 		noExtensions: true,
 		extensionFactories: [
-			createSubagentSafetynetExtension({
+			createChildExtension({
 				taskType: cfg.taskType,
-				parentCtx: cfg.parentCtx,
-				parentStorage: cfg.parentStorage,
 				cwd: cfg.cwd,
+				parentCtx: cfg.parentCtx,
 				onPermissionDenied: () => {
 					cfg.onPermissionDenied();
 					sessionRef?.abort();
 				},
-				trustExternalPaths: cfg.trustExternalPaths ?? false,
-				promptKeybindings: cfg.promptKeybindings,
-				autoDenyConfig: cfg.autoDenyConfig,
-				paradigm: cfg.paradigm ?? "plan-build",
-				modeAliases: cfg.modeAliases ?? {},
+				services: cfg.services ?? failClosedServices,
+				serviceInputs: {
+					trustExternalPaths: cfg.trustExternalPaths ?? false,
+					paradigm: cfg.paradigm ?? "plan-build",
+					modeAliases: cfg.modeAliases ?? {},
+				},
 				omitContextMessage: cfg.systemPrompt !== undefined,
 				...(cfg.reporting ? { reporting: cfg.reporting } : {}),
 			}),
@@ -302,6 +170,53 @@ export async function createSubagentSession(cfg: SubagentSessionConfig): Promise
 	return { ok: true, session };
 }
 
+/** Never-used fallback kept for type completeness: explore sessions hold no
+ *  gate at all; the build path above refuses to start without real services. */
+const failClosedServices: ChildServicesFactory = () => ({
+	gate: async () => ({ block: true, reason: "No permission services attached to this subagent" }),
+});
+
+export interface SubagentOptions {
+	taskType: "explore" | "build";
+	prompt: string;
+	parentCtx: ExtensionContext;
+	signal?: AbortSignal | undefined;
+	onUpdate?: AgentToolUpdateCallback<unknown> | undefined;
+	cwd: string;
+	model?: Model<any> | undefined;
+	thinkingLevel?: string | undefined;
+	trustExternalPaths?: boolean;
+	/** Active paradigm (ro-rw vs plan-build) for canonical subagent mode names. */
+	paradigm?: string;
+	/** Mode-name aliasing for rule matching (plan→ro / build→rw bijection). */
+	modeAliases?: Record<string, string>;
+	services?: ChildServicesFactory | undefined;
+	/** Custom system prompt to replace the default (applied via before_agent_start return). */
+	systemPrompt?: string;
+	/** Override the default 300s timeout. */
+	timeoutMs?: number;
+}
+
+/** Max agent turns before we abort the subagent. */
+const MAX_TURNS = 50;
+/** Wall-clock timeout in ms before we abort the subagent. */
+const TIMEOUT_MS = 300_000;
+
+/** Format a subagent tool invocation as a concise activity label. */
+function formatActivity(toolName: string, args: Record<string, unknown>, cwd: string): string {
+	const truncate = (s: string, max = 60) => s.length > max ? s.slice(0, max - 1) + "…" : s;
+	const displayPath = (p: unknown) => truncate(toDisplayPath(String(p ?? ""), { cwd }));
+	switch (toolName) {
+		case "read": return `Reading ${displayPath(args.file_path ?? args.path)}`;
+		case "bash": return `Running: ${truncate(String(args.command ?? ""))}`;
+		case "grep": return `Searching: ${truncate(String(args.pattern ?? ""))}`;
+		case "find": return `Finding: ${truncate(String(args.pattern ?? ""))}`;
+		case "ls": return `Listing: ${displayPath(args.path ?? ".")}`;
+		case "write": return `Writing: ${displayPath(args.file_path ?? args.path)}`;
+		case "edit": return `Editing: ${displayPath(args.file_path ?? args.path)}`;
+		default: return toolName;
+	}
+}
 
 export async function runSubagent(opts: SubagentOptions): Promise<{
 	content: { type: "text"; text: string }[];
@@ -313,21 +228,32 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 }> {
 	// Declared before any early return so every exit path can attach it.
 	const usage = zeroUsage();
-	const { taskType, prompt, parentCtx, parentStorage, signal, onUpdate, cwd } = opts;
+	const { taskType, prompt, parentCtx, signal, onUpdate, cwd } = opts;
+
+	// A signal that is already aborted means the caller cancelled this work —
+	// e.g. the reviewer's deadline fired and the chain is spawning the next
+	// model with the now-dead signal. `addEventListener` on an already-aborted
+	// signal never invokes its listener, so without this check the session would
+	// boot and run to completion despite the cancel.
+	if (signal?.aborted) {
+		return {
+			content: [{ type: "text", text: "Subagent aborted." }],
+			details: { aborted: true, taskType },
+			usage: snapshotUsage(usage),
+		};
+	}
 
 	let hitPermissionDenied = false;
 	const created = await createSubagentSession({
 		taskType,
 		cwd,
 		parentCtx,
-		parentStorage,
 		...(opts.model !== undefined ? { model: opts.model } : {}),
 		...(opts.thinkingLevel !== undefined ? { thinkingLevel: opts.thinkingLevel } : {}),
 		...(opts.trustExternalPaths !== undefined ? { trustExternalPaths: opts.trustExternalPaths } : {}),
-		promptKeybindings: opts.promptKeybindings,
-		autoDenyConfig: opts.autoDenyConfig,
 		...(opts.paradigm !== undefined ? { paradigm: opts.paradigm } : {}),
 		...(opts.modeAliases !== undefined ? { modeAliases: opts.modeAliases } : {}),
+		...(opts.services !== undefined ? { services: opts.services } : {}),
 		...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
 		compactionEnabled: false,
 		onPermissionDenied: () => {
@@ -349,7 +275,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	const { session } = created;
 
 	// bindExtensions resets active tools to defaults.
-	// The subagent safetynet extension fixes this in its session_start handler
+	// The subagent child extension fixes this in its session_start handler
 	// via pi.setActiveTools().
 
 	let fullText = "";

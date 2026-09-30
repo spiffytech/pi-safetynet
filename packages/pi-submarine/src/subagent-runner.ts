@@ -8,25 +8,22 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model, Usage } from "@earendil-works/pi-ai";
-import { createSubagentSession } from "./subagent.ts";
-import type { AutoDenyConfig, ModeAliases, Paradigm, PromptKeybindings } from "./core/types.ts";
-import type { PermissionStorage } from "./core/permissions/index.ts";
-import type { ReportingOptions } from "./subagent-safetynet.ts";
+import { createSubagentSession, type ChildServicesFactory, type ReportingOptions } from "pi-submarine-core";
 import type { JobControls } from "./subagent-jobs.ts";
 
 export interface PersistentSubagentOptions {
 	jobId: string;
 	taskType: "explore" | "build";
 	parentCtx: ExtensionContext;
-	parentStorage: PermissionStorage;
 	cwd: string;
 	model?: Model<any> | undefined;
 	thinkingLevel?: string | undefined;
 	trustExternalPaths?: boolean;
-	promptKeybindings: PromptKeybindings;
-	autoDenyConfig: AutoDenyConfig;
-	paradigm?: Paradigm;
-	modeAliases?: ModeAliases;
+	paradigm?: string;
+	modeAliases?: Record<string, string>;
+	/** Permission enforcement for the child (SafetynetHost's factory, or the
+	 *  standalone policy). Required for build task types. */
+	services?: ChildServicesFactory | undefined;
 	reporting?: ReportingOptions;
 	/** Invoked once the child session exists and controls are live. */
 	onControls(controls: JobControls): void;
@@ -86,14 +83,12 @@ export function startPersistentSubagent(opts: PersistentSubagentOptions): Persis
 				taskType: opts.taskType,
 				cwd: opts.cwd,
 				parentCtx: opts.parentCtx,
-				parentStorage: opts.parentStorage,
 				...(opts.model !== undefined ? { model: opts.model } : {}),
 				...(opts.thinkingLevel !== undefined ? { thinkingLevel: opts.thinkingLevel } : {}),
 				...(opts.trustExternalPaths !== undefined ? { trustExternalPaths: opts.trustExternalPaths } : {}),
-				promptKeybindings: opts.promptKeybindings,
-				autoDenyConfig: opts.autoDenyConfig,
 				...(opts.paradigm !== undefined ? { paradigm: opts.paradigm } : {}),
 				...(opts.modeAliases !== undefined ? { modeAliases: opts.modeAliases } : {}),
+				...(opts.services !== undefined ? { services: opts.services } : {}),
 				...(opts.reporting !== undefined ? { reporting: opts.reporting } : {}),
 				compactionEnabled: true,
 				onPermissionDenied: () => {

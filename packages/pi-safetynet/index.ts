@@ -18,12 +18,9 @@ import type { PromptKeybindings } from "./core/types.ts";
 import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction, KeybindingsConfig, AutoDenyConfig } from "./core/types.ts";
 import questionnaire from "./questionnaire.ts";
 import { renderCustomFooter } from "./footer.ts";
-import { loadSubagentsConfig, loadTrustExternalPaths, loadDefaultProfile, loadParadigm, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./core/global-config.ts";
+import { loadTrustExternalPaths, loadDefaultProfile, loadParadigm, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./core/global-config.ts";
 import { evaluatePermission } from "./core/permissions/ruleset.ts";
-import { runSubagent, isSubagentFailure, zeroUsage, accumulateUsage } from "./subagent.ts";
-import { SubagentJobManager, REPORT_CUSTOM_TYPE, WAKE_CUSTOM_TYPE, type JobStatus, type SubagentJob } from "./subagent-jobs.ts";
-import { capReportMessage } from "./core/report.ts";
-import { startPersistentSubagent } from "./subagent-runner.ts";
+import { announceSafetynetHost } from "./src/host.ts";
 import {
   getBaselineRules,
   PermissionStorage,
@@ -53,7 +50,7 @@ import {
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./core/check.ts";
 import { initBashParser } from "./core/bash-parser.ts";
-import { normalizePathForMatching, toRecursiveGlob, normalizeToolPath } from "./core/project.ts";
+import { normalizePathForMatching, toRecursiveGlob, normalizeToolPath } from "pi-submarine-core";
 import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, strikeDeny, type HazardousDenyState } from "./pipeline.ts";
 import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./core/auto-config-state.ts";
 import { InferredEngine } from "./core/inferred/engine.ts";
@@ -147,29 +144,6 @@ function sendDenial(text: string, mode: "hidden" | "visible"): void {
 }
 let storage: PermissionStorage;
 let inferredEngine: InferredEngine | undefined;
-/** Persistent subagent registry (initialized by the extension factory). */
-let jobManager: SubagentJobManager | undefined;
-/** Live UI context, captured on session_start for footer/tool updates. */
-let uiCtx: ExtensionContext | undefined;
-/** True while the parent is compacting; wakes are deferred. */
-let compactionActive = false;
-/** Safety watchdog: clears compactionActive if no terminal compaction event lands. */
-let compactionWatchdog: ReturnType<typeof setTimeout> | undefined;
-/** True while the parent is mid-turn; wakes/reports are deferred to the turn boundary. */
-let parentBusy = false;
-
-/** Refresh the "waiting on subagents" footer indicator. */
-function refreshJobsStatus(): void {
-  if (!uiCtx || !jobManager) return;
-  const jobs = jobManager.list().filter((j) => j.state !== "failed");
-  const running = jobs.filter((j) => j.state === "starting" || j.state === "running").length;
-  const idle = jobs.filter((j) => j.state === "idle").length;
-  try {
-    uiCtx.ui.setStatus("safetynet-jobs", jobs.length ? `⏳ ${running} running, ${idle} idle` : undefined);
-  } catch {
-    /* footer may be torn down */
-  }
-}
 
 /** Per-scope deny-strike counter for the main session (all ruleset/mode/
  *  headless/hazardous denials share it). Resets on agent_end. */
@@ -191,39 +165,6 @@ let currentModelProvider: string = "";
 let currentModelSupportsReasoning: boolean = false;
 /** Current thinking level, updated via thinking_level_select events. */
 let currentThinkingLevel: string = "off";
-
-/**
- * Tool calls whose subagent result should be reported to the model as an error.
- *
- * Keyed by toolCallId because that is the only identifier both the tool's
- * `execute` and the `tool_result` event share, and it is unique per call, so
- * concurrent subagents cannot collide. A side channel is required because
- * `AgentToolResult` has no `isError` field and throwing would discard the
- * result's content, details, and usage. Read and cleared by the tool_result
- * handler; also cleared on agent_end so an unfinished call cannot leak.
- */
-const subagentFailures = new Set<string>();
-
-/** Record a subagent call whose result should be reported as an error. */
-export function recordSubagentFailure(toolCallId: string): void {
-	subagentFailures.add(toolCallId);
-}
-
-/**
- * Consume a recorded failure for this tool call, returning the `isError` patch.
- * Returns undefined for calls never recorded as failures, so unrelated tools
- * (and successful subagents) are untouched. Consuming — rather than peeking —
- * keeps the set from growing and stops a verdict applying twice.
- */
-export function consumeSubagentFailure(toolCallId: string): { isError: true } | undefined {
-	if (!subagentFailures.delete(toolCallId)) return undefined;
-	return { isError: true };
-}
-
-/** Drop any unconsumed failures (their tool_result never fired). */
-export function clearSubagentFailures(): void {
-	subagentFailures.clear();
-}
 
 /** Update the inferred-proposals badge widget (P2, never takes focus). */
 function updateInferredBadge(ctx: ExtensionContext): void {
@@ -387,7 +328,7 @@ async function handleToolCall(
       });
     }
 
-    const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "planWrite", "planEdit", "planPresent", "subagent_run", "subagent_status", "subagent_send", "subagent_close", "subagent_bash_output", ...(loadSubagentsConfig())]);
+    const knownTools = new Set(["bash", "read", "edit", "write", "grep", "find", "ls", "planWrite", "planEdit", "planPresent", "subagent_run", "subagent_status", "subagent_send", "subagent_close", "subagent_bash_output"]);
     if (!knownTools.has(event.toolName)) {
       const rules = storage.getAllRules();
       return resolvePermission(ctx, {
@@ -472,91 +413,6 @@ function renderPresentResult(result: { content: { type: string; text?: string }[
     return new Text("", 0, 0);
   }
   return buildPlanComponent(theme, markdown);
-}
-
-/** Render subagent tool call title bar with model and thinking level info. */
-function renderSubagentCall(
-  label: string,
-  args: { prompt: string; model?: string },
-  theme: Theme,
-  context: any,
-) {
-  const text = (context.lastComponent as any) ?? new Text("", 0, 0);
-  let content = theme.fg("toolTitle", theme.bold(label));
-  const modelDisplay = args.model ?? currentModelDisplay;
-  if (modelDisplay) {
-    content += theme.fg("muted", ` — ${modelDisplay}`);
-  }
-  if (currentModelSupportsReasoning) {
-    content += theme.fg("muted", ` • ${currentThinkingLevel}`);
-  }
-  text.setText(content);
-  return text;
-}
-
-/** Render subagent tool results with live activity feed during execution. */
-function renderSubagentResult(
-  result: { content: { type: string; text?: string }[]; details: unknown },
-  options: { expanded: boolean; isPartial: boolean },
-  theme: Theme,
-  _context: any,
-): any {
-  const details = result.details as { activities?: string[] } | undefined;
-  const activities = details?.activities;
-  const isPartial = options.isPartial;
-
-  // During execution: show activity feed + text preview
-  if (isPartial && activities && activities.length > 0) {
-    const container = new Container();
-    const maxShow = 3;
-    const overflow = activities.length - maxShow;
-    const shown = overflow > 0 ? activities.slice(-maxShow) : activities;
-    if (overflow > 0) {
-      container.addChild(new Text(theme.fg("muted", `  … +${overflow} earlier`), 0, 0));
-    }
-    for (const act of shown) {
-      container.addChild(new Text(theme.fg("toolOutput", `  › ${act}`), 0, 0));
-    }
-    // If there's also text preview, show it below
-    const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text")?.text;
-    if (text?.trim()) {
-      container.addChild(new Text(theme.fg("toolOutput", `  ${text.split("\n").slice(-6).join("\n  ")}`), 0, 0));
-    }
-    return container;
-  }
-
-  // Final result
-  const expanded = options.expanded;
-  const text = result.content.find((c): c is { type: "text"; text: string } => c.type === "text")?.text;
-  if (!text) return new Text("(no output)", 0, 0);
-
-  if (!expanded) {
-    // Collapsed: truncated preview + hint
-    const lines = text.split("\n");
-    const preview = lines.slice(-5).join("\n");
-    let summary = "";
-    if (activities && activities.length > 0) {
-      const actSlice = activities.slice(-3);
-      for (const act of actSlice) {
-        summary += theme.fg("muted", `  › ${act}`) + "\n";
-      }
-    }
-    summary += theme.fg("toolOutput", preview);
-    summary += "\n" + theme.fg("muted", "(Ctrl+O to expand)");
-    return new Text(summary, 0, 0);
-  }
-
-  // Expanded: full output with activities and markdown
-  const container = new Container();
-  if (activities && activities.length > 0) {
-    for (const act of activities) {
-      container.addChild(new Text(theme.fg("muted", `  › ${act}`), 0, 0));
-    }
-    container.addChild(new Text("", 0, 0));
-  }
-  const mdTheme = getMarkdownTheme();
-  container.addChild(new Markdown(text, 0, 0, mdTheme));
-  return container;
 }
 
 function registerPlanTools(pi: ExtensionAPI) {
@@ -814,217 +670,6 @@ function registerCommands(pi: ExtensionAPI) {
   });
 }
 
-function registerSubagentTools(pi: ExtensionAPI, subagents: string[]) {
-	// A single dispatch tool; the child inherits the parent's ro/rw mode at spawn.
-	// Non-empty config keeps subagents enabled; `subagents: []` disables them.
-	if (subagents.length === 0) return;
-
-	function resolveModel(modelSpec: string | undefined, ctx: ExtensionContext) {
-		if (!modelSpec) return ctx.model;
-		const slashIdx = modelSpec.indexOf("/");
-		if (slashIdx < 1) return ctx.model;
-		const provider = modelSpec.slice(0, slashIdx);
-		const modelId = modelSpec.slice(slashIdx + 1);
-		return ctx.modelRegistry.find(provider, modelId) ?? ctx.model;
-	}
-
-	const fmtStatus = (s: JobStatus): string => {
-		const parts = [`${s.id} [${s.state}]`, `mode:${s.spawnMode}`];
-		if (s.usage.totalTokens) parts.push(`tokens:${s.usage.totalTokens}`);
-		if (s.state === "idle") parts.push(s.reported ? "reported" : "silent");
-		if (s.bash) parts.push(`bash:$ ${s.bash.command}`);
-		if (s.lastReport) parts.push(`last: ${s.lastReport.summary}`);
-		return parts.join(" ");
-	};
-
-	pi.registerTool({
-		name: "subagent_run",
-		label: "Subagent",
-		description: [
-			"Spawn a persistent background subagent that inherits your current read-only/read-write mode.",
-			"Returns a job id immediately; the subagent reports back via report_to_parent and wakes you when it goes idle.",
-			"Use subagent_send to message it, subagent_status to inspect it, subagent_bash_output to tail its current bash command, and subagent_close to end it.",
-		].join(" "),
-		promptSnippet: "Spawn a background subagent (async, two-way)",
-		promptGuidelines: [
-			"Use subagent_run for self-contained work you can delegate. It returns immediately; do not expect the answer in the tool result.",
-			"Keep the conversation going while it runs; you will be woken when it reports, finishes, or needs attention.",
-		],
-		parameters: Type.Object({
-			prompt: Type.String({ description: "Complete, self-sufficient task for the subagent" }),
-			model: Type.Optional(Type.String({ description: "Model (provider/model-id). Defaults to the current model." })),
-		}),
-		renderResult: renderSubagentResult,
-		renderCall: (args, theme, context) => renderSubagentCall("Subagent", args, theme, context),
-		...(typeof process !== "undefined" && { renderShell: "self" as const }),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (!jobManager) {
-				return { content: [{ type: "text", text: "Subagent manager unavailable." }], details: {} as Record<string, unknown> };
-			}
-			const manager = jobManager;
-			const spawnMode = getCurrentProfile();
-			let job: SubagentJob;
-			try {
-				job = manager.create({ prompt: params.prompt, cwd: ctx.cwd, spawnMode });
-			} catch (err) {
-				return {
-					content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
-					details: {} as Record<string, unknown> as Record<string, unknown>,
-				};
-			}
-			const taskType = isReadOnly(spawnMode) ? "explore" : "build";
-			startPersistentSubagent({
-				jobId: job.id,
-				taskType,
-				parentCtx: ctx,
-				parentStorage: storage,
-				cwd: ctx.cwd,
-				model: resolveModel(params.model, ctx),
-				thinkingLevel: pi.getThinkingLevel(),
-				trustExternalPaths: trustExternalActive(),
-				promptKeybindings,
-				autoDenyConfig,
-				paradigm: getParadigm(),
-				modeAliases: getModeAliases(),
-				reporting: {
-					send: (r) => manager.submitReport(job.id, r),
-					segment: job.segment,
-				},
-				isClosed: () => job.closed,
-				onControls: (controls) => {
-					manager.setControls(job.id, controls);
-					void controls.prompt(job.prompt);
-					refreshJobsStatus();
-				},
-				onBashOutput: (command, tail) => manager.recordBash(job.id, command, tail),
-				onUsage: (usage) => manager.addUsage(job.id, usage),
-				onIdle: () => {
-					manager.idle(job.id);
-					refreshJobsStatus();
-				},
-				onError: (error) => {
-					manager.fail(job.id, error);
-					refreshJobsStatus();
-				},
-			});
-			return {
-				content: [{ type: "text", text: `Started ${job.id}. You will be woken when it reports or goes idle.` }],
-				details: { jobId: job.id },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "subagent_status",
-		label: "Subagent Status",
-		description: "Inspect background subagents: state, mode, last report, and current bash tail. Pass ids, or omit for all live jobs.",
-		promptSnippet: "Inspect background subagents",
-		parameters: Type.Object({
-			ids: Type.Optional(Type.Array(Type.String(), { description: "Job ids; omit for all live jobs" })),
-		}),
-		executionMode: "sequential",
-		async execute(_toolCallId, params) {
-			if (!jobManager) return { content: [{ type: "text", text: "Subagent manager unavailable." }], details: {} as Record<string, unknown> };
-			const statuses = params.ids?.length
-				? params.ids.map((id) => jobManager!.status(id)).filter((s): s is JobStatus => s !== undefined)
-				: jobManager.allStatuses();
-			if (statuses.length === 0) return { content: [{ type: "text", text: "No matching subagents." }], details: { jobs: [] } };
-			// Pull undelivered reports so content is never lost to a missed push.
-			const pulled: string[] = [];
-			for (const s of statuses) {
-				for (const r of jobManager!.takeUndeliveredReports(s.id)) {
-					const head = `[${s.id}] ${r.summary}`;
-					pulled.push(r.body ? `${head}\n${r.body}` : head);
-				}
-			}
-			// Deliver each job's undelivered usage delta once, so spend is not lost
-			// when a job is never explicitly closed (the footer sums tool-result usage).
-			const usage = zeroUsage();
-			let hasUsage = false;
-			for (const s of statuses) {
-				const job = jobManager!.get(s.id);
-				const delta = job ? jobManager!.deliverUsage(job) : undefined;
-				if (delta) {
-					accumulateUsage(usage, delta);
-					hasUsage = true;
-				}
-			}
-			const text = statuses.map(fmtStatus).join("\n") + (pulled.length ? `\n\n---\n\n${pulled.join("\n\n---\n\n")}` : "");
-			return {
-				content: [{ type: "text", text }],
-				details: { jobs: statuses, ...(pulled.length ? { reports: pulled } : {}) },
-				...(hasUsage ? { usage } : {}),
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "subagent_send",
-		label: "Send to Subagent",
-		description: "Send a message to a running or idle background subagent. Delivered at its next safe point; you are woken on its next idle.",
-		promptSnippet: "Message a background subagent",
-		parameters: Type.Object({
-			id: Type.String({ description: "Job id" }),
-			message: Type.String({ description: "Message to deliver to the subagent" }),
-		}),
-		executionMode: "sequential",
-		async execute(_toolCallId, params) {
-			const job = jobManager?.get(params.id);
-			if (!job) return { content: [{ type: "text", text: `Unknown or closed subagent: ${params.id}` }], details: {} as Record<string, unknown> };
-			if (!job.controls) return { content: [{ type: "text", text: `${params.id} is still starting; try again shortly.` }], details: {} as Record<string, unknown> };
-			// A steer is new work the parent should hear about: reset the segment so
-			// the one-shot settle guard nudges the child to report it.
-			jobManager!.beginSegment(job.id);
-			void job.controls.prompt(capReportMessage(params.message));
-			refreshJobsStatus();
-			return { content: [{ type: "text", text: `Delivered to ${job.id}.` }], details: { jobId: job.id } };
-		},
-	});
-
-	pi.registerTool({
-		name: "subagent_close",
-		label: "Close Subagent",
-		description: "End a background subagent and release its session.",
-		promptSnippet: "End a background subagent",
-		parameters: Type.Object({ id: Type.String({ description: "Job id" }) }),
-		executionMode: "sequential",
-		async execute(_toolCallId, params) {
-			if (!jobManager) return { content: [{ type: "text", text: "Subagent manager unavailable." }], details: {} as Record<string, unknown> };
-			const usage = jobManager.close(params.id);
-			refreshJobsStatus();
-			return {
-				content: [{ type: "text", text: `Closed ${params.id}.` }],
-				details: { jobId: params.id },
-				...(usage ? { usage } : {}),
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "subagent_bash_output",
-		label: "Subagent Bash Output",
-		description: "Return the current/most-recent bash command and output tail for a background subagent.",
-		promptSnippet: "Tail a background subagent's bash output",
-		parameters: Type.Object({
-			id: Type.String({ description: "Job id" }),
-			tailN: Type.Optional(Type.Number({ description: "Lines of output to return (default 50, max 500)" })),
-		}),
-		executionMode: "sequential",
-		async execute(_toolCallId, params) {
-			const job = jobManager?.get(params.id);
-			if (!job) return { content: [{ type: "text", text: `Unknown or closed subagent: ${params.id}` }], details: {} as Record<string, unknown> };
-			const lines = params.tailN && params.tailN > 0 ? Math.min(params.tailN, 500) : 50;
-			const bash = job.bash;
-			if (!bash) return { content: [{ type: "text", text: `${params.id}: no bash call yet.` }], details: { jobId: params.id } };
-			const tail = bash.tail.split("\n").slice(-lines).join("\n");
-			return {
-				content: [{ type: "text", text: `$ ${bash.command}\n${tail || "(no output yet)"}` }],
-				details: { jobId: params.id, command: bash.command, tail },
-			};
-		},
-	});
-}
-
 function registerShortcuts(pi: ExtensionAPI) {
   pi.registerShortcut(loadToggleModeKey() as "ctrl+\\", {
     description: "Toggle between read-only and read-write mode",
@@ -1140,18 +785,7 @@ export default async function safetynetExtension(api: ExtensionAPI) {
   registerPlanTools(pi);
   // registerAnswerTool(pi); // temporarily disabled
   // questionnaire(pi); // disabled
-	jobManager = new SubagentJobManager({
-		sendToParent: (text, opts) => {
-			pi.sendMessage(
-				{ customType: opts.urgent ? WAKE_CUSTOM_TYPE : REPORT_CUSTOM_TYPE, content: text, display: false },
-				opts.urgent ? { triggerTurn: true, deliverAs: "followUp" } : {},
-			);
-		},
-		isCompacting: () => compactionActive,
-		isParentBusy: () => parentBusy,
-	});
-	const subagents = loadSubagentsConfig();
-	registerSubagentTools(pi, subagents);
+  announceSafetynetHost(pi, storage);
   registerCommands(pi);
   registerShortcuts(pi);
 
@@ -1190,15 +824,6 @@ export default async function safetynetExtension(api: ExtensionAPI) {
   });
 
   pi.on("session_start", async (event, ctx) => {
-    uiCtx = ctx;
-    jobManager?.resetForSession();
-    compactionActive = false;
-    parentBusy = false;
-    if (compactionWatchdog) {
-      clearTimeout(compactionWatchdog);
-      compactionWatchdog = undefined;
-    }
-    refreshJobsStatus();
     if (ctx.model) {
       currentModelDisplay = `${ctx.model.provider}/${ctx.model.id}`;
       currentModelId = ctx.model.id;
@@ -1288,65 +913,8 @@ export default async function safetynetExtension(api: ExtensionAPI) {
 
   pi.on("tool_call", handleToolCall);
 
-  // Report failed subagents as tool errors. pi has no isError on AgentToolResult — it
-  // only sets one when execute() throws, which would discard the partial output and
-  // usage — so the verdict is recorded by execute() and applied here. Scoped by
-  // toolCallId, so nothing else in the tool_result chain has to agree on a convention.
-  pi.on("tool_result", async (event) => consumeSubagentFailure(event.toolCallId));
-
-  // Parent→child mode discipline: children spawned under a different mode die
-  // when the user actually sends their next message under the new mode. Flipping
-  // modes while idle costs nothing.
-  pi.on("input", async (_event, ctx) => {
-    uiCtx = ctx;
-    jobManager?.killByMode(getCurrentProfile());
-    refreshJobsStatus();
-  });
-
-  // Defer subagent wakes while the parent compacts; drain when it finishes.
-  pi.on("session_before_compact", async () => {
-    compactionActive = true;
-    if (compactionWatchdog) clearTimeout(compactionWatchdog);
-    // Safety: if no terminal compaction event ever lands, stop deferring wakes.
-    compactionWatchdog = setTimeout(() => {
-      compactionWatchdog = undefined;
-      compactionActive = false;
-      jobManager?.drain();
-    }, 5 * 60_000);
-  });
-  const onCompactionDone = async () => {
-    if (compactionWatchdog) {
-      clearTimeout(compactionWatchdog);
-      compactionWatchdog = undefined;
-    }
-    compactionActive = false;
-    jobManager?.drain();
-  };
-  pi.on("session_compact", onCompactionDone);
-  pi.on("session_compact_failed", onCompactionDone);
-
-  pi.on("session_shutdown", async () => {
-    if (compactionWatchdog) {
-      clearTimeout(compactionWatchdog);
-      compactionWatchdog = undefined;
-    }
-    jobManager?.dispose();
-    compactionActive = false;
-    parentBusy = false;
-    uiCtx = undefined;
-  });
-
-  pi.on("agent_start", async () => {
-    parentBusy = true;
-  });
-
   pi.on("agent_end", async (_event, ctx) => {
-    // The turn is over: deliver anything held back, re-deriving liveness now so a
-    // job closed during the turn produces no wake at all.
-    parentBusy = false;
-    jobManager?.drain();
     storage.temp.clearTurnRules();
-    clearSubagentFailures();
     reviewBumpTurnToken();
     reviewResetDenies();
     hazardousDenyState.count = 0;

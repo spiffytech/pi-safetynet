@@ -4,6 +4,27 @@
 
 A permissions and safety extension for [Pi](https://pi.dev) that understands what your AI agent is trying to do.
 
+## Install & packages
+
+This repo is a small monorepo: two independently installable pi packages plus their shared runtime.
+
+```
+packages/pi-safetynet       permission engine, prompts, modes, auto-approve reviewer
+packages/pi-submarine       the subagent_* tools (persistent background subagents)
+packages/pi-submarine-core  shared session runtime + the SafetynetHost contract
+```
+
+- `pi install npm:<you>/pi-safetynet` — permissions only; no `subagent_*` tools are offered to the model.
+- `pi install npm:<you>/pi-submarine` — background subagents only, under a simple confirm policy.
+- Both installed: pi-submarine's children run under pi-safetynet's ruleset (shared approvals, bridged prompts) and follow the live mode.
+
+Each package entry is its own `pi config` row, so either half can be toggled off or removed independently.
+Developing from a checkout needs no install step: run `npm install` once for the workspace links, point
+your `extensions` setting at the checkout, and pi executes `packages/*/index.ts` straight from source.
+
+The cooperation surface is `SafetynetHost`, published on `pi.events`: live mode/config getters and the
+child permission-gate factory. It is exactly the contract a fully standalone subagent extension consumes.
+
 ## The problem
 
 In my experience, many harness permissions plugins treat shell commands as opaque strings — they see `"rm"` and flag it, or see `"sudo"` and flag it, but don't parse what's actually happening inside a pipeline, a redirect, or a `xargs` invocation. I've observed gaps like:
@@ -276,20 +297,14 @@ You can define rules that apply across all projects via the global config file a
 }
 ```
 
-#### `subagents`
+#### `subagents` (deprecated)
 
-An on/off switch for the background subagent tools: an empty array `[]` disables them, any non-empty array enables the whole set (`subagent_run`, `subagent_status`, `subagent_send`, `subagent_close`, `subagent_bash_output`). The array's contents are not a per-tool selector — `["subagent_run"]` is the documented value, but any non-empty value is treated the same.
+Superseded by packaging: the background subagent tools now live in their own pi package,
+**pi-submarine**. To turn them off, disable the pi-submarine entry in `pi config` (each package entry
+is its own row) or don't install it. `"subagents": []` in this config file is still honored for one
+release — tools suppressed, one deprecation notice at startup — and the key will be removed after.
 
-If the key is omitted or `null`, subagents are enabled (the default).
-
-Examples:
-
-```json
-{ "subagents": ["subagent_run"] }
-{ "subagents": [] }
-```
-
-##### Async two-way subagents
+##### Async two-way subagents (pi-submarine)
 
 `subagent_run` returns a job id immediately and keeps the subagent alive across turns. The parent keeps talking while it works and is woken when the child reports or goes idle. Companion tools: `subagent_send` (message the child), `subagent_status` (bounded state view — never the child's transcript; also returns any reports not yet delivered, so findings are recoverable if a push is missed), `subagent_bash_output` (tail the child's current/most-recent bash command), `subagent_close` (end it). Children may call `report_to_parent` to send findings upward; `urgent: true` wakes the parent immediately. Children are killed on the next user message sent under a different mode. Up to 8 live jobs; the footer shows how many are running/idle.
 

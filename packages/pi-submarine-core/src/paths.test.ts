@@ -10,7 +10,7 @@ import {
   fromDisplayPath,
   toRecursiveGlob,
   expandHome,
-} from "./project.ts";
+} from "./paths.ts";
 
 describe("isExternalPath", () => {
   it("flags /etc/passwd as external to /project", () => {
