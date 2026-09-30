@@ -1,7 +1,8 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { resolvePermission, denialDetail, denialGuidance, denialMessage, targetTouchesHazardousPath, buildApprovalRules } from "./pipeline.ts";
-import { checkFileTarget } from "./core/check.ts";
+import { checkFileTarget, checkBashPermission } from "./core/check.ts";
+import { getBaselineRules } from "./core/permissions/index.ts";
 import { setAutoEnabled } from "./core/auto-config-state.ts";
 import { resetReviewStateForTests } from "./core/reviewer-state.ts";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
@@ -766,6 +767,46 @@ describe("resolvePermission — auto allow satisfies recheck for file write", ()
     assert.equal(result, undefined, "allow must proceed (no block)");
     const rules = storage.temp.getRules();
     assert.equal(rules.length, 1, "temp rule created from reviewer allow");
+  });
+});
+
+// ─── Regression: auto-approval of variable-operand bash commands ────────────
+//
+// Reported: `for d in ...; do basename $d; cat $d/device/model; cat $d/size`
+// — the reviewer allowed it and the temp rules were minted, but the
+// post-approval recheck still returned "ask": the unresolved-operand
+// escalation in checkBashPermission ignored the freshly-minted exact-shape
+// rules. Auto then demoted to a "reviewer allowed but the approval rules
+// failed recheck" prompt, and interactive Session approvals looped with
+// "Rules were added but still insufficient" (approve-for-session never
+// sticking).
+
+describe("resolvePermission — auto allow satisfies recheck for variable operands", () => {
+  it("reviewer allow + minted rules satisfy the real recheck (no fallback prompt)", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const storage = makeStorage();
+    const cwd = "/tmp/regression-var-operands";
+    const cmd = "for d in /some/path; do basename $d; cat $d/device/model; cat $d/size; done";
+    const opts = {
+      permission: "bash" as const,
+      target: cmd,
+      check: checkBashPermission(cmd, "build", getBaselineRules(), cwd),
+      recheck: () => checkBashPermission(cmd, "build", [...getBaselineRules(), ...storage.getAllRules()], cwd),
+    };
+    assert.equal(opts.check.action, "ask", "fixture: the command must start unapproved");
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        storage,
+        cwd,
+        reviewSpawn: makeReviewSpawn([allowAssessment()]),
+        sendAutoApproval: () => {},
+      }),
+      opts,
+    );
+    assert.equal(result, undefined, "allow must proceed (no block)");
+    assert.equal(storage.temp.getRules().length, 3, "one temp rule per unapproved subcommand");
   });
 });
 

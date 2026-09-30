@@ -706,6 +706,60 @@ describe("checkBashPermission force-ask on unresolvable dangerous operands", () 
   });
 });
 
+describe("checkBashPermission — explicit approvals override the operand escalations", () => {
+  // Reported repro: a loop body whose operands are loop-variable references.
+  // `basename`/`cat` are file verbs and `$d` is statically unresolvable, so
+  // every subcommand escalates — and must KEEP escalating under broad
+  // baseline rules — but a rule approving the exact subcommand shape is the
+  // user's/reviewer's deliberate verdict and must satisfy the post-approval
+  // recheck, or approval could never stick ("approve-for-session" loops).
+  const LOOP_CMD = "for d in /some/path; do basename $d; cat $d/device/model; cat $d/size; done";
+  // Canonical (placeholder) shapes the auto path mints as temp rules…
+  const SUBS = ["basename ${...}", "cat ${...}/device/model", "cat ${...}/size"];
+  // …and the display shapes the interactive session path stores.
+  const DISPLAY_SUBS = ["basename $d", "cat $d/device/model", "cat $d/size"];
+
+  const approvalRule = (p: string): Ruleset[number] => ({ permission: "bash", pattern: p, action: "allow", modes: ["build"] });
+
+  it("still escalates with only the baseline ruleset", () => {
+    assert.equal(checkBashPermission(LOOP_CMD, "build", getBaselineRules(), CWD).action, "ask");
+  });
+
+  it("recheck allow with canonical approval rules (the auto path's temp rules)", () => {
+    const rules: Ruleset = [...getBaselineRules(), ...SUBS.map(approvalRule)];
+    assert.equal(checkBashPermission(LOOP_CMD, "build", rules, CWD).action, "allow");
+  });
+
+  it("recheck allow with display approval rules (the interactive session path)", () => {
+    const rules: Ruleset = [...getBaselineRules(), ...DISPLAY_SUBS.map(approvalRule)];
+    assert.equal(checkBashPermission(LOOP_CMD, "build", rules, CWD).action, "allow");
+  });
+
+  it("a baseline catch-all does not unwrap an unresolvable operand", () => {
+    assert.equal(checkBashPermission("cat $PI_SAFETYNET_NOPE/notes.md", "build", getBaselineRules(), CWD).action, "ask");
+  });
+
+  it("an explicit non-baseline glob rule overrides (same as the external-path rule)", () => {
+    const rules: Ruleset = [...getBaselineRules(), approvalRule("cat *")];
+    assert.equal(checkBashPermission("cat $PI_SAFETYNET_NOPE/notes.md", "build", rules, CWD).action, "allow");
+  });
+
+  it("a deny rule still wins for an unresolvable operand", () => {
+    const rules: Ruleset = [
+      ...getBaselineRules(),
+      { permission: "bash", pattern: "cat *", action: "deny", modes: ["build"], reason: "not allowed" },
+    ];
+    assert.equal(checkBashPermission("cat $PI_SAFETYNET_NOPE/notes.md", "build", rules, CWD).action, "deny");
+  });
+
+  it("dangerous verbs: exact-shape approval sticks, a broad rule keeps forcing the prompt", () => {
+    const exact: Ruleset = [...getBaselineRules(), approvalRule('rm -rf "..."'), approvalRule('rm -rf "$DIR"')];
+    assert.equal(checkBashPermission('rm -rf "$DIR"', "build", exact, CWD).action, "allow");
+    const broad: Ruleset = [{ permission: "bash", pattern: "rm *", action: "allow", modes: ["build", "plan", "ro", "rw"] }];
+    assert.equal(checkBashPermission('rm -rf "$DIR"', "build", broad, CWD).action, "ask");
+  });
+});
+
 describe("normalizeToolPath — the prefix the file-tool resolver strips", () => {
   it("strips a single leading @ the file tools honor before opening", () => {
     assert.equal(normalizeToolPath("@.env"), ".env");

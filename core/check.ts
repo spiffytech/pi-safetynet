@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { ProfileName, PermissionAction, Ruleset, ModeAliases } from "./types.ts";
+import type { ProfileName, PermissionAction, Rule, Ruleset, ModeAliases } from "./types.ts";
 import { evaluatePermission } from "./permissions/ruleset.ts";
 import { getBaselineRules } from "./permissions/index.ts";
 import { parseCommand, subcommandTokenLists, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
@@ -108,6 +108,25 @@ export function checkFileTarget(
   }
 
   return { action: result.action };
+}
+
+/** True when a rule's pattern is exact-shape — it names the one subcommand
+ *  shape that was approved, not a family of commands (no `*`/`?` globs). */
+function isExactShapeRule(rule: Rule): boolean {
+  return !/[*?]/.test(rule.pattern);
+}
+
+/** True when an allow verdict came from a rule the user (or the reviewer's
+ *  minted approval rules) explicitly approved rather than a baseline
+ *  catch-all. Explicit rules override the operand escalations below — one
+ *  those escalations, an approval could never stick and every recheck would
+ *  re-ask forever. Shared by the unresolved-operand and external-path
+ *  downgrades. */
+function isExplicitRule(matchedRule: Rule | undefined): boolean {
+  return (
+    matchedRule !== undefined &&
+    (isExactShapeRule(matchedRule) || !getBaselineRules().includes(matchedRule))
+  );
 }
 
 /** Check whether a subcommand consists entirely of variable assignments
@@ -370,6 +389,10 @@ export function checkBashPermission(
 
   const unapproved: string[] = [];
   const unapprovedDisplay: string[] = [];
+  // Subcommands allowed by an exact-shape rule. The dangerous-verb gate at the
+  // bottom still escalates these when ONLY a broad rule matched, but must
+  // yield to an exact-shape approval or approval could never stick.
+  const exactShapeAllowed = new Set<string>();
   const redirectTargets: Array<{ permission: "read" | "edit"; path: string }> = [];
   const denyReasons: string[] = [];
   let worstAction: PermissionAction = "allow";
@@ -438,23 +461,34 @@ export function checkBashPermission(
         unapproved.push(sub);
         unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
       }
-    } else if (verb && unresolvedOperand) {
+    } else if (
+      verb &&
+      unresolvedOperand &&
+      // A deny verdict always wins (fall through to the deny branch below),
+      // and an explicit approval of this exact subcommand shape overrides the
+      // escalation — or approval could never stick and every recheck would
+      // re-ask forever. Baseline catch-alls (e.g. `cat *`) still escalate:
+      // they must not silently authorize an unpinnable operand that could
+      // name a secured file.
+      result.action !== "deny" &&
+      !(result.action === "allow" && isExplicitRule(result.matchedRule))
+    ) {
       if (worstAction !== "deny") worstAction = "ask";
       if (!unapproved.includes(sub)) {
         unapproved.push(sub);
         unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
       }
     } else if (result.action === "allow") {
+      if (result.matchedRule !== undefined && isExactShapeRule(result.matchedRule)) {
+        exactShapeAllowed.add(sub);
+      }
       // Parity with the file tools: an allowlisted verb that names a path
       // outside the project root must be approved, not run silently. But only
       // baseline catch-all rules are downgraded (mirrors checkFileTarget) — a
       // rule the user explicitly approved must override, or approval could
       // never stick and every recheck would re-ask forever.
-      const explicitRule =
-        result.matchedRule !== undefined &&
-        (!/[*?]/.test(result.matchedRule.pattern) || !getBaselineRules().includes(result.matchedRule));
       const externalOperand = !trustExternalPaths && candidates.some((tok) => isExternalPathOperand(tok, absCwd));
-      if (!explicitRule && externalOperand) {
+      if (!isExplicitRule(result.matchedRule) && externalOperand) {
         if (worstAction !== "deny") worstAction = "ask";
         if (!unapproved.includes(sub)) {
           unapproved.push(sub);
@@ -507,11 +541,13 @@ export function checkBashPermission(
 
   // A dangerous verb with an operand that cannot be resolved statically
   // (e.g. `rm -rf "$DIR"`) must not be silently allowed by a broad rule —
-  // force approval instead.
+  // force approval instead. An exact-shape approval of the very subcommand
+  // being run overrides this (same rationale as above); broad rules never do.
   if (parsed.forceAsk && worstAction === "allow") {
-    worstAction = "ask";
     for (let i = 0; i < parsed.subcommands.length; i++) {
       const sub = parsed.subcommands[i]!;
+      if (exactShapeAllowed.has(sub)) continue;
+      worstAction = "ask";
       if (!unapproved.includes(sub)) {
         unapproved.push(sub);
         unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);

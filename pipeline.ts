@@ -466,7 +466,7 @@ export async function resolvePermission(
           return undefined;
         }
         // Recheck didn't agree — treat as transient
-        v = { kind: "transient" as const, message: "approval rules did not satisfy recheck" };
+        v = { kind: "transient" as const, message: "reviewer allowed but the approval rules failed recheck" };
       }
 
       if (v.kind === "assessment" && v.assessment.outcome === "deny") {
@@ -504,7 +504,7 @@ export async function resolvePermission(
       // stale) model verdict must never dismiss that prompt. Auto-approval
       // requires a verdict from THIS action's own review, handled above.
       if (v.kind === "transient") {
-        deps = { ...deps, promptReason: ` Auto-review unavailable (${v.message}); decide manually.` };
+        deps = { ...deps, promptReason: ` Auto-review: ${v.message}; decide manually.` };
       }
     } catch {
       reviewSetActive(false);
