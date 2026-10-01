@@ -154,14 +154,40 @@ function isAuthFailure(message: string): boolean {
   return /\b401\b|unauthori[sz]ed|authentication failed|not authenticated|invalid.?api.?key|incorrect.?api.?key/i.test(message);
 }
 
+/** Whether a provider error is a billing/credit refusal (HTTP 402). Unlike an
+ *  auth rejection this is an *account-level* condition: every model on that
+ *  provider will fail the same way, so the chain should advance to the next
+ *  provider — and skip the rest of this one. */
+function isBillingFailure(message: string): boolean {
+  return /\b402\b|billing[_ ]error|out of credits|insufficient (?:credits|funds|balance|quota)|quota exceeded|payment required/i.test(message);
+}
+
+/** The provider a spec belongs to, for same-provider billing skips. Prefers the
+ *  registry-resolved provider (covers bare ids), else a `provider/model`
+ *  prefix. Undefined when neither can determine it — then no skip is applied. */
+function specProvider(
+  ctx: ReviewCallOpts["parentCtx"],
+  spec: string,
+): string | undefined {
+  const resolved = resolveModelSpec(ctx, spec);
+  if (resolved?.provider) return resolved.provider;
+  const slash = spec.indexOf("/");
+  return slash > 0 ? spec.slice(0, slash) : undefined;
+}
+
 /** Run a permission review and classify the result.
  *
  *  When `opts.model` is a list, each spec is tried in order — but only for
  *  failures that mean the model cannot produce a verdict (unknown provider,
- *  missing model, rejected credential, unusable output). A retryable transport
- *  failure (connection error, timeout, abort) stops the chain: pi already
- *  retried that model inside the subagent, and the next model would ride the
- *  same network, so spending a fallback on it would just hide the blip. */
+ *  missing model, rejected credential, billing refusal, unusable output). A
+ *  retryable transport failure (connection error, timeout, abort) stops the
+ *  chain: pi already retried that model inside the subagent, and the next model
+ *  would ride the same network, so spending a fallback on it would just hide
+ *  the blip.
+ *
+ *  Billing failures (402) are account-level: once one model on a provider is
+ *  out of credits, the remaining specs on that provider are skipped rather than
+ *  spent re-hitting the same wall. Specs on other providers still run. */
 export async function runPermissionReview(
   opts: ReviewCallOpts,
   deps: ReviewDeps,
@@ -170,6 +196,9 @@ export async function runPermissionReview(
   // No model configured → single attempt on the parent model (historical default).
   if (specs.length === 0) return runPermissionReviewWithModel(opts, deps, "");
   const failures: { spec: string; message: string }[] = [];
+  // Providers already known to be out of credits this review — later specs on
+  // them are skipped so the chain doesn't waste a hop on the same 402.
+  const billingDeadProviders = new Set<string>();
   for (let i = 0; i < specs.length; i++) {
     // The caller aborts this signal at its review deadline. Stop before
     // spawning another model: a cancelled review must not start new work, and
@@ -178,6 +207,15 @@ export async function runPermissionReview(
       return { kind: "transient", message: "Reviewer was aborted" };
     }
     const spec = specs[i]!;
+    const provider = specProvider(opts.parentCtx, spec);
+    if (provider && billingDeadProviders.has(provider)) {
+      failures.push({
+        spec,
+        message: `skipped — provider "${provider}" is out of credits`,
+      });
+      debugLog(`safetynet: reviewer model "${spec}" skipped — provider "${provider}" already returned a billing error.`);
+      continue;
+    }
     const verdict = await runPermissionReviewWithModel(opts, deps, spec);
     if (verdict.kind === "assessment") {
       // A fallback happened → surface the whole chain once, so a silent hop to
@@ -195,6 +233,10 @@ export async function runPermissionReview(
     }
     // fatal → this model cannot produce a verdict. Try the next configured one.
     failures.push({ spec, message: verdict.message });
+    // Billing refusals condemn the whole provider, not just this model.
+    if (provider && isBillingFailure(verdict.message)) {
+      billingDeadProviders.add(provider);
+    }
     if (i < specs.length - 1) {
       debugLog(`safetynet: reviewer model "${spec}" unavailable (${verdict.message}); falling back to next model.`);
     }
@@ -308,7 +350,8 @@ async function runPermissionReviewWithModel(
       errMsg.includes("create") ||
       errMsg.includes("not found") ||
       errMsg.includes("Unknown provider") ||
-      isAuthFailure(errMsg)
+      isAuthFailure(errMsg) ||
+      isBillingFailure(errMsg)
     ) {
       return { kind: "fatal", message: errMsg };
     }

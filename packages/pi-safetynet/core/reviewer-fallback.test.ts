@@ -117,7 +117,7 @@ describe("runPermissionReview — fallback diagnostics", () => {
   });
 });
 
-describe("runPermissionReview — transient failures do not consume fallbacks", () => {
+describe("runPermissionReview — transient failures and billing refusals", () => {
   it("stops at the first transport blip instead of trying the next model", async () => {
     const seen: Array<[string, string]> = [];
     let calls = 0;
@@ -164,6 +164,56 @@ describe("runPermissionReview — transient failures do not consume fallbacks", 
       spawn: async () => ({ content: [], details: { error: "Unknown provider: nope" } }),
     });
     assert.equal(v.kind, "fatal", "an all-unavailable chain must disable auto-approve, not look transient");
+  });
+
+  it("advances past a 402 billing refusal to a model on another provider", async () => {
+    const seen: Array<[string, string]> = [];
+    let calls = 0;
+    const v = await runPermissionReview(opts(["hyper/one", "neuralwatt/two"]), {
+      spawn: async () => {
+        calls++;
+        return calls === 1
+          ? {
+              content: [],
+              details: {
+                error:
+                  '402: {"message":"You\'re out of credits.","type":"billing_error"}',
+              },
+            }
+          : ALLOW("neuralwatt/two");
+      },
+      onDiagnostic: (m, l) => seen.push([m, l]),
+    });
+    assert.equal(v.kind, "assessment", "a billing refusal must not stop the chain like a transport blip");
+    assert.equal(calls, 2);
+    assert.match(seen[0]![0], /→ neuralwatt\/two$/);
+  });
+
+  it("skips later models on a provider that returned a billing error", async () => {
+    const spawned: string[] = [];
+    const v = await runPermissionReview(opts(["hyper/one", "hyper/two", "neuralwatt/three"]), {
+      spawn: async () => {
+        spawned.push("spawn");
+        // First spawn bills dead; the skipped spec never spawns; the third wins.
+        return spawned.length === 1
+          ? { content: [], details: { error: "402 billing_error: out of credits" } }
+          : ALLOW("neuralwatt/three");
+      },
+    });
+    assert.equal(v.kind, "assessment");
+    assert.equal(spawned.length, 2, "the second hyper model must be skipped, not spawned");
+  });
+
+  it("reports fatal when every model is on an out-of-credits provider", async () => {
+    let calls = 0;
+    const v = await runPermissionReview(opts(["hyper/one", "hyper/two"]), {
+      spawn: async () => {
+        calls++;
+        return { content: [], details: { error: "402 billing_error: out of credits" } };
+      },
+    });
+    assert.equal(v.kind, "fatal");
+    assert.equal(calls, 1, "the second hyper model is skipped, so only one spawn happens");
   });
 
   it("stops before spawning the next model once the review signal is aborted", async () => {
