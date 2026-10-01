@@ -201,6 +201,13 @@ describe("profiles", () => {
       assert.equal(getModeSystemPrompt("build"), READ_WRITE_SYSTEM_PROMPT_BLOCK);
       assert.equal(getModeSystemPrompt("rw"), READ_WRITE_SYSTEM_PROMPT_BLOCK);
     });
+
+    it("appends the scratch-space block with the sandbox path when provided", () => {
+      const withSandbox = getModeSystemPrompt("ro", "/tmp/pi-safetynet/abc");
+      assert.ok(withSandbox.startsWith(READ_ONLY_SYSTEM_PROMPT_BLOCK));
+      assert.ok(withSandbox.includes("## Scratch space"));
+      assert.ok(withSandbox.includes("/tmp/pi-safetynet/abc/"));
+    });
   });
 
   describe("getModeSwitchMessage", () => {

@@ -1,9 +1,10 @@
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { checkBashPermission, checkFileTarget, checkToolPermission, actionWrites, patternHasBashGlob } from "./check.ts";
 import { normalizeToolPath } from "pi-submarine-core";
 import { parseCommand } from "./bash-parser.ts";
 import { getBaselineRules } from "./permissions/index.ts";
+import { setSandboxDir } from "./sandbox.ts";
 import type { Ruleset } from "./types.ts";
 
 const RULES = getBaselineRules();
@@ -1015,5 +1016,80 @@ describe("patternHasBashGlob", () => {
   it("leaves literal commands alone", () => {
     assert.equal(patternHasBashGlob("npm test"), false);
     assert.equal(patternHasBashGlob("git commit -m 'x'"), false);
+  });
+});
+
+describe("session sandbox", () => {
+  const SANDBOX = "/tmp/pi-safetynet/test-session";
+  const RO_ALIASES = { ro: "plan" } as Record<string, "plan">;
+  const RW_ALIASES = { rw: "build" } as Record<string, "build">;
+
+  beforeEach(() => setSandboxDir(SANDBOX));
+  afterEach(() => setSandboxDir(undefined));
+
+  it("allows a redirect into the sandbox in ro mode, without an edit redirect target", () => {
+    const result = checkBashPermission(`echo hello > ${SANDBOX}/out.txt`, "ro", RULES, CWD, false, RO_ALIASES);
+    assert.equal(result.action, "allow");
+    assert.deepEqual(result.redirectTargets ?? [], []);
+    assert.equal(actionWrites("bash", result), false);
+  });
+
+  it("allows a redirect into the sandbox in rw mode without asking", () => {
+    const result = checkBashPermission(`grep pat file.txt > ${SANDBOX}/out.txt`, "rw", RULES, CWD, false, RW_ALIASES);
+    assert.equal(result.action, "allow");
+  });
+
+  it("still denies a redirect outside the sandbox in ro mode", () => {
+    const result = checkBashPermission("echo hello > /tmp/other/out.txt", "ro", RULES, CWD, false, RO_ALIASES);
+    assert.equal(result.action, "deny");
+    assert.ok(result.reason?.includes("Read-only mode"));
+  });
+
+  it("still denies a hazardous target inside the sandbox", () => {
+    const result = checkBashPermission(`echo secret > ${SANDBOX}/.env`, "ro", RULES, CWD, false, RO_ALIASES);
+    assert.equal(result.action, "deny");
+    assert.equal(result.hazardous, true);
+  });
+
+  it("still denies reading a hazardous source", () => {
+    const result = checkBashPermission(`cat .env > ${SANDBOX}/out.txt`, "ro", RULES, CWD, false, RO_ALIASES);
+    assert.equal(result.action, "deny");
+    assert.equal(result.hazardous, true);
+  });
+
+  it("allows reads from the sandbox", () => {
+    const result = checkBashPermission(`cat ${SANDBOX}/out.txt`, "ro", RULES, CWD, false, RO_ALIASES);
+    assert.equal(result.action, "allow");
+  });
+
+  it("allows the edit permission inside the sandbox in ro mode", () => {
+    const result = checkFileTarget(`${SANDBOX}/x.ts`, "edit", "ro", RULES, CWD, false, RO_ALIASES);
+    assert.equal(result.action, "allow");
+  });
+
+  it("still denies hazardous names inside the sandbox at the file level", () => {
+    const result = checkFileTarget(`${SANDBOX}/.env`, "edit", "ro", RULES, CWD, false, RO_ALIASES);
+    assert.equal(result.action, "deny");
+    assert.equal(result.hazardous, true);
+  });
+
+  it("does not allow a prefix-sibling directory", () => {
+    const result = checkBashPermission(`echo hi > ${SANDBOX}-evil/out.txt`, "rw", RULES, CWD, false, RW_ALIASES);
+    assert.notEqual(result.action, "allow");
+  });
+
+  it("auto-approves cd into the sandbox", () => {
+    const result = checkBashPermission(`cd ${SANDBOX} && ls`, "ro", RULES, CWD, false, RO_ALIASES);
+    assert.equal(result.action, "allow");
+  });
+
+  it("auto-allows sandbox-local mkdir and rm", () => {
+    assert.equal(checkBashPermission(`mkdir -p ${SANDBOX}/a/b`, "rw", RULES, CWD).action, "allow");
+    assert.equal(checkBashPermission(`rm -rf ${SANDBOX}/a`, "rw", RULES, CWD).action, "allow");
+  });
+
+  it("does not auto-allow a sandbox-local verb with an outside operand", () => {
+    const result = checkBashPermission(`cp file.txt ${SANDBOX}/out.txt`, "rw", RULES, CWD);
+    assert.equal(result.action, "ask");
   });
 });

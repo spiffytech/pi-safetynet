@@ -5,6 +5,8 @@ import { getBaselineRules } from "./permissions/index.ts";
 import { parseCommand, subcommandTokenLists, isHazardousFile, isEditLikeBashCommand } from "./bash-parser.ts";
 import { normalizePathForMatching, expandHome, isExternalPath } from "pi-submarine-core";
 import { newVarMap, resolveDisplayWord, recordAssignment } from "./expansion.ts";
+import type { VarMap } from "./expansion.ts";
+import { isWithinSandbox } from "./sandbox.ts";
 import { patternMatches } from "./inferred/shapes.ts";
 import type { InferredBashRule } from "./inferred/store.ts";
 /** Device files that are always safe to use as redirect targets. */
@@ -78,6 +80,14 @@ export function checkFileTarget(
   }
 
   const absCwd = cwd ?? process.cwd();
+
+  // The session sandbox is a trusted scratch subtree: reads and writes there
+  // are allowed in every mode. Placed after the hazardous check so sensitive
+  // names stay blocked everywhere.
+  if (isWithinSandbox(filePath, absCwd)) {
+    return { action: "allow" };
+  }
+
   const normalized = normalizePathForMatching(filePath, absCwd);
 
   const result = evaluatePermission(permission, normalized, profile, rules, undefined, modeAliases);
@@ -169,9 +179,9 @@ function isCdWithinProject(subcommand: string, cwd: string, trustExternalPaths =
   // Resolve relative paths against cwd.
   const resolved = target.startsWith("/") ? target : resolve(cwd, target);
 
-  // Target must be within or equal to cwd. When external paths are
-  // trusted, auto-approve cd to any directory.
-  return trustExternalPaths || resolved.startsWith(cwd + "/") || resolved === cwd;
+  // Target must be within or equal to cwd, or inside the session sandbox.
+  // When external paths are trusted, auto-approve cd to any directory.
+  return trustExternalPaths || resolved.startsWith(cwd + "/") || resolved === cwd || isWithinSandbox(resolved, cwd);
 }
 
 /** Does an inferred rule apply to this profile? Mirrors the alias-aware
@@ -337,6 +347,37 @@ function globHazard(pattern: string, dotglob = false): "hazard" | "broad" | null
 }
 
 /**
+ * Verbs whose only effect is on their path operands. When every operand of
+ * such a command resolves inside the session sandbox, it touches scratch space
+ * only and can run without approval. An explicit `deny` rule still wins.
+ */
+const SANDBOX_LOCAL_VERBS = new Set([
+  "mkdir", "touch", "rm", "rmdir", "cp", "mv", "ln",
+]);
+
+/** True when a write-capable subcommand's path operands all resolve inside the
+ *  session sandbox. Unresolvable operands fail closed. */
+function isSandboxLocalCommand(
+  tokens: string[],
+  dwords: string[],
+  vars: VarMap,
+  cwd: string,
+): boolean {
+  const verb = tokens[0];
+  if (!verb || !SANDBOX_LOCAL_VERBS.has(verb)) return false;
+  const operands: string[] = [];
+  for (let j = 1; j < dwords.length; j++) {
+    const w = dwords[j]!;
+    if (w.startsWith("-")) continue;
+    const resolved = resolveDisplayWord(w, vars, cwd);
+    if (resolved === undefined) return false;
+    operands.push(resolved);
+  }
+  if (operands.length === 0) return false;
+  return operands.every((o) => isWithinSandbox(o, cwd));
+}
+
+/**
  * Whether a bash token names a path outside `cwd`. Loose on purpose: it treats
  * any non-flag token containing a slash as a path and lets `isExternalPath`
  * resolve it, so interior `..` segments are normalized before comparison.
@@ -374,11 +415,13 @@ export function checkBashPermission(
     return { action: "deny", reason: "Catastrophic command", unapproved: [] };
   }
 
+  const absCwd = cwd ?? process.cwd();
+
   // In read-only modes, deny bash commands that are functionally equivalent
   // to the edit/write tools (which are disabled in read-only modes).
   // This prevents circumvention via heredoc+redirect, sed -i, tee,
   // interpreter -c/-e, etc.
-  if ((profile === "plan" || profile === "ro") && isEditLikeBashCommand(command, parsed)) {
+  if ((profile === "plan" || profile === "ro") && isEditLikeBashCommand(command, parsed, absCwd)) {
     const label = profile === "ro" ? "Read-only mode" : "Plan mode";
     return {
       action: "deny",
@@ -398,7 +441,6 @@ export function checkBashPermission(
   let worstAction: PermissionAction = "allow";
   let hazardous = false;
 
-  const absCwd = cwd ?? process.cwd();
   // Variable state for `$F`-shaped operands: bare assignments update it in
   // order, everything else is resolver from the ambient environment.
   const vars = newVarMap(absCwd);
@@ -461,6 +503,8 @@ export function checkBashPermission(
         unapproved.push(sub);
         unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
       }
+    } else if (result.action !== "deny" && isSandboxLocalCommand(tokens, dwords, vars, absCwd)) {
+      // Sandbox-local write (mkdir/cp/mv/rm/…): touches scratch space only.
     } else if (
       verb &&
       unresolvedOperand &&
@@ -486,8 +530,11 @@ export function checkBashPermission(
       // outside the project root must be approved, not run silently. But only
       // baseline catch-all rules are downgraded (mirrors checkFileTarget) — a
       // rule the user explicitly approved must override, or approval could
-      // never stick and every recheck would re-ask forever.
-      const externalOperand = !trustExternalPaths && candidates.some((tok) => isExternalPathOperand(tok, absCwd));
+      // never stick and every recheck would re-ask forever. Sandbox paths are
+      // trusted and never count as external.
+      const externalOperand =
+        !trustExternalPaths &&
+        candidates.some((tok) => isExternalPathOperand(tok, absCwd) && !isWithinSandbox(tok, absCwd));
       if (!isExplicitRule(result.matchedRule) && externalOperand) {
         if (worstAction !== "deny") worstAction = "ask";
         if (!unapproved.includes(sub)) {

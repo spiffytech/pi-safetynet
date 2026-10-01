@@ -2,6 +2,7 @@ import { Parser, Language } from "web-tree-sitter";
 import type { Node } from "web-tree-sitter";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { isWithinSandbox } from "./sandbox.ts";
 
 /** Threshold (chars) beyond which a quoted string is considered "opaque"
  *  and collapsed to a placeholder.  Strings at or below this length that
@@ -963,10 +964,12 @@ export function isHazardousFile(filePath: string): boolean {
 export function isEditLikeBashCommand(
   command: string,
   parsed: ParsedCommand,
+  cwd: string = process.cwd(),
 ): boolean {
   // 1. Any output redirect detected by the parser
-  //    (excluding redirects to safe device files like /dev/null)
-  if (parsed.redirects.some((r) => r.direction === "output" && !SAFE_DEVICE_FILES.has(r.path))) return true;
+  //    (excluding redirects to safe device files like /dev/null, and to the
+  //    session sandbox — scratch writes are permitted in every mode)
+  if (parsed.redirects.some((r) => r.direction === "output" && !SAFE_DEVICE_FILES.has(r.path) && !isWithinSandbox(r.path, cwd))) return true;
 
   // 2. Heredoc / here-string content is collapsed to a `<< '...'` subcommand
   //    suffix by parseCommand(); no separate scan needed here.

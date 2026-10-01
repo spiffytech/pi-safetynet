@@ -143,9 +143,18 @@ Do not spawn a subagent to implement changes while in read-only mode — propose
 
 Subagents get clean sessions. Provide complete, self-sufficient prompts — the subagent has no access to your conversation history.`;
 
+/** Scratch-space stanza appended to the mode prompt when a session sandbox
+ *  exists. The path is stable for the session, so this section does not churn
+ *  the cached prompt prefix on stable turns. */
+export function getScratchSpaceBlock(sandboxDir: string): string {
+	return `## Scratch space
+Write throwaway files under \`${sandboxDir}/\` — both read-only and read-write modes allow reads and writes there, so redirects, scratch fixtures, and files handed to sandboxed tools don't need approval. In read-only mode this is the one permitted write target; everything else stays read-only. Sensitive names (e.g. \`.env\`, \`id_rsa\`) are still blocked everywhere.`;
+}
+
 /** Pick the system-prompt stanza for the active mode. */
-export function getModeSystemPrompt(profile: ProfileName): string {
-	return isReadOnly(profile) ? READ_ONLY_SYSTEM_PROMPT_BLOCK : READ_WRITE_SYSTEM_PROMPT_BLOCK;
+export function getModeSystemPrompt(profile: ProfileName, sandboxDir?: string): string {
+	const base = isReadOnly(profile) ? READ_ONLY_SYSTEM_PROMPT_BLOCK : READ_WRITE_SYSTEM_PROMPT_BLOCK;
+	return sandboxDir ? `${base}\n\n${getScratchSpaceBlock(sandboxDir)}` : base;
 }
 
 /** Durable user message appended on mode switch (exactly one per switch). */

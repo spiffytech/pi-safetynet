@@ -126,7 +126,31 @@ In **plan mode**, pi-safetynet doesn't just disable the `edit` and `write` tools
 | `sh -c` / `bash -c` | ✅ Subshell execution with code strings |
 | Redirections to `/dev/null` and friends | ❌ Safe device files are excluded |
 
-**Same caveat as catastrophic blocking:** this is a best-effort heuristic, not a guarantee. A write mechanism the detector doesn't recognize falls back to the normal ruleset — which asks unless a rule matches. It is not a sandbox; for a hard "no writes" boundary, use plan/ro with a tight read-only allowlist, or run in a container.
+**Same caveat as catastrophic blocking:** this is a best-effort heuristic, not a guarantee. A write mechanism the detector doesn't recognize falls back to the normal ruleset — which asks unless a rule matches. It is not a sandbox; for a hard "no writes" boundary, use plan/ro with a tight read-only allowlist, or run in a container. The one built-in exception is the [session scratch space](#session-scratch-space), which stays writable in every mode.
+
+### Session scratch space
+
+Every session gets a private scratch directory — `<os.tmpdir()>/pi-safetynet/<sessionId>/`, created `0700` at session start — and **both read-only and read-write modes allow reads and writes there**. It exists so throwaway files (command output, intermediate artifacts, code handed to a sandboxed tool) don't need an approval prompt:
+
+```
+curl -s https://example.com > "$TMPDIR/pi-safetynet/…/page.html"
+grep -n TODO src/**/*.ts > /tmp/pi-safetynet/…/todos.txt
+```
+
+Allowed inside the sandbox:
+
+- Output and input redirects (`>`, `>>`, `<`), including in plan/ro mode where they would otherwise be denied as edit-like.
+- The `read`, `edit`, and `write` tools.
+- `cd` into the sandbox.
+- Sandbox-local file management: `mkdir`, `touch`, `rm`, `rmdir`, `cp`, `mv`, `ln` when every path operand resolves inside the sandbox.
+
+Not allowed:
+
+- Hazardous names (`.env`, `id_rsa`, credentials, …) stay denied inside the sandbox too. The guard is a pure path-name check, so exempting the sandbox would require resolving what a path actually points at — a symlink or hardlink, or a copy that planted a real secret under a trusted name — which is not statically decidable.
+- Paths outside the sandbox, including a sibling that merely shares the prefix (`/tmp/pi-safetynet/abc-evil` is not inside `/tmp/pi-safetynet/abc`).
+- Variable, `cd`-relative, and glob operands that can't be pinned to the sandbox statically fail closed and prompt as usual.
+
+The path is computed once per session and is stable, so it does not churn the cached system-prompt prefix. Subagents share the parent session's sandbox. Nothing is cleaned up automatically; `/tmp` reclaims it.
 
 ### Hazardous file protection
 
@@ -346,7 +370,7 @@ Controls what happens when a call is denied automatically — either by a `deny`
 }
 ```
 
-Read-only mode is the common case: a `ro`/`plan` session denies bash commands that write (redirects, heredocs, `sed -i`, …) and the disabled `edit`/`write` tools outright. With the default `maxStrikes`, the first two attempts are non-aborting nudges only — the turn survives, so the model can propose a read-only alternative or ask you to switch modes — and the third ends the turn.
+Read-only mode is the common case: a `ro`/`plan` session denies bash commands that write (redirects, heredocs, `sed -i`, …) and the disabled `edit`/`write` tools outright. The session scratch space (see [Session scratch space](#session-scratch-space)) is the exception — writes there are permitted in every mode. With the default `maxStrikes`, the first two attempts are non-aborting nudges only — the turn survives, so the model can propose a read-only alternative or ask you to switch modes — and the third ends the turn.
 
 #### `toggleModeKey`
 

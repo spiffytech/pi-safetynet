@@ -4,7 +4,7 @@
  * identical treatment of nested (ctx.executeTool) calls.
  */
 
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -12,6 +12,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createChildExtension } from "pi-submarine-core";
 import type { Rule, Ruleset, TempRule } from "./core/types.ts";
 import { createSafetynetChildServices } from "./src/child-services.ts";
+import { setSandboxDir } from "./core/sandbox.ts";
+import { getBaselineRules } from "./core/permissions/index.ts";
 
 // ─── HOME isolation: the gate reads keybindings/auto-deny from global config ─
 
@@ -106,6 +108,7 @@ function createMockStorage() {
 		...stores,
 		getAllRules(): Ruleset {
 			return [
+				...getBaselineRules(),
 				...stores.session.getRules(),
 				...stores.persisted.getRules(),
 				...stores.global.getRules(),
@@ -229,5 +232,21 @@ describe("host child tools", () => {
 		const pi = createMockPi();
 		services.registerChildTools?.(pi as unknown as ExtensionAPI);
 		assert.deepEqual(pi.registeredTools.map((t) => t.name), ["codemode_research"]);
+	});
+});
+
+describe("build subagent shares the parent's session sandbox", () => {
+	const SANDBOX = "/tmp/pi-safetynet/child-test";
+	beforeEach(() => setSandboxDir(SANDBOX));
+	afterEach(() => setSandboxDir(undefined));
+
+	it("allows a redirect into the sandbox without a prompt", async () => {
+		const pi = buildChild("build", createMockStorage());
+		await pi.handlers.get("session_start")![0]!({}, createMockCtx());
+		const result = await pi.handlers.get("tool_call")![0]!(
+			makeToolCallEvent("bash", { command: `echo hi > ${SANDBOX}/out.txt` }),
+			createMockCtx(),
+		);
+		assert.equal(result, undefined, "sandbox write is allowed in the child");
 	});
 });

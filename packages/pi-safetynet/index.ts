@@ -49,6 +49,7 @@ import {
   type PermissionPromptResult,
 } from "./prompts.ts";
 import { checkBashPermission, checkFileTarget, checkToolPermission, type PermissionCheck } from "./core/check.ts";
+import { ensureSandboxDir, getSandboxDir, setSandboxDir, isWithinSandbox } from "./core/sandbox.ts";
 import { initBashParser } from "./core/bash-parser.ts";
 import { normalizePathForMatching, toRecursiveGlob, normalizeToolPath } from "pi-submarine-core";
 import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, strikeDeny, type HazardousDenyState } from "./pipeline.ts";
@@ -286,10 +287,12 @@ async function handleToolCall(
 
     if (event.toolName === "edit" || event.toolName === "write") {
       if (isReadOnly(profile)) {
+        const filePath = normalizeToolPath(event.input.path as string);
+        // The session sandbox is writable even in read-only modes.
+        if (isWithinSandbox(filePath, cwd)) return undefined;
         const { write: writeMode } = paradigmModes();
         const writeCmd = writeMode === "rw" ? "/safetynet:rw" : "/safetynet:build";
         const label = profile === "ro" ? "Read-only mode" : "Plan mode";
-        const filePath = normalizeToolPath(event.input.path as string);
         return strikeDeny({
           permission: "edit",
           target: filePath,
@@ -834,6 +837,8 @@ export default async function safetynetExtension(api: ExtensionAPI) {
     installFooter(ctx);
     inferredEngine = new InferredEngine(ctx.cwd);
     storage.persisted.setCwd(ctx.cwd); // project scope follows the session cwd
+    // Per-session scratch space: trusted for reads/writes in both ro and rw.
+    setSandboxDir(ensureSandboxDir(ctx.sessionManager.getSessionId()));
     loadLearnedBoundaries();
     uiArbiter.reset(); // no stale surface may block a fresh session's prompts
 
@@ -929,7 +934,7 @@ export default async function safetynetExtension(api: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     // Clear stale plan widget from a previous turn
     ctx.ui.setWidget("plan", undefined);
-    event.systemPromptOptions.sections["safetynet_mode"] = getModeSystemPrompt(getCurrentProfile());
+    event.systemPromptOptions.sections["safetynet_mode"] = getModeSystemPrompt(getCurrentProfile(), getSandboxDir());
   });
 
   // Compaction purges history; re-append the current-mode reminder
@@ -949,6 +954,7 @@ export default async function safetynetExtension(api: ExtensionAPI) {
     // Counters are session evidence — a tree switch is a new context.
     inferredEngine = new InferredEngine(ctx.cwd);
     storage.persisted.setCwd(ctx.cwd);
+    setSandboxDir(ensureSandboxDir(ctx.sessionManager.getSessionId()));
     loadLearnedBoundaries();
     uiArbiter.reset();
     updateInferredBadge(ctx);

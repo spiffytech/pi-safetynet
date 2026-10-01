@@ -20,6 +20,7 @@ import {
 } from "./core/global-config.ts";
 import type { ProfileName, Ruleset } from "./core/types.ts";
 import { checkBashPermission, checkFileTarget, checkToolPermission } from "./core/check.ts";
+import { ensureSandboxDir, getSandboxDir, setSandboxDir, isWithinSandbox } from "./core/sandbox.ts";
 import { normalizeToolPath } from "pi-submarine-core";
 import {
 	getCurrentProfile,
@@ -175,6 +176,7 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 		storage = new PermissionStorage(ctx.cwd);
 		await storage.init();
 		inferred = new InferredEngine(ctx.cwd);
+		setSandboxDir(ensureSandboxDir(ctx.sessionManager.getSessionId()));
 		uiArbiter.reset(); // no stale surface may block a fresh session's prompts
 		trustExternalPaths = loadTrustExternalPaths();
 		setParadigm(loadParadigm());
@@ -238,6 +240,7 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 		// Counters are session evidence — never leak across sessions.
 		inferred = new InferredEngine(ctx.cwd);
 		storage.persisted.setCwd(ctx.cwd); // project scope follows the session cwd
+		setSandboxDir(ensureSandboxDir(ctx.sessionManager.getSessionId()));
 		uiArbiter.reset();
 		if (event.reason === "new") {
 			// Brand-new session: reset to defaults.
@@ -324,7 +327,7 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 	// the provider-side KV prefix stays cached; switches are reflected on the
 	// next turn plus a durable reminder (see switchProfile).
 	pi.on("before_agent_start", async (event) => {
-		return { systemPrompt: [...event.systemPrompt, getModeSystemPrompt(getCurrentProfile())] };
+		return { systemPrompt: [...event.systemPrompt, getModeSystemPrompt(getCurrentProfile(), getSandboxDir())] };
 	});
 
 	// Compaction purges history; re-append the current-mode reminder
@@ -346,8 +349,12 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 		const profile = getCurrentProfile();
 		const readOnly = isReadOnly(profile);
 
-		// Read-only modes: deny file-mutating tools outright.
+		// Read-only modes: deny file-mutating tools outright, except inside the
+		// session scratch sandbox (writable in every mode).
 		if (readOnly && ["edit", "write"].includes(event.toolName)) {
+			const input = event.input as Record<string, unknown>;
+			const filePath = typeof input.path === "string" ? normalizeToolPath(input.path) : "";
+			if (isWithinSandbox(filePath, ctx.cwd)) return;
 			return {
 				block: true,
 				reason: `${profile === "ro" ? "Read-only" : "Plan"} mode: ${event.toolName} tool unavailable. The user can switch to ${paradigmModes().write} mode.`,
