@@ -540,17 +540,21 @@ export function checkBashPermission(
   }
 
   // A dangerous verb with an operand that cannot be resolved statically
-  // (e.g. `rm -rf "$DIR"`) must not be silently allowed by a broad rule —
-  // force approval instead. An exact-shape approval of the very subcommand
-  // being run overrides this (same rationale as above); broad rules never do.
-  if (parsed.forceAsk && worstAction === "allow") {
-    for (let i = 0; i < parsed.subcommands.length; i++) {
-      const sub = parsed.subcommands[i]!;
+  // (e.g. `rm -rf "$DIR"`) must not be silently allowed by a broad rule.
+  // An exact-shape approval of the very subcommand being run overrides this
+  // (same rationale as above); broad rules never do.
+  // Only the subcommands that actually carry the unresolvable operand are
+  // escalated: flagging the whole compound command would force approval for
+  // the harmless remainder too, so an approval of the offending subcommands
+  // could never satisfy the post-approval recheck.
+  if (parsed.dangerousUnresolvedOperands.length > 0 && worstAction === "allow") {
+    for (const sub of parsed.dangerousUnresolvedOperands) {
       if (exactShapeAllowed.has(sub)) continue;
+      const i = parsed.subcommands.indexOf(sub);
       worstAction = "ask";
       if (!unapproved.includes(sub)) {
         unapproved.push(sub);
-        unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
+        unapprovedDisplay.push((i >= 0 ? parsed.displaySubcommands[i] : undefined) ?? sub);
       }
     }
   }

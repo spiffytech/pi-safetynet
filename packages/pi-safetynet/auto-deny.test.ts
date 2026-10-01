@@ -810,6 +810,54 @@ describe("resolvePermission — auto allow satisfies recheck for variable operan
   });
 });
 
+describe("resolvePermission — force-ask escalation is scoped per subcommand", () => {
+  // Reported repro (fw-fanctrl backup): a compound command whose dangerous verb
+  // carries a command substitution. The escalation used to flag EVERY
+  // subcommand once the rest was allowed, so the reviewer's allow could never
+  // satisfy the recheck ("reviewer allowed but the approval rules failed
+  // recheck") and the interactive path looped on the bare assignment.
+  const CMD = [
+    'BK=/tmp/fw-fanctrl-backup',
+    'mkdir -p "$BK"',
+    'sudo -n chown -R "$(id -u):$(id -g)" "$BK" 2>/dev/null',
+    'echo "backed up to $BK:"; ls -la "$BK"',
+  ].join("\n");
+
+  it("reviewer allow satisfies the recheck and mints no rules for the harmless remainder", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    const ctx = makeCtx();
+    const storage = makeStorage();
+    const cwd = "/tmp/regression-force-ask-scope";
+    const opts = {
+      permission: "bash" as const,
+      target: CMD,
+      check: checkBashPermission(CMD, "build", getBaselineRules(), cwd),
+      recheck: () => checkBashPermission(CMD, "build", [...getBaselineRules(), ...storage.getAllRules()], cwd),
+    };
+    assert.equal(opts.check.action, "ask", "fixture: the command must start unapproved");
+    assert.deepEqual(opts.check.unapproved, ['mkdir -p "..."', 'sudo -n chown -R "..." "..."']);
+
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        storage,
+        cwd,
+        reviewSpawn: makeReviewSpawn([allowAssessment()]),
+        sendAutoApproval: () => {},
+      }),
+      opts,
+    );
+
+    assert.equal(result, undefined, "allow must proceed (no fallback prompt)");
+    assert.equal(ctx.aborted.value, false, "a successful auto-approval must not abort");
+    assert.deepEqual(
+      storage.temp.getRules().map((r: any) => r.pattern),
+      ['mkdir -p "..."', 'sudo -n chown -R "..." "..."'],
+      "only the offending subcommands mint rules — never echo/ls/id/the assignment",
+    );
+  });
+});
+
 describe("resolvePermission — glob approvals are invocation-only", () => {
   it("a reviewer allow of a glob command runs it but mints no broadening rule", async () => {
     setAutoEnabled(true, { appendEntry: () => {} } as any);

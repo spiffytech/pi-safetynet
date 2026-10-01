@@ -704,10 +704,31 @@ describe("dangerous-command hardening", () => {
     assert.equal(isEditLikeBashCommand("sed -es/i/x/ f", parseCommand("sed -es/i/x/ f")), false);
   });
 
-  it("forces ask for a dangerous verb with a quoted expansion", () => {
-    assert.equal(parseCommand('rm -rf "$HOME"').forceAsk, true);
-    assert.equal(parseCommand('chmod 777 "$VAR"').forceAsk, true);
-    assert.equal(parseCommand('echo "$HOME"').forceAsk, false);
+  it("flags a dangerous verb with a quoted expansion", () => {
+    assert.deepEqual(parseCommand('rm -rf "$HOME"').dangerousUnresolvedOperands, ['rm -rf "..."']);
+    assert.deepEqual(parseCommand('chmod 777 "$VAR"').dangerousUnresolvedOperands, ['chmod 777 "..."']);
+    assert.deepEqual(parseCommand('echo "$HOME"').dangerousUnresolvedOperands, []);
+  });
+
+  it("scopes the flag to the offending subcommands, not the whole command", () => {
+    assert.deepEqual(parseCommand('echo hi; rm -rf "$X"').dangerousUnresolvedOperands, ['rm -rf "..."']);
+    assert.deepEqual(
+      parseCommand('BK=/tmp/b; sudo -n chown -R "$BK" /tmp/y').dangerousUnresolvedOperands,
+      ['sudo -n chown -R "..." /tmp/y'],
+    );
+  });
+
+  it("leaves a bare assignment and its command substitutions out of the flag", () => {
+    assert.deepEqual(
+      parseCommand('BK=/tmp/b; sudo -n chown -R "$(id -u):$(id -g)" "$BK"').dangerousUnresolvedOperands,
+      ['sudo -n chown -R "..." "..."'],
+    );
+  });
+
+  it("keeps the whole-command result free of incidental subcommands", () => {
+    const parsed = parseCommand('ls -la "$X"; sudo -n rm -rf "$X"');
+    assert.deepEqual(parsed.dangerousUnresolvedOperands, ['sudo -n rm -rf "..."']);
+    assert.deepEqual(parsed.subcommands, ['ls -la "..."', 'sudo -n rm -rf "..."']);
   });
 
   it("displays double-quoted strings with their original escapes", () => {

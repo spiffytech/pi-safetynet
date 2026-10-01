@@ -690,6 +690,12 @@ describe("checkBashPermission force-ask on unresolvable dangerous operands", () 
   const ALLOW_ECHO: Ruleset = [
     { permission: "bash", pattern: "echo *", action: "allow", modes: ["build", "plan", "ro", "rw"] },
   ];
+  const approvalRule = (p: string): Ruleset[number] => ({
+    permission: "bash",
+    pattern: p,
+    action: "allow",
+    modes: ["build"],
+  });
 
   it("does not silently allow rm with a quoted expansion", () => {
     const result = checkBashPermission('rm -rf "$HOME"', "build", ALLOW_RM, CWD);
@@ -703,6 +709,35 @@ describe("checkBashPermission force-ask on unresolvable dangerous operands", () 
 
   it("does not force-ask harmless expansions", () => {
     assert.equal(checkBashPermission('echo "$HOME"', "build", ALLOW_ECHO, CWD).action, "allow");
+  });
+
+  // Regression: the escalation used to flag EVERY subcommand in a compound
+  // command, so approving the dangerous one re-surfaced the harmless ones and
+  // an approval could never satisfy the post-approval recheck (auto-review's
+  // "reviewer allowed but the approval rules failed recheck" prompt, and an
+  // interactive approve-for-session loop).
+  it("does not drag a harmless sibling subcommand into the escalation", () => {
+    const cmd = 'echo hi; rm -rf "$DIR"';
+    const withBaselineOnly = checkBashPermission(cmd, "build", getBaselineRules(), CWD);
+    assert.deepEqual(withBaselineOnly.unapproved, ['rm -rf "..."']);
+
+    const rules: Ruleset = [...getBaselineRules(), approvalRule('rm -rf "..."')];
+    const recheck = checkBashPermission(cmd, "build", rules, CWD);
+    assert.equal(recheck.action, "allow");
+    assert.ok(!recheck.unapproved?.includes("echo hi"));
+  });
+
+  // A bare assignment can never be recorded as an exact-shape approval (the
+  // per-subcommand loop skips assignments before it can), so flagging it made
+  // the interactive recheck loop forever.
+  it("does not flag a bare assignment alongside a dangerous verb", () => {
+    const cmd = 'BK=/tmp/b; sudo -n chown -R "$BK" /tmp/y';
+    assert.deepEqual(checkBashPermission(cmd, "build", getBaselineRules(), CWD).unapproved, [
+      'sudo -n chown -R "..." /tmp/y',
+    ]);
+
+    const rules: Ruleset = [...getBaselineRules(), approvalRule('sudo -n chown -R "..." /tmp/y')];
+    assert.equal(checkBashPermission(cmd, "build", rules, CWD).action, "allow");
   });
 });
 

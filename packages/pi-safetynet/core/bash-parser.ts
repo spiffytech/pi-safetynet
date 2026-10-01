@@ -632,7 +632,6 @@ interface Acc {
   displayWords: string[][];
   redirects: RedirectTarget[];
   catastrophic: boolean;
-  forceAsk: boolean;
 }
 
 function addSub(acc: Acc, tokens: string[], displays: string[], suffix = ""): void {
@@ -668,7 +667,6 @@ function emitCommand(cmd: Node, reds: RedirectInfo[], acc: Acc): void {
   }
 
   if (isCatastrophic(tokens)) acc.catastrophic = true;
-  if (hasUnresolvedOperand(tokens)) acc.forceAsk = true;
 
   for (const r of reds) {
     if (r.direction) acc.redirects.push({ path: r.target, direction: r.direction });
@@ -839,9 +837,12 @@ export interface ParsedCommand {
   displaySubcommands: string[];
   redirects: RedirectTarget[];
   catastrophic: boolean;
-  /** True when a dangerous verb targets an operand that cannot be resolved
-   *  statically (e.g. `rm -rf "$DIR"`).  Callers must not silently allow it. */
-  forceAsk: boolean;
+  /** Canonical subcommands whose dangerous verb (rm/chmod/chown) carries an
+   *  operand that cannot be resolved statically (e.g. `rm -rf "$DIR"`).  A
+   *  broad rule must never approve these — only an exact-shape approval of the
+   *  same shape may (see check.ts).  Scoped per subcommand: in a compound
+   *  command only the offending subcommands are listed. */
+  dangerousUnresolvedOperands: string[];
   /** True when the parser could not produce a trustworthy result (null tree
    *  or an unexpected internal failure).  Callers must fail CLOSED on this
    *  rather than treating the empty/partial result as an allow. */
@@ -858,7 +859,7 @@ function failedResult(command: string): ParsedCommand {
     displaySubcommands: first ? [first] : [],
     redirects: [],
     catastrophic: first ? SYSTEM_HALT_COMMANDS.has(first) : false,
-    forceAsk: false,
+    dangerousUnresolvedOperands: [],
     parseFailed: true,
   };
 }
@@ -867,7 +868,7 @@ export function parseCommand(command: string): ParsedCommand {
   if (!parser) {
     throw new Error("bash parser not initialized; call initBashParser() first");
   }
-  const acc: Acc = { canonical: [], display: [], words: [], displayWords: [], redirects: [], catastrophic: false, forceAsk: false };
+  const acc: Acc = { canonical: [], display: [], words: [], displayWords: [], redirects: [], catastrophic: false };
   try {
     const tree = parser.parse(command);
     if (!tree) return failedResult(command);
@@ -883,6 +884,13 @@ export function parseCommand(command: string): ParsedCommand {
   }
 
   dedup(acc);
+  // Dangerous verbs whose operand cannot be pinned down are scoped to the
+  // subcommands that actually carry them: in a compound command only the
+  // offending subcommands are listed, so a consumer never forces an approval
+  // for the harmless remainder.
+  const dangerousUnresolvedOperands = acc.canonical.filter((_, i) =>
+    hasUnresolvedOperand(acc.words[i]!),
+  );
   return {
     subcommands: acc.canonical,
     subcommandWords: acc.words,
@@ -890,7 +898,7 @@ export function parseCommand(command: string): ParsedCommand {
     displaySubcommands: acc.display,
     redirects: acc.redirects,
     catastrophic: acc.catastrophic,
-    forceAsk: acc.forceAsk,
+    dangerousUnresolvedOperands,
     parseFailed: false,
   };
 }
