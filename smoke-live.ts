@@ -22,6 +22,10 @@
  *   S7 concurrent sessions: two live pi processes share one store — the
  *      sibling sees the watch marked "held by session N", and no duplicate
  *      record is created.
+ *   X1/X2 subsystem extras — ON DEMAND ONLY (never on a default run): X1
+ *      extends a watch's lifetime live; X2 proves silence detection live.
+ *      Run with SMOKE_ONLY=extras (or SMOKE_ONLY=X2) when touching those
+ *      specific mechanisms. Default runs are S1–S7.
  *
  * Everything runs at seconds scale (env overrides), so the whole suite is
  * minutes, not hours. Run:  node --experimental-strip-types smoke-live.ts
@@ -157,10 +161,14 @@ async function runPi(prompt: string, opts: { env?: Record<string, string>; killW
 }
 
 const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
-/** SMOKE_ONLY=S5 runs just that scenario (comma-separated also fine). */
+/** Subsystem extras cost minutes of wall time: on demand only. */
+const EXTRA_SCENARIOS = new Set(["X1", "X2"]);
+/** SMOKE_ONLY=S5 runs just that scenario (comma-separated; `extras` = X1+X2). */
 function wants(scenario: string): boolean {
 	const only = process.env.SMOKE_ONLY;
-	return !only || only.split(",").map((s) => s.trim()).includes(scenario);
+	if (!only) return !EXTRA_SCENARIOS.has(scenario);
+	const list = only.split(",").map((s) => s.trim());
+	return list.includes(scenario) || (list.includes("extras") && EXTRA_SCENARIOS.has(scenario));
 }
 function assert(name: string, cond: boolean, detail = ""): void {
 	checks.push({ name, ok: cond, detail });
@@ -366,6 +374,47 @@ async function s7ConcurrentSessions(): Promise<void> {
 	assert("S7 first pi finished cleanly", r1.code === 0, `code=${r1.code}`);
 }
 
+async function x1ExtendLive(): Promise<void> {
+	if (!wants("X1")) return;
+	console.log("\nX1: lifetime extension, live");
+	const before = sessionText();
+	const file = join(SCRATCH, "x1.log");
+	const run = await runPi(
+		`Do exactly this: (1) Call job_watch with action 'run', command 'echo starting >> ${file}; sleep 20; echo EXT-DONE >> ${file}', logPath '${file}', label 'smokeX1', lifetimeMinutes 1. ` +
+			`(2) Read the watch id from the result and call job_watch with action 'extend', id <that id>, lifetimeMinutes 10. ` +
+			`(3) Call job_watch with action 'list'. Then end your reply with exactly the line: SMOKE-OKX1`,
+	);
+	const text = deltaSince(before) + run.out;
+	if (bailOnProviderError(run, "X1")) return;
+	assert("X1 pi exited cleanly", run.code === 0, `code=${run.code}`);
+	assert("X1 extend confirmed in tool output", /extended w-[\w-]+ by 10min/.test(text), text.slice(-300));
+	const rec = storeRecords().find((r) => r.label === "smokeX1");
+	assert(
+		"X1 store reflects the extension (lifetime >= 9min)",
+		!!rec && Number(rec.expiresAt) - Number(rec.createdAt) >= 9 * 60_000,
+		JSON.stringify(rec),
+	);
+	assert("X1 agent finished with the marker", text.includes("SMOKE-OKX1"), run.out.slice(-300));
+}
+
+async function x2QuietLive(): Promise<void> {
+	if (!wants("X2")) return;
+	console.log("\nX2: silence detection, live (60s floor — this one is slow by nature)");
+	const before = sessionText();
+	const file = join(SCRATCH, "x2.log");
+	const run = await runPi(
+		`Do exactly this: (1) Call job_watch with action 'run', command 'for i in 1 2 3; do echo tick-$i >> ${file}; sleep 1; done', logPath '${file}', label 'smokeX2-job'. ` +
+			`(2) Call job_watch with action 'register', path '${file}', quietForSeconds 60, logPath '${file}', label 'smokeX2'. ` +
+			`(3) Run bash 'sleep 75'. (4) Call job_watch with action 'list'. Then end your reply with exactly the line: SMOKE-OKX2`,
+		{ timeoutMs: 300_000 },
+	);
+	const text = deltaSince(before) + run.out;
+	if (bailOnProviderError(run, "X2")) return;
+	assert("X2 pi exited cleanly", run.code === 0, `code=${run.code}`);
+	assert("X2 silence fired live", /no new output in .* for \d+s/.test(text), text.slice(-300));
+	assert("X2 agent finished with the marker", text.includes("SMOKE-OKX2"), run.out.slice(-300));
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 try {
@@ -378,6 +427,8 @@ try {
 	await s5Attach();
 	await s6RegexAndRearm();
 	await s7ConcurrentSessions();
+	await x1ExtendLive();
+	await x2QuietLive();
 } catch (err) {
 	assert("scenario completed without throwing", false, String(err));
 } finally {

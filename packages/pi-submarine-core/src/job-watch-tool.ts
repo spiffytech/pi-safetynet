@@ -26,27 +26,29 @@ export function buildTrigger(params: {
 	quietForSeconds?: number;
 	heartbeatSeconds?: number;
 }): { trigger?: WatchTrigger; error?: never } | { trigger?: never; error: string } {
-	if ((params.path !== undefined) !== (params.pattern !== undefined)) {
+	const wantsQuiet = params.quietForSeconds !== undefined;
+	const wantsFile = params.path !== undefined && params.pattern !== undefined;
+	if (params.pattern !== undefined && params.path === undefined) {
 		return { error: "file trigger needs both path and pattern" };
 	}
-	const has =
-		params.pid !== undefined ||
-		(params.path !== undefined && params.pattern !== undefined) ||
-		params.deadlineSeconds !== undefined ||
-		params.quietForSeconds !== undefined;
+	// A bare path is ambiguous — but path+quietForSeconds is a silence watch.
+	if (params.path !== undefined && params.pattern === undefined && !wantsQuiet) {
+		return { error: "file trigger needs both path and pattern (or path + quietForSeconds)" };
+	}
+	const has = params.pid !== undefined || wantsFile || params.deadlineSeconds !== undefined || wantsQuiet;
 	if (!has && params.heartbeatSeconds === undefined) {
 		return { error: "job_watch needs a trigger (pid | path+pattern | quietForSeconds | deadlineSeconds) or heartbeatSeconds" };
 	}
 	if (params.pid !== undefined) return { trigger: { kind: "pid-exit", pid: params.pid } };
-	if (params.path !== undefined && params.pattern !== undefined) {
-		const bad = validatePatternRegex(params.pattern);
+	if (wantsFile) {
+		const bad = validatePatternRegex(params.pattern!);
 		if (bad) return { error: bad };
-		return { trigger: { kind: "file-contains", path: params.path, pattern: params.pattern } };
+		return { trigger: { kind: "file-contains", path: params.path!, pattern: params.pattern! } };
 	}
-	if (params.quietForSeconds !== undefined) {
-		if (!(params.quietForSeconds >= 60)) return { error: "quietForSeconds must be >= 60 (silence is not speed; give the job room)" };
+	if (wantsQuiet) {
+		if (!(params.quietForSeconds! >= 60)) return { error: "quietForSeconds must be >= 60 (silence is not speed; give the job room)" };
 		if (!params.path) return { error: "quietForSeconds needs a path (the log whose silence to watch)" };
-		return { trigger: { kind: "file-quiet", path: params.path, seconds: params.quietForSeconds } };
+		return { trigger: { kind: "file-quiet", path: params.path, seconds: params.quietForSeconds! } };
 	}
 	if (params.deadlineSeconds !== undefined) {
 		if (!(params.deadlineSeconds > 0)) return { error: "deadlineSeconds must be > 0" };
@@ -195,30 +197,24 @@ export function registerJobWatchTool(pi: ExtensionAPI, api: JobWatchApi): void {
 	pi.registerTool({
 		name: JOB_WATCH_TOOL_NAME,
 		label: "Job Watch",
-		description: [
-			"Run, adopt, and watch background work WITHOUT babysitting: register a watch (pid-exit, file-contains, deadline, optional heartbeat) and you are notified when it fires.",
-			"`run` launches a command detached from pi (it survives pi exiting) and watches it; `attach` adopts a process you already backgrounded, verifies it survives pi's teardown, and adopts its log.",
-			"Actions: run | attach | register | list | tail | cancel.",
-		].join(" "),
+		description:
+			"Watch background work without babysitting: notified on pid-exit, file regex, silence, deadline, or heartbeat. " +
+			"Prefer over sleep/poll loops. Actions: run (launch detached + watch) | attach (adopt work you backgrounded) | register | list | tail | extend | cancel.",
 		promptSnippet: "Run/watch background jobs, get notified on events",
-		promptGuidelines: [
-			"Prefer job_watch over sleeping or polling loops for anything that takes minutes to hours: register, keep working, and you will be notified.",
-			"Use `run` for jobs that must survive pi restarting; when you background work yourself, `attach` to it so it is watched (and so teardown risks are flagged).",
-		],
+		namespace: { name: "pi-submarine", description: "background subagents and job watches" },
 		parameters: Type.Object({
-			action: Type.Optional(Type.String({ description: "run | attach | register | list | tail | extend | cancel (default register)" })),
-			command: Type.Optional(Type.String({ description: "run: shell command to launch detached from pi" })),
-			pid: Type.Optional(Type.Number({ description: "attach/register: fire when this process exits" })),
-			path: Type.Optional(Type.String({ description: "register: file to scan for pattern" })),
-			pattern: Type.Optional(Type.String({ description: "register: JavaScript regex (m-flagged) matched against new log data as a stream — use ^…$ to match one whole line (an anchored line may match before its newline lands)" })),
-			deadlineSeconds: Type.Optional(Type.Number({ description: "register: fire this many seconds from now" })),
-			quietForSeconds: Type.Optional(Type.Number({ description: "register: fire when the log has been silent this long (>= 60). Only for jobs expected to chatter — a quiet script is not a stalled one" })),
-			lifetimeMinutes: Type.Optional(Type.Number({ description: "Watch lifetime in minutes (default 30; extend keeps a long job watched). One warning is sent near expiry" })),
-			heartbeatSeconds: Type.Optional(Type.Number({ description: "Notify every N seconds with the latest log line (optional cadence; floor 60s). Every tick spends a turn — be considerate of token waste" })),
-			logPath: Type.Optional(Type.String({ description: "Progress log (preview source; run's output file)" })),
-			label: Type.Optional(Type.String({ description: "Human label for the watch" })),
-			id: Type.Optional(Type.String({ description: "Watch id, for tail/cancel" })),
-			tailLines: Type.Optional(Type.Number({ description: "tail: lines to return (default 20)" })),
+			action: Type.Optional(Type.String({ description: "run|attach|register|list|tail|extend|cancel" })),
+			command: Type.Optional(Type.String({ description: "run: command (detached, survives pi)" })),
+			pid: Type.Optional(Type.Number({ description: "fire when pid exits" })),
+			path: Type.Optional(Type.String({ description: "file to watch" })),
+			pattern: Type.Optional(Type.String({ description: "regex (m-flagged; ^…$ = whole line)" })),
+			deadlineSeconds: Type.Optional(Type.Number({ description: "fire in N seconds" })),
+			quietForSeconds: Type.Optional(Type.Number({ description: "fire after N s silent (≥60)" })),
+			lifetimeMinutes: Type.Optional(Type.Number({ description: "minutes (default 30; extend renews)" })),
+			heartbeatSeconds: Type.Optional(Type.Number({ description: "notify every N s (≥60; each costs a turn)" })),
+			logPath: Type.Optional(Type.String({ description: "log for previews / run output" })),
+			label: Type.Optional(Type.String({ description: "display name" })),
+			id: Type.Optional(Type.String({ description: "watch id (tail/extend/cancel)" })),
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -237,7 +233,7 @@ export function registerJobWatchTool(pi: ExtensionAPI, api: JobWatchApi): void {
 			}
 			if (action === "tail") {
 				if (!params.id) return { content: [{ type: "text", text: "tail needs a watch id" }], details: { error: "missing id" } };
-				const text = api.tail(params.id, params.tailLines && params.tailLines > 0 ? params.tailLines : 20);
+				const text = api.tail(params.id, 20);
 				return { content: [{ type: "text", text }], details: { watchId: params.id } };
 			}
 			if (action === "cancel") {

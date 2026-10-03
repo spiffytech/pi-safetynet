@@ -10,7 +10,7 @@
 		"extensions": ["./index.ts"]
 	},
 	"dependencies": {
-		"pi-submarine-core": "^1.0.0"
+		"pi-submarine-core": "^1.1.0"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-agent-core": "*",

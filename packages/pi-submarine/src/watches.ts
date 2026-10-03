@@ -310,51 +310,64 @@ export class WatchManager {
 	}
 
 	/**
+	 * The ONE persistence primitive: a locked read-merge-write over the store.
+	 * Every write path is a policy over it — the plumbing exists exactly once.
+	 */
+	private commit<T>(mutate: (fileRecs: Map<string, WatchRecord>) => T): T | undefined {
+		try {
+			return this.withLock(() => {
+				const fileRecs = this.readFileRecords();
+				const result = mutate(fileRecs);
+				this.writeFileRecords([...fileRecs.values()]);
+				return result;
+			});
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
 	 * Take the waiter claim for this session — the concurrency core. False when
 	 * a live sibling session already holds it (its waiters, its wakes; we just
 	 * watch it in list). Stale claims (dead holder) are taken over silently.
 	 */
 	private tryClaim(rec: WatchRecord): boolean {
-		try {
-			return this.withLock(() => {
-				const fileRecs = this.readFileRecords();
-				const fileRec = fileRecs.get(rec.id);
-				const claim = fileRec?.claim;
-				if (claim && claim.pid !== this.self().pid && fileRec && this.claimLive(fileRec)) {
-					return false;
-				}
-				rec.claim = this.self();
-				fileRecs.set(rec.id, rec);
-				this.writeFileRecords([...fileRecs.values()]);
-				return true;
-			});
-		} catch {
+		const got = this.commit((fileRecs) => {
+			const fileRec = fileRecs.get(rec.id);
+			const claim = fileRec?.claim;
+			if (claim && claim.pid !== this.self().pid && fileRec && this.claimLive(fileRec)) return false;
+			rec.claim = this.self();
+			fileRecs.set(rec.id, rec);
+			return true;
+		});
+		if (got === undefined) {
 			rec.claim = this.self(); // lock trouble: prefer liveness over silence
 			return true;
 		}
+		return got;
 	}
 
 	/**
-	 * Locked read-merge-write. Writes OUR records (and unclaimed-new ones);
-	 * preserves sibling-held records verbatim — mutate only what you claim.
-	 * Terminal state always wins, so a sibling's cancel of one of ours survives.
+	 * Write OUR records (and unclaimed-new ones); preserve sibling-held records
+	 * verbatim — mutate only what you claim. Terminal state always wins, so a
+	 * sibling's cancel of one of ours survives.
 	 */
 	private save(): void {
-		try {
-			this.withLock(() => {
-				const fileRecs = this.readFileRecords();
-				for (const rec of this.records.values()) {
-					if (this.reaped.has(rec.id)) continue;
-					if (!this.isMine(rec)) continue; // sibling's record: keep their copy
-					const theirs = fileRecs.get(rec.id);
-					if (theirs && theirs.state !== "pending" && rec.state === "pending") continue; // terminal wins
-					fileRecs.set(rec.id, rec);
-				}
-				this.writeFileRecords([...fileRecs.values()]);
-			});
-		} catch {
-			/* persistence is best-effort; the live waiters still work */
-		}
+		this.commit((fileRecs) => {
+			for (const rec of this.records.values()) {
+				if (this.reaped.has(rec.id)) continue;
+				if (!this.isMine(rec)) continue; // sibling's record: keep their copy
+				const theirs = fileRecs.get(rec.id);
+				if (theirs && theirs.state !== "pending" && rec.state === "pending") continue; // terminal wins
+				fileRecs.set(rec.id, rec);
+			}
+		});
+	}
+
+	/** Write exactly one record — for deliberate mutations of a sibling's
+	 *  record (cross-session cancel/extend are legal). */
+	private persistOne(rec: WatchRecord): void {
+		this.commit((fileRecs) => fileRecs.set(rec.id, rec));
 	}
 
 	/**
@@ -364,9 +377,8 @@ export class WatchManager {
 	 * deterministic even when a stale holder fires late.
 	 */
 	private persistFire(rec: WatchRecord): boolean {
-		try {
-			return this.withLock(() => {
-				const fileRecs = this.readFileRecords();
+		return (
+			this.commit((fileRecs) => {
 				const fileRec = fileRecs.get(rec.id);
 				const foreignClaim = fileRec?.claim && fileRec.claim.pid !== this.self().pid;
 				if (fileRec && (fileRec.state !== "pending" || foreignClaim)) {
@@ -376,26 +388,9 @@ export class WatchManager {
 					return false;
 				}
 				fileRecs.set(rec.id, rec);
-				this.writeFileRecords([...fileRecs.values()]);
 				return true;
-			});
-		} catch {
-			return true; // lock trouble: deliver rather than lose the wake
-		}
-	}
-
-	/** Write exactly one record — for deliberate mutations of a sibling's
-	 *  record (cross-session cancel/extend are legal). */
-	private persistOne(rec: WatchRecord): void {
-		try {
-			this.withLock(() => {
-				const fileRecs = this.readFileRecords();
-				fileRecs.set(rec.id, rec);
-				this.writeFileRecords([...fileRecs.values()]);
-			});
-		} catch {
-			/* best effort */
-		}
+			}) ?? true // lock trouble: deliver rather than lose the wake
+		);
 	}
 
 	private persist(rec: WatchRecord): void {

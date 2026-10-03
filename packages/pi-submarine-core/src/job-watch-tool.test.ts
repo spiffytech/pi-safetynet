@@ -19,6 +19,14 @@ describe("buildTrigger", () => {
 	it("rejects triggerless watches and half-specified file triggers", () => {
 		assert.match((buildTrigger({}) as { error: string }).error, /needs a trigger/);
 		assert.match((buildTrigger({ path: "/tmp/x" }) as { error: string }).error, /both path and pattern/);
+		assert.match((buildTrigger({ pattern: "x" }) as { error: string }).error, /both path and pattern/);
+	});
+
+	it("path + quietForSeconds is a silence watch (the live-extras regression)", () => {
+		const res = buildTrigger({ path: "/tmp/x", quietForSeconds: 60 });
+		assert.deepEqual(res.trigger, { kind: "file-quiet", path: "/tmp/x", seconds: 60 });
+		const fast = buildTrigger({ path: "/tmp/x", quietForSeconds: 5 });
+		assert.match((fast as { error: string }).error, /quietForSeconds must be >= 60/);
 	});
 
 	it("rejects catastrophically-backtracking patterns at register time", () => {

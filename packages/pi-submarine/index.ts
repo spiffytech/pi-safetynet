@@ -246,16 +246,13 @@ function registerSubagentTools(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "subagent_run",
 		label: "Subagent",
-		description: [
-			"Spawn a persistent background subagent that inherits your current read-only/read-write mode.",
-			"Returns a job id immediately; the subagent reports back via report_to_parent and wakes you when it goes idle.",
-			"Use subagent_send to message it, subagent_status to inspect it, subagent_bash_output to tail its current bash command, and subagent_close to end it.",
-		].join(" "),
+		description:
+			"Spawn a persistent background subagent (inherits your read-only/read-write mode). " +
+			"Returns a job id immediately; it reports via report_to_parent and wakes you when idle.",
 		promptSnippet: "Spawn a background subagent (async, two-way)",
 		promptGuidelines: [
-			"Use subagent_run for self-contained work you can delegate. It returns immediately; do not expect the answer in the tool result.",
-			"Keep the conversation going while it runs; you will be woken when it reports, finishes, or needs attention.",
-			"Parent decision: am I delegating work to another session (subagent_run), or just unblocking my own (job_watch)? Subagents may do long-running work — but never spawn one whose only job is to wait or poll: job_watch watches a job and wakes you at zero token cost.",
+			"Returns immediately — keep working; you are woken on reports or idle.",
+			"Delegation vs unblocking: subagent_run delegates to another session, job_watch just unblocks yours. Never spawn a subagent whose only job is to wait or poll.",
 		],
 		parameters: Type.Object({
 			prompt: Type.String({ description: "Complete, self-sufficient task for the subagent" }),
