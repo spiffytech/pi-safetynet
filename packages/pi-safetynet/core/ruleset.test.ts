@@ -172,6 +172,29 @@ describe("evaluatePermission", () => {
       assert.equal(evaluatePermission("bash", "python3", "build", BASELINE).action, "ask");
     });
 
+    it("our extension tools are baseline-allowed in every mode (ro+rw included)", () => {
+      const tools = [
+        "tool:subagent_run",
+        "tool:subagent_status",
+        "tool:subagent_send",
+        "tool:subagent_close",
+        "tool:subagent_bash_output",
+        "tool:report_to_parent",
+        "tool:job_watch",
+      ];
+      for (const target of tools) {
+        for (const mode of ["build", "plan", "ro", "rw"] as const) {
+          // Must beat the `bash: *` ask catch-all, which would otherwise demand
+          // a manual approval for every extension tool call.
+          assert.equal(
+            evaluatePermission("bash", target, mode, BASELINE).action,
+            "allow",
+            `${target} should be pre-approved in ${mode}`,
+          );
+        }
+      }
+    });
+
     it("multi-word patterns: sed -n allowed, npm install asked, git config --get allowed", () => {
       assert.equal(evaluatePermission("bash", "sed -n", "build", BASELINE).action, "allow");
       assert.equal(evaluatePermission("bash", "npm install", "build", BASELINE).action, "ask");

@@ -15,10 +15,12 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { readSync, openSync, closeSync, statSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
+import { lockSync } from "proper-lockfile";
 import type { WatchInput, WatchOwner, WatchTrigger, WatchView } from "pi-submarine-core";
-import { capReportSummary, capBashTail } from "pi-submarine-core";
+import { capReportSummary, capBashTail, readProcStat, readBootId, validatePatternRegex } from "pi-submarine-core";
 
 export interface WatchRecord {
 	id: string;
@@ -33,9 +35,24 @@ export interface WatchRecord {
 	state: "pending" | "fired" | "cancelled" | "expired";
 	firedAt?: number;
 	verdict?: string;
+	/** Teardown-survival verdict recorded at attach time. */
+	survival?: string;
+	/** Identity captured at register: boot id + process start ticks. A pid alone
+	 *  is not an identity — pids recycle across reboots. */
+	bootId?: string;
+	procStart?: number;
+	/** Process identity of the session that owns the waiters. Two live pi
+	 *  sessions share one store: only the claim holder arms/announces; everyone
+	 *  else sees the record in list and may cancel/extend it. */
+	claim?: { pid: number; start?: number };
 	/** Byte offset into logPath already scanned for the pattern/preview. */
 	logOffset: number;
 	lastLine?: string;
+	/** file-quiet bookkeeping: last observed size + when it last grew. */
+	quietLastSize?: number;
+	lastGrowthAt?: number;
+	/** Pre-expiry warning sent once per lifetime (reset by extend). */
+	expiryWarned?: boolean;
 }
 
 export interface WatchManagerOptions {
@@ -44,9 +61,11 @@ export interface WatchManagerOptions {
 	cwd: string;
 	/** Smallest allowed heartbeat (guards against wake spam). */
 	minHeartbeatMs?: number;
-	/** Trigger polling interval. */
+	/** Trigger polling interval (also drives heartbeats/expiry — one shared tick). */
 	pollIntervalMs?: number;
-	/** Hard lifetime cap per record. */
+	/** Default watch lifetime when the input sets none (30 min). */
+	defaultLifetimeMs?: number;
+	/** Hard ceiling for any lifetime or extension (the forgotten-watch guillotine). */
 	maxLifetimeMs?: number;
 	now?: () => number;
 	/** Deliver an event to the parent session (urgent = triggers a turn). */
@@ -55,6 +74,11 @@ export interface WatchManagerOptions {
 	resumeChild(jobId: string, text: string): boolean;
 	/** Whether a child job is still live (restart-orphan detection at reattach). */
 	isChildLive?(jobId: string): boolean;
+	/** Kernel identity probes (boot id, process start ticks). */
+	procIdentity?: ProcIdentity;
+	/** This session's process identity (claims). Injectable so tests can
+	 *  simulate two live sessions in one process. */
+	selfIdentity?: () => { pid: number; start?: number };
 	/** Deferral gate: false while the parent compacts or is mid-turn. */
 	canDeliver?(): boolean;
 }
@@ -68,8 +92,57 @@ export interface WatchEvent {
 
 const DEFAULT_MIN_HEARTBEAT_MS = 60_000;
 const DEFAULT_POLL_MS = 1_000;
-const DEFAULT_MAX_LIFETIME_MS = 24 * 60 * 60_000;
+const DEFAULT_LIFETIME_MS = 30 * 60_000;
+const DEFAULT_MAX_LIFETIME_MS = 30 * 24 * 60 * 60_000;
+/** Terminal records older than this are reaped at load (store hygiene). */
+const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
+/** ...but always keep at least this many terminal records for history. */
+const TERMINAL_KEEP = 20;
+/** Cap on live watches: each is polled every tick. */
+export const MAX_WATCHES = 32;
+/** `tail` reads at most this many trailing bytes (never the whole log). */
+const TAIL_READ_BYTES = 256 * 1024;
 const LAST_LINE_MAX = 200;
+/** Re-scan window carried between polls: longer than any plausible match. */
+export const OVERLAP_BYTES = 4096;
+
+/**
+ * Streaming regex matcher — the pure core of file scanning. Feed raw bytes as
+ * they arrive (ANY split); it matches against a sliding window of recent text.
+ *
+ * Contract (what the property tests assert):
+ *   - COMPLETENESS: if the pattern matches the full accumulated text, some feed
+ *     returns hit=true — a match split across chunk boundaries is never missed
+ *     (the window re-covers up to OVERLAP_BYTES of prior bytes).
+ *   - Multibyte-safe: a UTF-8 character split across feeds still matches
+ *     (StringDecoder holds partial sequences instead of baking in U+FFFD).
+ *   - Streaming semantics, like `tail -f | grep`: an m-flagged `^…$` can match
+ *     a line before its trailing newline lands.
+ */
+export class IncrementalMatcher {
+	private decoder = new StringDecoder("utf-8");
+	private window = "";
+	private readonly re: RegExp | undefined;
+
+	constructor(pattern?: string) {
+		this.re = pattern !== undefined ? new RegExp(pattern, "m") : undefined;
+	}
+
+	/** Feed the next bytes; returns the text seen and whether it matches now. */
+	feed(chunk: Buffer): { text: string; hit: boolean } {
+		this.window += this.decoder.write(chunk);
+		const text = this.window;
+		const hit = this.re ? this.re.test(text) : false;
+		this.window = text.length > OVERLAP_BYTES ? text.slice(-OVERLAP_BYTES) : text;
+		return { text, hit };
+	}
+
+	/** Truncation/rotation: forget the stream and start over. */
+	reset(): void {
+		this.decoder = new StringDecoder("utf-8");
+		this.window = "";
+	}
+}
 const STORE_VERSION = 1;
 /** Exit artifact appended by `watch run`'s wrapper, used for down-time verdicts. */
 export const WATCH_EXIT_MARKER = "__WATCH_EXIT=";
@@ -81,15 +154,20 @@ export function watchStorePath(agentDir: string, cwd: string): string {
 }
 
 export class WatchManager {
-	private readonly opts: Required<Omit<WatchManagerOptions, "now" | "canDeliver" | "isChildLive">> & {
+	private readonly opts: Required<Omit<WatchManagerOptions, "now" | "canDeliver" | "isChildLive" | "procIdentity" | "selfIdentity">> & {
 		now: () => number;
 		canDeliver: () => boolean;
 		isChildLive: (jobId: string) => boolean;
+		procIdentity: ProcIdentity;
+		selfIdentity: () => { pid: number; start?: number };
 	};
 	private readonly records = new Map<string, WatchRecord>();
-	private readonly pollTimers = new Map<string, ReturnType<typeof setInterval>>();
-	private readonly beatTimers = new Map<string, ReturnType<typeof setInterval>>();
+	private tickTimer: ReturnType<typeof setInterval> | undefined;
+	private readonly lastBeatAt = new Map<string, number>();
 	private readonly pendingEvents: Array<{ text: string; urgent: boolean }> = [];
+	private readonly matchers = new Map<string, IncrementalMatcher>();
+	private readonly reaped = new Set<string>();
+	private lastReconcileMtime = 0;
 	private counter = 0;
 	private disposed = false;
 	/** True while adopting persisted records: events must not be sent at
@@ -103,14 +181,27 @@ export class WatchManager {
 			cwd: options.cwd,
 			minHeartbeatMs: options.minHeartbeatMs ?? DEFAULT_MIN_HEARTBEAT_MS,
 			pollIntervalMs: options.pollIntervalMs ?? DEFAULT_POLL_MS,
+			defaultLifetimeMs: options.defaultLifetimeMs ?? DEFAULT_LIFETIME_MS,
 			maxLifetimeMs: options.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS,
 			now: options.now ?? (() => Date.now()),
 			sendParentEvent: options.sendParentEvent,
 			resumeChild: options.resumeChild,
 			isChildLive: options.isChildLive ?? (() => false),
+			procIdentity: options.procIdentity ?? realProcIdentity,
+			selfIdentity:
+				options.selfIdentity ??
+				(() => {
+					const start = readProcStat(process.pid).start;
+					return { pid: process.pid, ...(start !== undefined ? { start } : {}) };
+				}),
 			canDeliver: options.canDeliver ?? (() => true),
 		};
 		this.load();
+		// The shared tick runs for the manager's whole life (not per record): a
+		// session with zero claimed watches must still notice sibling records,
+		// their deaths (takeover), and their updates (reconcile).
+		this.tickTimer = setInterval(() => this.runTick(), this.opts.pollIntervalMs);
+		this.tickTimer.unref?.();
 	}
 
 	private now(): number {
@@ -138,20 +229,178 @@ export class WatchManager {
 				.filter((n) => Number.isFinite(n))
 				.reduce((a, b) => Math.max(a, b), 0);
 			this.counter = maxId;
+			// Store hygiene: reap stale terminal records, keeping recent history.
+			const terminal = [...this.records.values()].filter((r) => r.state !== "pending");
+			terminal.sort((a, b) => (b.firedAt ?? b.createdAt) - (a.firedAt ?? a.createdAt));
+			const cutoff = this.now() - TERMINAL_RETENTION_MS;
+			terminal.forEach((r, i) => {
+				// Never reap a record a live sibling session is still waiting on.
+				if (i >= TERMINAL_KEEP && (r.firedAt ?? r.createdAt) < cutoff && !this.claimLive(r)) {
+					this.records.delete(r.id);
+					this.reaped.add(r.id);
+				}
+			});
 		} catch {
 			/* corrupt store: start clean rather than refuse to run */
 		}
 	}
 
+	/** Synchronous store lock (mirrors pi-safetynet's json-store pattern —
+	 *  two live sessions in one cwd share this file). */
+	private withLock<T>(fn: () => T): T {
+		mkdirSync(dirname(this.opts.storePath), { recursive: true });
+		if (!existsSync(this.opts.storePath)) writeFileSync(this.opts.storePath, '{"version":1,"records":[]}\n');
+		let release: () => void = () => {};
+		for (let attempt = 1; ; attempt++) {
+			try {
+				release = lockSync(this.opts.storePath, { realpath: false });
+				break;
+			} catch (err) {
+				const code =
+					typeof err === "object" && err !== null && "code" in err
+						? String((err as { code?: unknown }).code)
+						: undefined;
+				if (code !== "ELOCKED" || attempt >= 10) throw err;
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+			}
+		}
+		try {
+			return fn();
+		} finally {
+			release();
+		}
+	}
+
+	private readFileRecords(): Map<string, WatchRecord> {
+		try {
+			const parsed = JSON.parse(readFileSync(this.opts.storePath, "utf-8")) as { records?: WatchRecord[] };
+			return new Map((parsed.records ?? []).filter((r) => r && typeof r.id === "string").map((r) => [r.id, r]));
+		} catch {
+			return new Map();
+		}
+	}
+
+	private writeFileRecords(records: WatchRecord[]): void {
+		const tmp = `${this.opts.storePath}.tmp`;
+		writeFileSync(tmp, JSON.stringify({ version: STORE_VERSION, records }, null, 2));
+		renameSync(tmp, this.opts.storePath);
+	}
+
+	private self(): { pid: number; start?: number } {
+		return this.opts.selfIdentity();
+	}
+
+	private isMine(rec: WatchRecord): boolean {
+		return rec.claim === undefined || rec.claim.pid === this.self().pid;
+	}
+
+	/** True when the claim holder process is still alive (pid + start ticks). */
+	private claimLive(rec: WatchRecord): boolean {
+		const c = rec.claim;
+		if (!c) return false;
+		if (c.pid === this.self().pid) return true;
+		const start = this.opts.procIdentity.startTicks(c.pid);
+		if (c.start !== undefined) {
+			if (start !== undefined) return start === c.start;
+			// Start ticks unreadable but the pid exists: assume the holder lives —
+			// a transient read hiccup must never cause a spurious takeover.
+			return this.opts.procIdentity.alive(c.pid);
+		}
+		return start !== undefined || this.opts.procIdentity.alive(c.pid);
+	}
+
+	/**
+	 * Take the waiter claim for this session — the concurrency core. False when
+	 * a live sibling session already holds it (its waiters, its wakes; we just
+	 * watch it in list). Stale claims (dead holder) are taken over silently.
+	 */
+	private tryClaim(rec: WatchRecord): boolean {
+		try {
+			return this.withLock(() => {
+				const fileRecs = this.readFileRecords();
+				const fileRec = fileRecs.get(rec.id);
+				const claim = fileRec?.claim;
+				if (claim && claim.pid !== this.self().pid && fileRec && this.claimLive(fileRec)) {
+					return false;
+				}
+				rec.claim = this.self();
+				fileRecs.set(rec.id, rec);
+				this.writeFileRecords([...fileRecs.values()]);
+				return true;
+			});
+		} catch {
+			rec.claim = this.self(); // lock trouble: prefer liveness over silence
+			return true;
+		}
+	}
+
+	/**
+	 * Locked read-merge-write. Writes OUR records (and unclaimed-new ones);
+	 * preserves sibling-held records verbatim — mutate only what you claim.
+	 * Terminal state always wins, so a sibling's cancel of one of ours survives.
+	 */
 	private save(): void {
 		try {
-			mkdirSync(dirname(this.opts.storePath), { recursive: true });
-			const tmp = `${this.opts.storePath}.tmp`;
-			writeFileSync(tmp, JSON.stringify({ version: STORE_VERSION, records: [...this.records.values()] }, null, 2));
-			renameSync(tmp, this.opts.storePath);
+			this.withLock(() => {
+				const fileRecs = this.readFileRecords();
+				for (const rec of this.records.values()) {
+					if (this.reaped.has(rec.id)) continue;
+					if (!this.isMine(rec)) continue; // sibling's record: keep their copy
+					const theirs = fileRecs.get(rec.id);
+					if (theirs && theirs.state !== "pending" && rec.state === "pending") continue; // terminal wins
+					fileRecs.set(rec.id, rec);
+				}
+				this.writeFileRecords([...fileRecs.values()]);
+			});
 		} catch {
 			/* persistence is best-effort; the live waiters still work */
 		}
+	}
+
+	/**
+	 * Persist a firing as a claim-checked state transition. Returns false when
+	 * another session holds the claim or has already completed the record — its
+	 * wake, not ours. This is what makes "the claim holder completes the wait"
+	 * deterministic even when a stale holder fires late.
+	 */
+	private persistFire(rec: WatchRecord): boolean {
+		try {
+			return this.withLock(() => {
+				const fileRecs = this.readFileRecords();
+				const fileRec = fileRecs.get(rec.id);
+				const foreignClaim = fileRec?.claim && fileRec.claim.pid !== this.self().pid;
+				if (fileRec && (fileRec.state !== "pending" || foreignClaim)) {
+					// Someone else owns it (or already finished it): adopt their claim
+					// so we stop ticking it, and stay silent.
+					if (fileRec.claim) rec.claim = fileRec.claim;
+					return false;
+				}
+				fileRecs.set(rec.id, rec);
+				this.writeFileRecords([...fileRecs.values()]);
+				return true;
+			});
+		} catch {
+			return true; // lock trouble: deliver rather than lose the wake
+		}
+	}
+
+	/** Write exactly one record — for deliberate mutations of a sibling's
+	 *  record (cross-session cancel/extend are legal). */
+	private persistOne(rec: WatchRecord): void {
+		try {
+			this.withLock(() => {
+				const fileRecs = this.readFileRecords();
+				fileRecs.set(rec.id, rec);
+				this.writeFileRecords([...fileRecs.values()]);
+			});
+		} catch {
+			/* best effort */
+		}
+	}
+
+	private persist(rec: WatchRecord): void {
+		if (this.isMine(rec)) this.save();
+		else this.persistOne(rec);
 	}
 
 	/**
@@ -162,8 +411,12 @@ export class WatchManager {
 	reattachPending(): void {
 		this.holdDelivery = true;
 		try {
+			const rearmed: string[] = [];
 			for (const rec of [...this.records.values()]) {
 				if (rec.state !== "pending") continue;
+				// Sibling session already holds the waiters? Hands off — its wakes,
+				// its list row for us. Dead holder's claims fall through to ours.
+				if (!this.tryClaim(rec)) continue;
 				// Jobs are in-memory: a child-owned record whose job is gone (pi died
 				// mid-watch) is inherited by the parent so the monitoring intent
 				// survives. Deliberate deaths (close/mode-kill) cancel via cancelOwnedBy
@@ -171,6 +424,13 @@ export class WatchManager {
 				if (rec.owner.kind === "child" && !this.opts.isChildLive(rec.owner.jobId)) {
 					rec.owner = { kind: "parent" };
 					rec.label = `${rec.label} (inherited from dead job)`;
+				}
+				// File triggers re-scan the whole log from scratch: anything that
+				// matched while pi was down must fire now, including matches that
+				// straddled the shutdown boundary.
+				if (rec.trigger?.kind === "file-contains") {
+					rec.logOffset = 0;
+					this.matchers.delete(rec.id);
 				}
 				const missed = this.checkTrigger(rec);
 				const expired = this.now() >= rec.expiresAt;
@@ -180,7 +440,16 @@ export class WatchManager {
 					this.fire(rec, `fired while pi was down: ${missed}${this.exitArtifactVerdict(rec)}`);
 				} else {
 					this.arm(rec);
+					rearmed.push(`${rec.id} [${rec.label}]`);
 				}
+			}
+			// The model must know its watches exist even when nothing fired:
+			// an un-announced pending watch is a job silently dropped on the floor.
+			if (rearmed.length > 0) {
+				this.queueParent(
+					`job_watch: ${rearmed.length} watch(es) re-armed after restart — still waiting: ${rearmed.join(", ")}. Nothing fired while pi was down.`,
+					false,
+				);
 			}
 		} finally {
 			this.holdDelivery = false;
@@ -192,8 +461,10 @@ export class WatchManager {
 
 	register(owner: WatchOwner, input: WatchInput): { ok: true; id: string } | { ok: false; reason: string } {
 		if (this.disposed) return { ok: false, reason: "watch manager is shut down" };
+		const pending = [...this.records.values()].filter((r) => r.state === "pending").length;
+		if (pending >= MAX_WATCHES) return { ok: false, reason: `Too many watches (max ${MAX_WATCHES}). Cancel one first.` };
 		if (!input.trigger && !input.heartbeatMs) {
-			return { ok: false, reason: "a watch needs a trigger (pid-exit, file-contains, deadline) or a heartbeat" };
+			return { ok: false, reason: "a watch needs a trigger (pid-exit, file-contains, file-quiet, deadline) or a heartbeat" };
 		}
 		if (input.heartbeatMs !== undefined && input.heartbeatMs < this.opts.minHeartbeatMs) {
 			return {
@@ -204,16 +475,28 @@ export class WatchManager {
 		const triggerCheck = this.validateTrigger(input.trigger);
 		if (triggerCheck) return { ok: false, reason: triggerCheck };
 		const at = this.now();
+		const pidStart = input.trigger?.kind === "pid-exit" ? this.opts.procIdentity.startTicks(input.trigger.pid) : undefined;
+		const bootId = input.trigger?.kind === "pid-exit" ? this.opts.procIdentity.bootId() : undefined;
+		const lifetimeMs = Math.min(
+			(input.lifetimeMinutes !== undefined ? input.lifetimeMinutes * 60_000 : this.opts.defaultLifetimeMs),
+			this.opts.maxLifetimeMs,
+		);
+		const quietSt = input.trigger?.kind === "file-quiet" ? this.fileStat(input.trigger.path) : undefined;
 		const rec: WatchRecord = {
-			id: `w-${++this.counter}`,
+			id: `w-${this.self().pid}-${++this.counter}`,
+			claim: this.self(),
 			owner,
 			cwd: this.opts.cwd,
 			label: capReportSummary(input.label ?? this.defaultLabel(input)),
 			...(input.trigger ? { trigger: input.trigger } : {}),
 			...(input.heartbeatMs !== undefined ? { heartbeatMs: input.heartbeatMs } : {}),
 			...(input.logPath ? { logPath: input.logPath } : {}),
+			...(input.survival ? { survival: input.survival } : {}),
+			...(bootId !== undefined ? { bootId } : {}),
+			...(pidStart !== undefined ? { procStart: pidStart } : {}),
+			...(quietSt ? { quietLastSize: quietSt.size, lastGrowthAt: quietSt.mtimeMs } : {}),
 			createdAt: at,
-			expiresAt: at + this.opts.maxLifetimeMs,
+			expiresAt: at + lifetimeMs,
 			state: "pending",
 			logOffset: 0,
 		};
@@ -235,8 +518,25 @@ export class WatchManager {
 		rec.verdict = "cancelled by owner";
 		rec.firedAt = this.now();
 		this.disarm(rec);
-		this.save();
+		this.persist(rec);
 		return { ok: true, reason: `cancelled ${id}` };
+	}
+
+	/** Extend a pending watch's lifetime (minutes from now); resets the
+	 *  pre-expiry warning so it can warn again next round. */
+	extend(id: string, lifetimeMinutes: number, owner?: WatchOwner): { ok: boolean; reason: string } {
+		const rec = this.records.get(id);
+		if (!rec) return { ok: false, reason: `unknown watch: ${id}` };
+		if (owner && !sameOwner(rec.owner, owner)) {
+			return { ok: false, reason: `${id} is not owned by this ${owner.kind}` };
+		}
+		if (rec.state !== "pending") return { ok: false, reason: `${id} is already ${rec.state}` };
+		if (!(lifetimeMinutes > 0)) return { ok: false, reason: "lifetimeMinutes must be > 0" };
+		const ms = Math.min(lifetimeMinutes * 60_000, this.opts.maxLifetimeMs);
+		rec.expiresAt = this.now() + ms;
+		rec.expiryWarned = false;
+		this.persist(rec);
+		return { ok: true, reason: `extended ${id} by ${Math.round(ms / 60_000)}min — now expires ${new Date(rec.expiresAt).toISOString()}` };
 	}
 
 	/** Cancel every pending watch owned by a job (job close / mode kill). */
@@ -279,16 +579,28 @@ export class WatchManager {
 		return n;
 	}
 
-	/** Last `n` lines of the watch's log (the pull half of the wake payload). */
+	/** Last `n` lines of the watch's log — SEEK-READ: only trailing bytes are
+	 *  read, so a multi-GB log costs the same as a small one. */
 	tail(id: string, n = 20): string {
 		const rec = this.records.get(id);
 		if (!rec) return `unknown watch: ${id}`;
 		if (!rec.logPath) return `${id} has no log attached; last line: ${rec.lastLine ?? "(none)"}`;
 		try {
-			const buf = readFileSync(rec.logPath, "utf-8");
-			const lines = buf.split("\n").filter((l) => l.trim().length > 0);
-			const head = `${id} tail of ${rec.logPath} (${lines.length} lines):`;
-			return [head, ...lines.slice(-n)].join("\n");
+			const size = statSync(rec.logPath).size;
+			const start = Math.max(0, size - TAIL_READ_BYTES);
+			const fd = openSync(rec.logPath, "r");
+			let text: string;
+			try {
+				const len = size - start;
+				const buf = Buffer.alloc(len);
+				readSync(fd, buf, 0, len, start);
+				text = buf.toString("utf-8");
+			} finally {
+				closeSync(fd);
+			}
+			const lines = text.split("\n").filter((l) => l.trim().length > 0);
+			const shown = size > TAIL_READ_BYTES ? `last ${TAIL_READ_BYTES / 1024}KB of ${rec.logPath}` : `${rec.logPath} (${lines.length} lines)`;
+			return [`${id} tail of ${shown}:`, ...lines.slice(-n)].join("\n");
 		} catch (err) {
 			return `${id}: cannot read ${rec.logPath}: ${err}`;
 		}
@@ -309,33 +621,87 @@ export class WatchManager {
 		}
 	}
 
+	/** Queue a non-urgent notice for the parent model (delivered at a boundary). */
+	notify(text: string): void {
+		this.queueParent(capBashTail(text), false);
+	}
+
 	/** Kill waiters only. Pending records stay in the store for the next session. */
 	dispose(): void {
 		this.disposed = true;
+		if (this.tickTimer) clearInterval(this.tickTimer);
+		this.tickTimer = undefined;
 		for (const rec of this.records.values()) this.disarm(rec);
 	}
 
 	// ─── Waiters ────────────────────────────────────────────────────────────
 
+	/** Arm the shared tick — ONE timer drives triggers, heartbeats and expiry. */
 	private arm(rec: WatchRecord): void {
-		this.disarm(rec);
-		const poll = setInterval(() => this.tick(rec), this.opts.pollIntervalMs);
-		poll.unref?.();
-		this.pollTimers.set(rec.id, poll);
-		if (rec.heartbeatMs) {
-			const beat = setInterval(() => this.beat(rec), rec.heartbeatMs);
-			beat.unref?.();
-			this.beatTimers.set(rec.id, beat);
-		}
+		this.lastBeatAt.set(rec.id, this.now());
+		if (this.tickTimer) return;
+		this.tickTimer = setInterval(() => this.runTick(), this.opts.pollIntervalMs);
+		this.tickTimer.unref?.();
 	}
 
 	private disarm(rec: WatchRecord): void {
-		const poll = this.pollTimers.get(rec.id);
-		if (poll) clearInterval(poll);
-		const beat = this.beatTimers.get(rec.id);
-		if (beat) clearInterval(beat);
-		this.pollTimers.delete(rec.id);
-		this.beatTimers.delete(rec.id);
+		this.lastBeatAt.delete(rec.id);
+		// The shared tick ignores non-pending records; it stops at dispose().
+	}
+
+	private runTick(): void {
+		if (this.disposed) return;
+		this.reconcile();
+		for (const rec of [...this.records.values()]) {
+			if (rec.state !== "pending") continue;
+			if (!this.isMine(rec)) {
+				// Sibling holds it while alive; adopt it the moment the holder dies.
+				if (!this.claimLive(rec) && this.tryClaim(rec)) {
+					this.arm(rec);
+					this.queueParent(`job_watch: took over ${rec.id} [${rec.label}] — its session ended`, false);
+				}
+				continue;
+			}
+			this.tick(rec);
+		}
+	}
+
+	/** Adopt sibling sessions' updates (their cancels/extends/fires). Cheap:
+	 *  one stat per tick; a full read only when the store actually changed. */
+	private reconcile(): void {
+		try {
+			const st = statSync(this.opts.storePath);
+			if (st.mtimeMs === this.lastReconcileMtime) return;
+			this.lastReconcileMtime = st.mtimeMs;
+		} catch {
+			return;
+		}
+		try {
+			const fileRecs = this.readFileRecords();
+			for (const [id, fileRec] of fileRecs) {
+				if (this.reaped.has(id)) continue;
+				const mem = this.records.get(id);
+				if (!mem) {
+					// Sibling's new record: show it in list; the tick loop takes over
+					// it only if the holder is dead.
+					this.records.set(id, fileRec);
+					continue;
+				}
+				if (fileRec.state !== "pending" && mem.state === "pending") {
+					// Someone finished/cancelled it: terminal wins everywhere.
+					this.disarm(mem);
+					this.records.set(id, fileRec);
+					continue;
+				}
+				if (fileRec.state === "pending" && mem.state === "pending") {
+					// Adopt their bookkeeping where it is ahead of ours.
+					if (fileRec.expiresAt > mem.expiresAt) mem.expiresAt = fileRec.expiresAt;
+					if (fileRec.expiryWarned) mem.expiryWarned = true;
+				}
+			}
+		} catch {
+			/* keep running on our in-memory view */
+		}
 	}
 
 	private tick(rec: WatchRecord): void {
@@ -348,6 +714,26 @@ export class WatchManager {
 			return;
 		}
 		if (rec.trigger?.kind !== "file-contains") this.refreshPreview(rec);
+		if (rec.heartbeatMs) {
+			const last = this.lastBeatAt.get(rec.id) ?? rec.createdAt;
+			if (this.now() - last >= rec.heartbeatMs) {
+				this.lastBeatAt.set(rec.id, this.now());
+				this.beat(rec);
+			}
+		}
+		// Lifetime: ONE pre-expiry warning offering a stay of execution, then the
+		// guillotine (a forgotten watch must end; an engaged one extends).
+		const lifetime = rec.expiresAt - rec.createdAt;
+		if (!rec.expiryWarned && this.now() >= rec.expiresAt - Math.min(5 * 60_000, lifetime * 0.2)) {
+			rec.expiryWarned = true;
+			this.save();
+			const minsLeft = Math.max(1, Math.round((rec.expiresAt - this.now()) / 60_000));
+			this.deliver(
+				rec,
+				`⚠ watch ${rec.id} [${rec.label}] expires in ~${minsLeft}min. Still needed? Extend it: job_watch extend (id=${rec.id}, lifetimeMinutes=…)`,
+				true,
+			);
+		}
 		if (this.now() >= rec.expiresAt) {
 			this.fire(rec, "watch expired (lifetime cap)");
 		}
@@ -369,12 +755,42 @@ export class WatchManager {
 		if (!t) return null;
 		switch (t.kind) {
 			case "pid-exit": {
-				if (!pidAlive(t.pid)) return `pid ${t.pid} exited`;
+				// A pid alone is not an identity: across reboots pids recycle. Match on
+				// process start ticks when the pid is alive, and on the kernel boot id
+				// when it is not, so "gone" is never mistaken for "still running".
+				const start = this.opts.procIdentity.startTicks(t.pid);
+				const alive = start !== undefined || this.opts.procIdentity.alive(t.pid);
+				if (!alive) {
+					const boot = this.opts.procIdentity.bootId();
+					if (rec.bootId !== undefined && boot !== undefined && boot !== rec.bootId) {
+						return `machine rebooted while we were away; pid ${t.pid} is gone`;
+					}
+					return `pid ${t.pid} exited`;
+				}
+				if (rec.procStart !== undefined && start !== undefined && start !== rec.procStart) {
+					return `pid ${t.pid} was reused by an unrelated process — the watched job is gone`;
+				}
 				return null;
 			}
 			case "file-contains": {
 				const hit = this.scanFile(rec, t);
 				return hit ? `pattern '${t.pattern}' found in ${t.path}` : null;
+			}
+			case "file-quiet": {
+				const st = this.fileStat(t.path);
+				if (st === undefined) return null; // log not created yet: not silence
+				if (st.size !== (rec.quietLastSize ?? st.size)) {
+					// It grew — and the growth time is the file's mtime, not "now":
+					// writes may have happened while pi was down.
+					rec.quietLastSize = st.size;
+					rec.lastGrowthAt = st.mtimeMs;
+					return null;
+				}
+				const quietSince = rec.lastGrowthAt ?? rec.createdAt;
+				const quietFor = this.now() - quietSince;
+				return quietFor >= t.seconds * 1000
+					? `no new output in ${t.path} for ${Math.round(quietFor / 1000)}s`
+					: null;
 			}
 			case "deadline": {
 				return this.now() >= t.at ? `deadline ${new Date(t.at).toISOString()} passed` : null;
@@ -386,8 +802,24 @@ export class WatchManager {
 		if (!t) return null;
 		if (t.kind === "pid-exit" && (!Number.isInteger(t.pid) || t.pid <= 0)) return `invalid pid: ${t.pid}`;
 		if (t.kind === "file-contains" && (!t.path || !t.pattern)) return "file-contains needs path and pattern";
+		if (t.kind === "file-contains") {
+			const bad = validatePatternRegex(t.pattern);
+			if (bad) return bad;
+		}
+		if (t.kind === "file-quiet" && (!t.path || !(t.seconds >= 60))) {
+			return "file-quiet needs a path and seconds >= 60";
+		}
 		if (t.kind === "deadline" && typeof t.at !== "number") return "deadline needs an epoch timestamp";
 		return null;
+	}
+
+	private fileStat(path: string): { size: number; mtimeMs: number } | undefined {
+		try {
+			const st = statSync(path);
+			return { size: st.size, mtimeMs: st.mtimeMs };
+		} catch {
+			return undefined;
+		}
 	}
 
 	/**
@@ -408,14 +840,20 @@ export class WatchManager {
 		try {
 			const fd = openSync(path, "r");
 			try {
-				if (size < rec.logOffset) rec.logOffset = 0;
+				if (size < rec.logOffset) {
+					// Truncated/rotated: start over.
+					rec.logOffset = 0;
+					this.matcherFor(rec, t)?.reset();
+				}
 				const len = size - rec.logOffset;
 				if (len > 0) {
 					const buf = Buffer.alloc(len);
 					readSync(fd, buf, 0, len, rec.logOffset);
-					const text = buf.toString("utf-8");
 					rec.logOffset = size;
-					if (t && text.includes(t.pattern)) hit = true;
+					// IncrementalMatcher holds the re-scan window AND multibyte state:
+					// matches split across reads (or chars split across polls) survive.
+					const { text, hit: h } = this.matcherFor(rec, t)!.feed(buf);
+					if (h) hit = true;
 					const lines = text.split("\n").filter((l) => l.trim().length > 0);
 					if (lines.length > 0) rec.lastLine = lines[lines.length - 1]!.slice(0, LAST_LINE_MAX);
 				}
@@ -426,6 +864,16 @@ export class WatchManager {
 			/* unreadable log: treat as no hit this tick */
 		}
 		return hit;
+	}
+
+	/** Per-record streaming matcher (pattern fixed at register time). */
+	private matcherFor(rec: WatchRecord, t?: Extract<WatchTrigger, { kind: "file-contains" }>): IncrementalMatcher {
+		let m = this.matchers.get(rec.id);
+		if (!m) {
+			m = new IncrementalMatcher(t?.pattern);
+			this.matchers.set(rec.id, m);
+		}
+		return m;
 	}
 
 	private refreshPreview(rec: WatchRecord): void {
@@ -457,7 +905,9 @@ export class WatchManager {
 		rec.firedAt = this.now();
 		rec.verdict = verdict;
 		this.disarm(rec);
-		this.save();
+		// Claim-checked transition: a stale holder stays silent when another
+		// session holds the claim or already completed the record.
+		if (!this.persistFire(rec)) return;
 		const at = new Date(rec.firedAt).toISOString();
 		const preview = rec.lastLine ? `\nlast: ${rec.lastLine}` : "";
 		// pid-exit alone cannot say clean-exit vs killed; the exit artifact can.
@@ -500,6 +950,7 @@ export class WatchManager {
 		switch (t.kind) {
 			case "pid-exit": return `pid ${t.pid} exits`;
 			case "file-contains": return `'${t.pattern}' in ${t.path}`;
+			case "file-quiet": return `silence in ${t.path} (${t.seconds}s)`;
 			case "deadline": return `deadline ${new Date(t.at).toISOString()}`;
 		}
 	}
@@ -518,6 +969,8 @@ export class WatchManager {
 			...(rec.firedAt !== undefined ? { firedAt: rec.firedAt } : {}),
 			...(rec.verdict !== undefined ? { verdict: rec.verdict } : {}),
 			...(rec.lastLine !== undefined ? { lastLine: rec.lastLine } : {}),
+			...(rec.survival !== undefined ? { survival: rec.survival } : {}),
+			...(rec.claim && rec.claim.pid !== this.self().pid ? { claimedBy: rec.claim.pid } : {}),
 		};
 	}
 }
@@ -527,7 +980,28 @@ function sameOwner(a: WatchOwner, b: WatchOwner): boolean {
 	return a.kind === "child" && b.kind === "child" && a.jobId === b.jobId;
 }
 
-/** Node-only liveness check. PID reuse in the poll window is accepted risk. */
-function pidAlive(pid: number): boolean {
-	return existsSync(`/proc/${pid}`);
+/** Kernel/process identity probes — injectable so tests can fake reboots and
+ *  pid reuse without owning the machine. */
+export interface ProcIdentity {
+	bootId(): string | undefined;
+	startTicks(pid: number): number | undefined;
+	/** Portable liveness (signal 0): covers platforms where /proc is absent and
+	 *  start ticks are unreadable — better "alive but unidentifiable" than a
+	 *  false "exited". */
+	alive(pid: number): boolean;
 }
+
+export const realProcIdentity: ProcIdentity = {
+	bootId: readBootId,
+	startTicks: (pid) => readProcStat(pid).start,
+	alive(pid) {
+		if (readProcStat(pid).start !== undefined) return true;
+		try {
+			process.kill(pid, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	},
+};
+

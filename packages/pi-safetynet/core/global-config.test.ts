@@ -300,7 +300,7 @@ describe("global-config", () => {
       mkdirSync(dir, { recursive: true });
       writeFileSync(getGlobalConfigPath(), JSON.stringify({
         rules: [{ permission: "bash", pattern: "npm test", action: "allow", modes: ["build"] }],
-        subagents: ["subagent_explore"],
+        toggleModeKey: "ctrl+q",
       }), "utf-8");
 
       saveDefaultProfile("plan");
@@ -308,7 +308,7 @@ describe("global-config", () => {
       const parsed = JSON.parse(readFileSync(getGlobalConfigPath(), "utf-8"));
       assert.equal(parsed.defaultProfile, "plan");
       assert.deepEqual(parsed.rules, [{ permission: "bash", pattern: "npm test", action: "allow", modes: ["build"] }]);
-      assert.deepEqual(parsed.subagents, ["subagent_explore"]);
+      assert.equal(parsed.toggleModeKey, "ctrl+q");
     });
   });
 });

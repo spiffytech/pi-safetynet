@@ -8,7 +8,7 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model, Usage } from "@earendil-works/pi-ai";
-import { createSubagentSession, type ChildServicesFactory, type ReportingOptions, type WatchOptions } from "pi-submarine-core";
+import { createSubagentSession, type ChildServicesFactory, type JobWatchApi, type ReportingOptions } from "pi-submarine-core";
 import type { JobControls } from "./subagent-jobs.ts";
 
 export interface PersistentSubagentOptions {
@@ -25,8 +25,8 @@ export interface PersistentSubagentOptions {
 	 *  standalone policy). Required for build task types. */
 	services?: ChildServicesFactory | undefined;
 	reporting?: ReportingOptions;
-	/** Watch registration surface exposed to the child (`watch_for`). */
-	watches?: WatchOptions | undefined;
+	/** Watch registration surface exposed to the child (`job_watch` — same tool the parent gets). */
+	watches?: JobWatchApi | undefined;
 	/** Invoked once the child session exists and controls are live. */
 	onControls(controls: JobControls): void;
 	/** Latest bash call output (command + tail). Replaces, never accumulates. */

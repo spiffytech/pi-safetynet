@@ -15,7 +15,8 @@ import { Type } from "typebox";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ChildServices, ChildServicesFactory, ChildVerdict } from "./host-api.ts";
 import type { ReportingOptions } from "./reporting.ts";
-import type { WatchOptions, WatchTrigger } from "./watch.ts";
+import type { JobWatchApi } from "./watch.ts";
+import { JOB_WATCH_TOOL_NAME, registerJobWatchTool } from "./job-watch-tool.ts";
 import { capReportBody, capReportSummary } from "./report.ts";
 import { isSensitivePath as defaultIsSensitivePath, normalizeToolPath } from "./paths.ts";
 
@@ -25,8 +26,6 @@ const REPORT_REMINDER_CUSTOM_TYPE = "safetynet:report-reminder";
 
 /** Name of the child→parent report tool. */
 export const REPORT_TOOL_NAME = "report_to_parent";
-/** Name of the child watch-registration tool (fires resume the child). */
-export const WATCH_TOOL_NAME = "watch_for";
 /** Name of the reviewer's model-authored research tool (QuickJS sandboxed). */
 export const RESEARCH_TOOL_NAME = "codemode_research";
 
@@ -37,7 +36,7 @@ const BUILD_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls",
 export function activeToolNames(taskType: "explore" | "build", reporting: boolean, watches = false): string[] {
 	const base = taskType === "explore" ? EXPLORE_TOOL_NAMES : BUILD_TOOL_NAMES;
 	const withReporting = reporting ? [...base, REPORT_TOOL_NAME] : [...base];
-	return watches ? [...withReporting, WATCH_TOOL_NAME] : withReporting;
+	return watches ? [...withReporting, JOB_WATCH_TOOL_NAME] : withReporting;
 }
 
 export interface ChildExtensionOpts {
@@ -61,10 +60,10 @@ export interface ChildExtensionOpts {
 	 *  and the one-shot settle guard are registered. Internal subagents
 	 *  (reviewer/judge) omit this. */
 	reporting?: ReportingOptions;
-	/** Watch registration wiring. When present, the `watch_for` tool is
-	 *  registered: the child can wait on pid/file/deadline/heartbeat events
-	 *  WITHOUT sleeping — a fired watch resumes the child. */
-	watches?: WatchOptions;
+	/** Watch registration wiring. When present, the `job_watch` tool is
+	 *  registered — the SAME surface the parent gets: the child can run/adopt/
+	 *  watch background work without sleeping; a fired watch resumes the child. */
+	watches?: JobWatchApi;
 }
 
 /** Build the child extension factory for one subagent session. */
@@ -108,12 +107,16 @@ export function createChildExtension(opts: ChildExtensionOpts): (pi: ExtensionAP
 				if (!allowedTools.has(event.toolName)) {
 					return { block: true, reason: `Tool '${event.toolName}' is not available in explore mode` };
 				}
-				const rawPath = (event.input as Record<string, unknown>).path;
-				if (typeof rawPath === "string" && isSensitive(normalizeToolPath(rawPath))) {
-					return {
-						block: true,
-						reason: "Sensitive file (e.g., .env, .ssh, credentials): contains secrets, access blocked. Don't read or write it. If you need a secret value, ask the user or use an already-set environment variable instead.",
-					};
+				// Every path-bearing input matters: `job_watch`'s logPath is read and
+				// quoted into events just like a `path` — the guard covers both.
+				for (const key of ["path", "logPath"]) {
+					const rawPath = (event.input as Record<string, unknown>)[key];
+					if (typeof rawPath === "string" && isSensitive(normalizeToolPath(rawPath))) {
+						return {
+							block: true,
+							reason: "Sensitive file (e.g., .env, .ssh, credentials): contains secrets, access blocked. Don't read or write it. If you need a secret value, ask the user or use an already-set environment variable instead.",
+						};
+					}
 				}
 				return undefined;
 			});
@@ -222,95 +225,13 @@ function registerCollaboration(pi: ExtensionAPI, reporting: ReportingOptions | u
 // ─── Watches (wait without sleeping) ──────────────────────────────────
 
 /**
- * Register the `watch_for` tool: the child registers a watch (pid-exit,
- * file-contains, deadline, heartbeat) and ends its turn normally. A fired
- * watch RESUMES the child with an event message — no `sleep` anywhere, no
- * turn held open while waiting.
+ * Register the shared `job_watch` tool for the child — the identical surface
+ * the parent gets (see job-watch-tool.ts). Only the injected api differs:
+ * child calls are scoped to this job and a fired watch resumes the child.
  */
-function registerWatches(pi: ExtensionAPI, watches: WatchOptions | undefined): void {
+function registerWatches(pi: ExtensionAPI, watches: JobWatchApi | undefined): void {
 	if (!watches) return;
-
-	pi.registerTool({
-		name: WATCH_TOOL_NAME,
-		label: "Watch For",
-		description: "Wait for an event without sleeping: register a watch (pid-exit, file-contains, deadline, or heartbeat cadence), end your turn, and you will be resumed when it fires.",
-		promptSnippet: "Wait for an event (no sleeping)",
-		promptGuidelines: [
-			"Use watch_for instead of long sleeps when waiting on a job or file. Register, then finish your turn — you are resumed automatically when the watch fires.",
-			"Combine a heartbeat with a terminal trigger for periodic progress checks; each heartbeat resumes you with the latest log line.",
-		],
-		parameters: Type.Object({
-			action: Type.Optional(Type.String({ description: "register | cancel | list (default register)" })),
-			pid: Type.Optional(Type.Number({ description: "Trigger: fire when this process exits" })),
-			path: Type.Optional(Type.String({ description: "Trigger: file to scan for pattern" })),
-			pattern: Type.Optional(Type.String({ description: "Trigger: fire when the file contains this string" })),
-			deadlineSeconds: Type.Optional(Type.Number({ description: "Trigger: fire this many seconds from now" })),
-			heartbeatSeconds: Type.Optional(Type.Number({ description: "Resume every N seconds with the latest log line (optional cadence)" })),
-			logPath: Type.Optional(Type.String({ description: "Progress log whose last line rides every event" })),
-			label: Type.Optional(Type.String({ description: "Human label for the watch" })),
-			id: Type.Optional(Type.String({ description: "Watch id, for cancel" })),
-		}),
-		async execute(_toolCallId, params): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown> }> {
-			const action = (params.action ?? "register").toLowerCase();
-			if (action === "list") {
-				const views = watches.list();
-				return {
-					content: [{ type: "text", text: views.length ? JSON.stringify(views, null, 2) : "No watches." }],
-					details: { watches: views },
-				};
-			}
-			if (action === "cancel") {
-				if (!params.id) {
-					return { content: [{ type: "text", text: "cancel needs a watch id" }], details: { error: "missing id" } };
-				}
-				const res = watches.cancel(params.id);
-				return { content: [{ type: "text", text: res.reason }], details: { cancelled: res.ok } };
-			}
-			// register
-			const trigger = buildTrigger(params);
-			if ("error" in trigger) {
-				return { content: [{ type: "text", text: trigger.error }], details: { error: trigger.error } };
-			}
-			const res = watches.register({
-				...(trigger.trigger ? { trigger: trigger.trigger } : {}),
-				...(params.logPath ? { logPath: params.logPath } : {}),
-				...(params.heartbeatSeconds !== undefined ? { heartbeatMs: params.heartbeatSeconds * 1000 } : {}),
-				...(params.label ? { label: params.label } : {}),
-			});
-			if (!res.ok) return { content: [{ type: "text", text: res.reason }], details: { error: res.reason } };
-			return {
-				content: [{
-					type: "text",
-					text: `Watch ${res.id} registered. Finish your turn now — you will be resumed when it fires${params.heartbeatSeconds !== undefined ? " (or on each heartbeat)" : ""}.`,
-				}],
-				details: { watchId: res.id },
-			};
-		},
-	});
-}
-
-/** Build a WatchTrigger from flat tool params. */
-export function buildTrigger(params: {
-	pid?: number;
-	path?: string;
-	pattern?: string;
-	deadlineSeconds?: number;
-	heartbeatSeconds?: number;
-}): { trigger?: WatchTrigger; error?: never } | { trigger?: never; error: string } {
-	const has = params.pid !== undefined || (params.path !== undefined && params.pattern !== undefined) || params.deadlineSeconds !== undefined;
-	if (!has && params.heartbeatSeconds === undefined) {
-		return { error: "watch_for needs a trigger (pid | path+pattern | deadlineSeconds) or heartbeatSeconds" };
-	}
-	if (params.pid !== undefined) return { trigger: { kind: "pid-exit", pid: params.pid } };
-	if (params.path !== undefined || params.pattern !== undefined) {
-		if (!params.path || !params.pattern) return { error: "file trigger needs both path and pattern" };
-		return { trigger: { kind: "file-contains", path: params.path, pattern: params.pattern } };
-	}
-	if (params.deadlineSeconds !== undefined) {
-		if (!(params.deadlineSeconds > 0)) return { error: "deadlineSeconds must be > 0" };
-		return { trigger: { kind: "deadline", at: Date.now() + params.deadlineSeconds * 1000 } };
-	}
-	return {};
+	registerJobWatchTool(pi, watches);
 }
 
 // ─── Context messages ─────────────────────────────────────────────────────

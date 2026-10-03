@@ -16,22 +16,18 @@ import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-c
 import { getMarkdownTheme, type ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { readFileSync, mkdirSync, openSync, closeSync } from "node:fs";
-import { spawn } from "node:child_process";
-import { dirname, join } from "node:path";
 import {
 	accumulateUsage,
 	capReportMessage,
 	isSensitivePath,
 	normalizeToolPath,
+	registerJobWatchTool,
 	requestSafetynetHost,
 	zeroUsage,
 	type ChildServicesFactory,
+	type JobWatchApi,
 	type SafetynetHost,
-	type WatchInput,
 	type WatchOwner,
-	type WatchView,
-	buildTrigger,
 } from "pi-submarine-core";
 import {
 	SubagentJobManager,
@@ -41,7 +37,8 @@ import {
 	type SubagentJob,
 } from "./src/subagent-jobs.ts";
 import { startPersistentSubagent } from "./src/subagent-runner.ts";
-import { WatchManager, watchStorePath, WATCH_EXIT_MARKER } from "./src/watches.ts";
+import { WatchManager, watchStorePath } from "./src/watches.ts";
+import { createJobWatchApi, type CommandVerdict } from "./src/job-watch-api.ts";
 import { consumeSubagentFailure, clearSubagentFailures, recordSubagentFailure } from "./src/failure.ts";
 import { standaloneChildServices } from "./src/standalone-services.ts";
 
@@ -60,18 +57,6 @@ const currentModeAliases = (): Record<string, string> => host?.getModeAliases() 
 const trustExternalActive = (): boolean => host?.trustExternalPaths() ?? false;
 const childServices: ChildServicesFactory = (...args) =>
 	(host ? host.childServices(...args) : standaloneChildServices(...args));
-
-/** Legacy `~/.config/pi-safetynet/config.json` `"subagents": []` shutoff,
- *  honored for one release with a deprecation notice. */
-export function legacySubagentsDisabled(): boolean {
-	try {
-		const raw = readFileSync(join(process.env.HOME ?? "/home", ".config/pi-safetynet/config.json"), "utf-8");
-		const parsed = JSON.parse(raw) as { subagents?: unknown };
-		return Array.isArray(parsed.subagents) && parsed.subagents.length === 0;
-	} catch {
-		return false;
-	}
-}
 
 // ─── State ────────────────────────────────────────────────────────────────
 
@@ -105,6 +90,34 @@ function refreshJobsStatus(): void {
 	} catch {
 		/* footer may be torn down */
 	}
+}
+
+/** Gate a `job_watch run` command through the normal bash ruleset — parent and
+ *  children alike, one gate, one code path. */
+async function approveWatchCommand(command: string, ctx: ExtensionContext): Promise<CommandVerdict> {
+	const svc = childServices({
+		taskType: "build",
+		cwd: ctx.cwd,
+		parentCtx: uiCtx ?? ctx,
+		trustExternalPaths: trustExternalActive(),
+		paradigm: currentParadigm(),
+		modeAliases: currentModeAliases(),
+		onPermissionDenied: () => {},
+		sendToChild: () => {},
+	});
+	return svc.gate({ toolName: "bash", input: { command }, ctx });
+}
+
+/** A scoped job_watch api: the same implementation as the parent's, owned by
+ *  one subagent job (its list/cancel are scoped; fires resume it). */
+function makeScopedWatchApi(owner: WatchOwner, notifyParent: (text: string) => void): JobWatchApi {
+	return createJobWatchApi({
+		manager: () => watchManager,
+		owner,
+		global: false,
+		approveCommand: approveWatchCommand,
+		notifyParent,
+	});
 }
 
 // ─── Renderers ────────────────────────────────────────────────────────────
@@ -212,7 +225,12 @@ function registerSubagentTools(pi: ExtensionAPI) {
 		if (s.usage.totalTokens) parts.push(`tokens:${s.usage.totalTokens}`);
 		if (s.state === "idle") {
 			if (s.waiting) {
-				parts.push("waiting on watch");
+				const watchIds = watchManager
+					?.list({ kind: "child", jobId: s.id })
+					.filter((w) => w.state === "pending")
+					.map((w) => w.id)
+					.join(", ");
+				parts.push(`waiting on watch${watchIds ? ` ${watchIds}` : ""}`);
 			} else if (s.idleReason?.kind === "timeout") {
 				const secs = Math.round((s.idleReason.durationMs ?? 0) / 1000);
 				parts.push(`aborted at ${secs}s while running: ${s.idleReason.command ?? "(unknown)"}`);
@@ -237,6 +255,7 @@ function registerSubagentTools(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use subagent_run for self-contained work you can delegate. It returns immediately; do not expect the answer in the tool result.",
 			"Keep the conversation going while it runs; you will be woken when it reports, finishes, or needs attention.",
+			"Parent decision: am I delegating work to another session (subagent_run), or just unblocking my own (job_watch)? Subagents may do long-running work — but never spawn one whose only job is to wait or poll: job_watch watches a job and wakes you at zero token cost.",
 		],
 		parameters: Type.Object({
 			prompt: Type.String({ description: "Complete, self-sufficient task for the subagent" }),
@@ -276,15 +295,10 @@ function registerSubagentTools(pi: ExtensionAPI) {
 					send: (r) => manager.submitReport(job.id, r),
 					segment: job.segment,
 				},
-				watches: {
-					register: (input: WatchInput) =>
-						watchManager?.register({ kind: "child", jobId: job.id }, input) ??
-						{ ok: false as const, reason: "watch manager unavailable" },
-					cancel: (id: string) =>
-						watchManager?.cancel(id, { kind: "child", jobId: job.id }) ??
-						{ ok: false, reason: "watch manager unavailable" },
-					list: (): WatchView[] => watchManager?.list({ kind: "child", jobId: job.id }) ?? [],
-				},
+				watches: makeScopedWatchApi(
+					{ kind: "child", jobId: job.id },
+					(text) => manager.submitReport(job.id, { summary: text }),
+				),
 				isClosed: () => job.closed,
 				onControls: (controls) => {
 					manager.setControls(job.id, controls);
@@ -419,141 +433,19 @@ function registerSubagentTools(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
-		name: "subagent_watch",
-		label: "Watch",
-		description: [
-			"Wait for work to finish WITHOUT babysitting: register a watch (pid-exit, file-contains, deadline, optional heartbeat) and you are woken when it fires.",
-			"`run` launches a command detached from pi (it survives pi exiting) and watches it in one step.",
-			"Actions: run | register | list | tail | cancel.",
-		].join(" "),
-		promptSnippet: "Watch a job/file and get woken on events",
-		promptGuidelines: [
-			"Prefer subagent_watch over sleeping or polling loops for anything that takes minutes to hours: register, keep working, and you will be woken.",
-			"Use `run` for jobs that must survive pi restarting; use `register` for jobs already running.",
-		],
-		parameters: Type.Object({
-			action: Type.Optional(Type.String({ description: "run | register | list | tail | cancel (default register)" })),
-			command: Type.Optional(Type.String({ description: "run: shell command to launch detached from pi" })),
-			logPath: Type.Optional(Type.String({ description: "run: log file receiving stdout/stderr; also the preview source" })),
-			pid: Type.Optional(Type.Number({ description: "Trigger: fire when this process exits" })),
-			path: Type.Optional(Type.String({ description: "Trigger: file to scan for pattern" })),
-			pattern: Type.Optional(Type.String({ description: "Trigger: fire when the file contains this string" })),
-			deadlineSeconds: Type.Optional(Type.Number({ description: "Trigger: fire this many seconds from now" })),
-			heartbeatSeconds: Type.Optional(Type.Number({ description: "Wake every N seconds with the latest log line" })),
-			label: Type.Optional(Type.String({ description: "Human label for the watch" })),
-			id: Type.Optional(Type.String({ description: "Watch id, for tail/cancel" })),
-			tailLines: Type.Optional(Type.Number({ description: "tail: lines to return (default 20)" })),
-		}),
-		executionMode: "sequential",
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (!watchManager) return { content: [{ type: "text", text: "Watch manager unavailable." }], details: {} };
-			const manager = watchManager;
-			const action = (params.action ?? "register").toLowerCase();
-			if (action === "list") {
-				const views = manager.list();
-				return {
-					content: [{ type: "text", text: views.length ? formatWatchViews(views) : "No watches." }],
-					details: { watches: views },
-				};
-			}
-			if (action === "tail") {
-				if (!params.id) return { content: [{ type: "text", text: "tail needs a watch id" }], details: { error: "missing id" } };
-				const text = manager.tail(params.id, params.tailLines && params.tailLines > 0 ? params.tailLines : 20);
-				return { content: [{ type: "text", text }], details: { watchId: params.id } };
-			}
-			if (action === "cancel") {
-				if (!params.id) return { content: [{ type: "text", text: "cancel needs a watch id" }], details: { error: "missing id" } };
-				const res = manager.cancel(params.id);
-				return { content: [{ type: "text", text: res.reason }], details: { cancelled: res.ok } };
-			}
-
-			let input: WatchInput = {};
-			if (action === "run") {
-				if (!params.command) return { content: [{ type: "text", text: "run needs a command" }], details: { error: "missing command" } };
-				// Route the command through the same permission gate a bash call gets,
-				// so `watch run` can never smuggle an unchecked command past the ruleset.
-				const svc = childServices({
-					taskType: "build",
-					cwd: ctx.cwd,
-					parentCtx: ctx,
-					trustExternalPaths: trustExternalActive(),
-					paradigm: currentParadigm(),
-					modeAliases: currentModeAliases(),
-					onPermissionDenied: () => {},
-					sendToChild: () => {},
-				});
-				const verdict = await svc.gate({ toolName: "bash", input: { command: params.command }, ctx });
-				if (verdict?.block) {
-					return { content: [{ type: "text", text: `Denied: ${verdict.reason}` }], details: { denied: true } };
-				}
-				const logPath = params.logPath ?? `${ctx.cwd}/.pi-submarine-watch-${Date.now()}.log`;
-				mkdirSync(dirname(logPath), { recursive: true });
-				const fd = openSync(logPath, "a");
-				// HUP-proof + own session: pi dying must not take the job with it. The
-				// exit marker gives restarts a clean "finished vs killed" verdict.
-				const wrapper = `trap '' HUP\n${params.command}\necho "${WATCH_EXIT_MARKER}$?"`;
-				const child = spawn("bash", ["-c", wrapper], {
-					detached: true,
-					stdio: ["ignore", fd, fd],
-					cwd: ctx.cwd,
-				});
-				child.unref();
-				closeSync(fd);
-				if (!child.pid) {
-					return { content: [{ type: "text", text: "Failed to spawn the command." }], details: { error: "spawn failed" } };
-				}
-				input = {
-					trigger: { kind: "pid-exit", pid: child.pid },
-					logPath,
-					...(params.heartbeatSeconds !== undefined ? { heartbeatMs: params.heartbeatSeconds * 1000 } : {}),
-					...(params.label ? { label: params.label } : { label: `run: ${params.command.slice(0, 60)}` }),
-				};
-				const res = manager.register({ kind: "parent" }, input);
-				if (!res.ok) return { content: [{ type: "text", text: res.reason }], details: { error: res.reason } };
-				return {
-					content: [{ type: "text", text: `Spawned pid ${child.pid}, logging to ${logPath}. Watch ${res.id} registered; you will be woken on exit${params.heartbeatSeconds ? " and heartbeats" : ""}.` }],
-					details: { watchId: res.id, pid: child.pid, logPath },
-				};
-			}
-			// register (passive)
-			const trigger = buildTrigger(params);
-			if ("error" in trigger) {
-				return { content: [{ type: "text", text: trigger.error }], details: { error: trigger.error } };
-			}
-			const res = manager.register({ kind: "parent" }, {
-				...(trigger.trigger ? { trigger: trigger.trigger } : {}),
-				...(params.logPath ? { logPath: params.logPath } : {}),
-				...(params.heartbeatSeconds !== undefined ? { heartbeatMs: params.heartbeatSeconds * 1000 } : {}),
-				...(params.label ? { label: params.label } : {}),
-			});
-			if (!res.ok) return { content: [{ type: "text", text: res.reason }], details: { error: res.reason } };
-			return {
-				content: [{ type: "text", text: `Watch ${res.id} registered.` }],
-				details: { watchId: res.id },
-			};
-		},
-	});
+	// The one job_watch surface — identical for the parent and for subagent
+	// children (scoped via makeScopedWatchApi in subagent_run). See
+	// job-watch-tool.ts for the shared schema, actions, and messages.
+	registerJobWatchTool(pi, createJobWatchApi({
+		manager: () => watchManager,
+		owner: { kind: "parent" },
+		global: true,
+		approveCommand: approveWatchCommand,
+		notifyParent: (text) => watchManager?.notify(text),
+	}));
 }
-
-/** One line per watch for `subagent_watch list`. */
-function formatWatchViews(views: WatchView[]): string {
-	return views
-		.map((v) => {
-			const parts = [`${v.id} [${v.state}]`, v.label];
-			if (v.state === "pending" && v.heartbeatMs) parts.push(`heartbeat ${Math.round(v.heartbeatMs / 1000)}s`);
-			if (v.verdict) parts.push(`verdict: ${v.verdict}`);
-			if (v.lastLine) parts.push(`last: ${v.lastLine}`);
-			return parts.join(" | ");
-		})
-		.join("\n");
-}
-
-// ─── Entry ────────────────────────────────────────────────────────────────
 
 export default function piSubmarineExtension(pi: ExtensionAPI): void {
-	const legacyOff = legacySubagentsDisabled();
-
 	// Track the live model for tool-call rendering (pi's own events — no host needed).
 	pi.on("model_select", async (event) => {
 		currentModelDisplay = `${event.model.provider}/${event.model.id}`;
@@ -568,18 +460,6 @@ export default function piSubmarineExtension(pi: ExtensionAPI): void {
 	requestSafetynetHost(pi.events, (h) => {
 		host = h;
 	});
-
-	if (legacyOff) {
-		pi.on("session_start", async (_event, ctx) => {
-			if (ctx.hasUI) {
-				ctx.ui.notify(
-					'`"subagents": []` in ~/.config/pi-safetynet/config.json is deprecated and will be removed; use `pi config` to disable pi-submarine (or remove the package) instead. Subagents stay disabled for now.',
-					"warning",
-				);
-			}
-		});
-		return;
-	}
 
 	jobManager = new SubagentJobManager({
 		sendToParent: (text, opts) => {

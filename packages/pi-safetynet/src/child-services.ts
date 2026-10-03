@@ -14,7 +14,7 @@ import { Type } from "typebox";
 import {
 	RESEARCH_TOOL_NAME,
 	REPORT_TOOL_NAME,
-	WATCH_TOOL_NAME,
+	JOB_WATCH_TOOL_NAME,
 	type ChildServicesFactory,
 	type ChildServicesDeps,
 	type ChildGateRequest,
@@ -88,13 +88,28 @@ export function createSafetynetChildServices(storage: PermissionStorage): ChildS
 			const input = req.input;
 			const ctx = req.ctx;
 
-			// The child extension's own collaboration tools. These have no file or
-			// bash side effects for the gate to mediate: report_to_parent speaks to
-			// the parent, watch_for registers a read-only wait, codemode_research runs
-			// in the QuickJS sandbox that enforces sensitive-path refusal itself.
-			// Falling through to the fail-closed branch below silently killed child
-			// reporting for months — every report_to_parent call was blocked.
-			if (req.toolName === REPORT_TOOL_NAME || req.toolName === WATCH_TOOL_NAME || req.toolName === RESEARCH_TOOL_NAME) {
+			// The child extension's own collaboration tools. report_to_parent speaks
+			// to the parent; codemode_research runs in the QuickJS sandbox that
+			// enforces sensitive-path refusal itself. job_watch's file/quiet watches
+			// READ and quote lines into events, so its path inputs go through the
+			// same read gate as the read tool (its `run` action self-gates its command
+			// through this same gate). Falling through to the fail-closed branch below
+			// silently killed child reporting for months — every report_to_parent call
+			// was blocked.
+			if (req.toolName === REPORT_TOOL_NAME || req.toolName === RESEARCH_TOOL_NAME) {
+				return undefined;
+			}
+			if (req.toolName === JOB_WATCH_TOOL_NAME) {
+				for (const key of ["path", "logPath"]) {
+					const rawPath = input[key];
+					if (typeof rawPath === "string") {
+						const filePath = normalizeToolPath(rawPath);
+						const check = checkFileTarget(filePath, "read", profile, storage.getAllRules(), cwd, trustExternalPaths, modeAliases);
+						if (check.action === "deny") {
+							return { block: true, reason: check.reason ?? `Denied: ${filePath} is not readable here` };
+						}
+					}
+				}
 				return undefined;
 			}
 

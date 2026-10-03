@@ -154,6 +154,14 @@
 
     { "permission": "read", "pattern": "/tmp/pi-clipboard-*", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "read", "pattern": "**", "action": "allow", "modes": ["build", "plan"] },
-    { "permission": "edit", "pattern": "**", "action": "ask", "modes": ["build", "plan"] }
+    { "permission": "edit", "pattern": "**", "action": "ask", "modes": ["build", "plan"] },
+
+    { "permission": "bash", "pattern": "tool:subagent_run", "action": "allow", "modes": ["build", "plan", "ro", "rw"] },
+    { "permission": "bash", "pattern": "tool:subagent_status", "action": "allow", "modes": ["build", "plan", "ro", "rw"] },
+    { "permission": "bash", "pattern": "tool:subagent_send", "action": "allow", "modes": ["build", "plan", "ro", "rw"] },
+    { "permission": "bash", "pattern": "tool:subagent_close", "action": "allow", "modes": ["build", "plan", "ro", "rw"] },
+    { "permission": "bash", "pattern": "tool:subagent_bash_output", "action": "allow", "modes": ["build", "plan", "ro", "rw"] },
+    { "permission": "bash", "pattern": "tool:report_to_parent", "action": "allow", "modes": ["build", "plan", "ro", "rw"] },
+    { "permission": "bash", "pattern": "tool:job_watch", "action": "allow", "modes": ["build", "plan", "ro", "rw"] }
   ]
 }

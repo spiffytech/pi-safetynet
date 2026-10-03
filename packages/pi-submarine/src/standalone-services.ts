@@ -11,7 +11,7 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ChildGateRequest, ChildServices, ChildServicesFactory, ChildVerdict } from "pi-submarine-core";
-import { REPORT_TOOL_NAME, WATCH_TOOL_NAME } from "pi-submarine-core";
+import { JOB_WATCH_TOOL_NAME, REPORT_TOOL_NAME } from "pi-submarine-core";
 import { isSensitivePath, normalizeToolPath } from "pi-submarine-core";
 
 const SENSITIVE_REASON =
@@ -35,10 +35,21 @@ export const standaloneChildServices: ChildServicesFactory = (deps) => {
 
 	const gate = async (req: ChildGateRequest): Promise<ChildVerdict> => {
 		const input = req.input;
-		// Child collaboration tools carry no side effects to mediate (report talks
-		// to the parent, watch_for registers a read-only wait). Failing closed on
-		// them would silently kill child reporting.
-		if (req.toolName === REPORT_TOOL_NAME || req.toolName === WATCH_TOOL_NAME) {
+		// Child collaboration tools: report_to_parent speaks to the parent, and
+		// job_watch's file/quiet watches only READ — but their path inputs still
+		// carry exfiltration risk (a watched sensitive file quotes lines into
+		// events), so those go through the same sensitive-file guard as `read`.
+		// job_watch `run` routes its command through this same gate internally.
+		if (req.toolName === REPORT_TOOL_NAME) {
+			return undefined;
+		}
+		if (req.toolName === JOB_WATCH_TOOL_NAME) {
+			for (const key of ["path", "logPath"]) {
+				const rawPath = input[key];
+				if (typeof rawPath === "string" && isSensitivePath(normalizeToolPath(rawPath))) {
+					return { block: true, reason: SENSITIVE_REASON };
+				}
+			}
 			return undefined;
 		}
 		if (READ_TOOLS.has(req.toolName) || req.toolName === "grep" || req.toolName === "find" || req.toolName === "ls") {

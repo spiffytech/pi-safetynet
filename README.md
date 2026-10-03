@@ -316,23 +316,15 @@ You can define rules that apply across all projects via the global config file a
     { "permission": "bash", "pattern": "npm test", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "cargo test", "action": "allow", "modes": ["build", "plan"] },
     { "permission": "bash", "pattern": "npm publish *", "action": "deny", "modes": ["build", "plan"] }
-  ],
-  "subagents": ["subagent_run"]
+  ]
 }
 ```
-
-#### `subagents` (deprecated)
-
-Superseded by packaging: the background subagent tools now live in their own pi package,
-**pi-submarine**. To turn them off, disable the pi-submarine entry in `pi config` (each package entry
-is its own row) or don't install it. `"subagents": []` in this config file is still honored for one
-release — tools suppressed, one deprecation notice at startup — and the key will be removed after.
 
 ##### Async two-way subagents (pi-submarine)
 
 `subagent_run` returns a job id immediately and keeps the subagent alive across turns. The parent keeps talking while it works and is woken when the child reports or goes idle. Companion tools: `subagent_send` (message the child), `subagent_status` (bounded state view — never the child's transcript; also returns any reports not yet delivered, so findings are recoverable if a push is missed), `subagent_bash_output` (tail the child's current/most-recent bash command), `subagent_close` (end it). Children may call `report_to_parent` to send findings upward; `urgent: true` wakes the parent immediately. Children are killed on the next user message sent under a different mode. Up to 8 live jobs; the footer shows how many are running/idle. A child idle with pending watches reads `[waiting]` and does not wake the parent; a segment cut by the 300s cap reads `aborted at Ns while running: <cmd>` (never plain idle) and carries a report.
 
-**Watches — waiting is infrastructure, not a sleeping agent** (pi-submarine). `subagent_watch` (parent) and `watch_for` (child) register a watch on pid-exit, a file pattern, a deadline, and/or a heartbeat cadence (default 30min, floor 60s, 24h lifetime). Nothing sleeps: kernel-level polling fires an event that wakes the parent or resumes the owning child (a child with pending watches parks quietly instead of burning turns). Each event carries the last log line and a timestamp; full output is a pull away (`subagent_watch tail`, or just read the log). `subagent_watch run` also launches the command itself detached (`setsid`-style, HUP-proof) so it survives pi exiting; records persist to a JSON store and are re-adopted at the next session start, where events that fired while pi was down surface immediately with a verdict (`finished` vs `killed`, via the captured exit artifact). Watches die with their owner (job close, mode kill); restart-orphaned child watches are inherited by the parent.
+**Watches — waiting is infrastructure, not a sleeping agent** (pi-submarine). `job_watch` is ONE tool for the parent and for subagents alike (identical surface: `run | attach | register | list | tail | extend | cancel`) that registers a watch on pid-exit, a file pattern, a silence floor (`quietForSeconds`, for jobs expected to chatter), a deadline, and/or a heartbeat cadence (default 30min, floor 60s). Every watch has a lifetime (`lifetimeMinutes`, default 30): one warning near expiry offers `extend`, and the ceiling is 30 days — a guillotine for forgotten watches, not for engaged ones. Nothing sleeps: kernel-level polling fires an event that wakes the parent or resumes the owning subagent (a child with pending watches parks quietly instead of burning turns). Each event carries the last log line and a timestamp; full output is a pull away (`job_watch tail`, or just read the log). `job_watch run` launches the command itself detached (`setsid`-style, HUP-proof) so it survives pi exiting; `job_watch attach` adopts a process the model backgrounded itself — verifying teardown survival (and warning, with a remedy, when the process is still in pi's kill scope) and adopting its log when capturable. Records persist to a JSON store and are re-adopted at the next session start, where events that fired while pi was down surface immediately with a verdict (`finished` vs `killed`, via the captured exit artifact). Watches die with their owner (job close, mode kill); restart-orphaned child watches are inherited by the parent. Knobs (tests/fast modes): `PI_SUBMARINE_WATCH_MIN_HEARTBEAT_MS`, `PI_SUBMARINE_WATCH_POLL_MS`, `PI_SUBMARINE_WATCH_MAX_LIFETIME_MS`, `PI_SUBMARINE_SEGMENT_TIMEOUT_MS`.
 
 #### `keybindings`
 

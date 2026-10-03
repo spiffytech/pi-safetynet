@@ -13,6 +13,7 @@ export * from "./paths.ts";
 export * from "./report.ts";
 export * from "./reporting.ts";
 export * from "./watch.ts";
+export * from "./job-watch-tool.ts";
 export * from "./usage.ts";
 export * from "./child-ext.ts";
 export * from "./session.ts";

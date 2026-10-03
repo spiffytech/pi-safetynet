@@ -1,6 +1,6 @@
 {
 	"name": "pi-safetynet",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"type": "module",
 	"description": "Permission enforcement layer for pi: rulesets, prompts, modes, auto-approve reviewer",
 	"main": "./index.ts",

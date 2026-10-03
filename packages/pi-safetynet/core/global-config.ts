@@ -18,7 +18,6 @@ export function getGlobalConfigPath(): string {
 
 interface GlobalConfig {
   rules?: Ruleset;
-  subagents?: string[] | null;
   defaultProfile?: ProfileName;
   paradigm?: Paradigm | string;
   trustExternalPaths?: boolean;
@@ -137,13 +136,6 @@ export function saveDefaultProfile(profile: ProfileName): void {
   updateConfig((config) => {
     config.defaultProfile = profile;
   });
-}
-
-/** Which subagent tools to enable. Defaults to all if key is omitted or null. Empty array disables all. */
-export function loadSubagentsConfig(): string[] {
-  const config = loadConfig();
-  if (config.subagents == null) return ["subagent_run"];
-  return config.subagents;
 }
 
 /** Append rules to the global config and save. Returns the full updated ruleset. */

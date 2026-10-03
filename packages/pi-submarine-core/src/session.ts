@@ -20,8 +20,9 @@ import {
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import type { ChildServicesFactory } from "./host-api.ts";
 import type { ReportingOptions } from "./reporting.ts";
-import type { WatchOptions } from "./watch.ts";
-import { createChildExtension, REPORT_TOOL_NAME, RESEARCH_TOOL_NAME, WATCH_TOOL_NAME } from "./child-ext.ts";
+import type { JobWatchApi } from "./watch.ts";
+import { createChildExtension, REPORT_TOOL_NAME, RESEARCH_TOOL_NAME } from "./child-ext.ts";
+import { JOB_WATCH_TOOL_NAME } from "./job-watch-tool.ts";
 import { toDisplayPath } from "./paths.ts";
 import { accumulateUsage, snapshotUsage, zeroUsage } from "./usage.ts";
 
@@ -45,8 +46,8 @@ export interface SubagentSessionConfig {
 	/** Persistent jobs keep pi's compaction on; the one-shot reviewer turns it off. */
 	compactionEnabled?: boolean;
 	onPermissionDenied: () => void;
-	/** Watch registration wiring for the child (`watch_for`). */
-	watches?: WatchOptions | undefined;
+	/** Watch registration wiring for the child (`job_watch`, same surface as the parent). */
+	watches?: JobWatchApi | undefined;
 	/** Permission enforcement for the child. Required for build sessions. */
 	services?: ChildServicesFactory | undefined;
 	trustExternalPaths?: boolean | undefined;
@@ -70,7 +71,7 @@ export function subagentToolNames(taskType: "explore" | "build", reporting: bool
 		? ["read", "grep", "find", "ls", RESEARCH_TOOL_NAME]
 		: ["read", "bash", "edit", "write", "grep", "find", "ls", RESEARCH_TOOL_NAME];
 	const withReporting = reporting ? [...base, REPORT_TOOL_NAME] : base;
-	return watches ? [...withReporting, WATCH_TOOL_NAME] : withReporting;
+	return watches ? [...withReporting, JOB_WATCH_TOOL_NAME] : withReporting;
 }
 
 /**
