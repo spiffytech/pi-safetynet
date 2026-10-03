@@ -11,6 +11,7 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ChildGateRequest, ChildServices, ChildServicesFactory, ChildVerdict } from "pi-submarine-core";
+import { REPORT_TOOL_NAME, WATCH_TOOL_NAME } from "pi-submarine-core";
 import { isSensitivePath, normalizeToolPath } from "pi-submarine-core";
 
 const SENSITIVE_REASON =
@@ -34,6 +35,12 @@ export const standaloneChildServices: ChildServicesFactory = (deps) => {
 
 	const gate = async (req: ChildGateRequest): Promise<ChildVerdict> => {
 		const input = req.input;
+		// Child collaboration tools carry no side effects to mediate (report talks
+		// to the parent, watch_for registers a read-only wait). Failing closed on
+		// them would silently kill child reporting.
+		if (req.toolName === REPORT_TOOL_NAME || req.toolName === WATCH_TOOL_NAME) {
+			return undefined;
+		}
 		if (READ_TOOLS.has(req.toolName) || req.toolName === "grep" || req.toolName === "find" || req.toolName === "ls") {
 			const rawPath = typeof input.path === "string" ? input.path : undefined;
 			if (rawPath && isSensitivePath(normalizeToolPath(rawPath))) {

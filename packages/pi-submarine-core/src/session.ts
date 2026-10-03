@@ -20,7 +20,8 @@ import {
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import type { ChildServicesFactory } from "./host-api.ts";
 import type { ReportingOptions } from "./reporting.ts";
-import { createChildExtension, REPORT_TOOL_NAME, RESEARCH_TOOL_NAME } from "./child-ext.ts";
+import type { WatchOptions } from "./watch.ts";
+import { createChildExtension, REPORT_TOOL_NAME, RESEARCH_TOOL_NAME, WATCH_TOOL_NAME } from "./child-ext.ts";
 import { toDisplayPath } from "./paths.ts";
 import { accumulateUsage, snapshotUsage, zeroUsage } from "./usage.ts";
 
@@ -44,6 +45,8 @@ export interface SubagentSessionConfig {
 	/** Persistent jobs keep pi's compaction on; the one-shot reviewer turns it off. */
 	compactionEnabled?: boolean;
 	onPermissionDenied: () => void;
+	/** Watch registration wiring for the child (`watch_for`). */
+	watches?: WatchOptions | undefined;
 	/** Permission enforcement for the child. Required for build sessions. */
 	services?: ChildServicesFactory | undefined;
 	trustExternalPaths?: boolean | undefined;
@@ -62,11 +65,12 @@ export type CreateSubagentSessionResult =
  * must be listed here or they are filtered out of the registry and cannot be
  * activated later via setActiveTools. Exported for regression testing.
  */
-export function subagentToolNames(taskType: "explore" | "build", reporting: boolean): string[] {
+export function subagentToolNames(taskType: "explore" | "build", reporting: boolean, watches = false): string[] {
 	const base = taskType === "explore"
 		? ["read", "grep", "find", "ls", RESEARCH_TOOL_NAME]
 		: ["read", "bash", "edit", "write", "grep", "find", "ls", RESEARCH_TOOL_NAME];
-	return reporting ? [...base, REPORT_TOOL_NAME] : base;
+	const withReporting = reporting ? [...base, REPORT_TOOL_NAME] : base;
+	return watches ? [...withReporting, WATCH_TOOL_NAME] : withReporting;
 }
 
 /**
@@ -89,7 +93,7 @@ export async function createSubagentSession(cfg: SubagentSessionConfig): Promise
 	const settingsManager = SettingsManager.create(cfg.cwd, agentDir);
 	if (!cfg.compactionEnabled) settingsManager.setCompactionEnabled(false);
 
-	const tools = subagentToolNames(cfg.taskType, cfg.reporting !== undefined);
+	const tools = subagentToolNames(cfg.taskType, cfg.reporting !== undefined, cfg.watches !== undefined);
 
 	let sessionRef: { abort: () => void } | null = null;
 	const loader = new DefaultResourceLoader({
@@ -114,6 +118,7 @@ export async function createSubagentSession(cfg: SubagentSessionConfig): Promise
 				},
 				omitContextMessage: cfg.systemPrompt !== undefined,
 				...(cfg.reporting ? { reporting: cfg.reporting } : {}),
+				...(cfg.watches ? { watches: cfg.watches } : {}),
 			}),
 			cfg.systemPrompt ? createSystemPromptExtension(cfg.systemPrompt) : null,
 		].filter(Boolean) as any[],

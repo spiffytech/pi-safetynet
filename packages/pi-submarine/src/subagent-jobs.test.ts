@@ -245,3 +245,84 @@ describe("SubagentJobManager", () => {
 		assert.equal(job.id, "sub-2");
 	});
 });
+
+describe("job lifecycle with watches", () => {
+	function makeWatchedManager(opts: { pending?: () => boolean } = {}) {
+		const sent: Array<{ text: string; urgent: boolean }> = [];
+		const closed: string[] = [];
+		const manager = new SubagentJobManager({
+			sendToParent: (text, o) => sent.push({ text, urgent: o.urgent }),
+			isCompacting: () => false,
+			hasPendingWatches: () => opts.pending?.() ?? false,
+			onJobClosed: (jobId) => closed.push(jobId),
+		});
+		return { manager, sent, closed };
+	}
+
+	it("surfaces a segment-timeout abort distinctly and rides a report", () => {
+		const { manager, sent } = makeWatchedManager();
+		const job = manager.create({ prompt: "t", cwd: "/tmp", spawnMode: "rw" });
+		manager.setControls(job.id, { prompt: async () => {}, steer: async () => {}, abort: () => {} });
+		manager.idle(job.id, { kind: "timeout", command: "sleep 30", durationMs: 5000 });
+		const status = manager.status(job.id)!;
+		assert.equal(status.state, "idle");
+		assert.equal(status.idleReason?.kind, "timeout");
+		assert.equal(status.idleReason?.command, "sleep 30");
+		assert.equal(sent.length, 1, "the abort rides a report immediately");
+		assert.match(sent[0]!.text, /Segment aborted after 5s while running: sleep 30/);
+		assert.match(sent[0]!.text, /did not finish/);
+	});
+
+	it("a natural end is labeled completed, not timeout", () => {
+		const { manager, sent } = makeWatchedManager();
+		const job = manager.create({ prompt: "t", cwd: "/tmp", spawnMode: "rw" });
+		manager.setControls(job.id, { prompt: async () => {}, steer: async () => {}, abort: () => {} });
+		manager.idle(job.id, { kind: "completed" });
+		assert.equal(manager.status(job.id)!.idleReason?.kind, "completed");
+		assert.equal(sent.length, 0, "no abort report for a natural end");
+	});
+
+	it("suppresses the parent wake while a child waits on its watches", async () => {
+		let pending = true;
+		const { manager, sent } = makeWatchedManager({ pending: () => pending });
+		const job = manager.create({ prompt: "t", cwd: "/tmp", spawnMode: "rw" });
+		manager.setControls(job.id, { prompt: async () => {}, steer: async () => {}, abort: () => {} });
+		manager.idle(job.id);
+		assert.equal(manager.status(job.id)!.waiting, true);
+		await delay(REPORT_DEBOUNCE_MS + 120);
+		assert.equal(sent.length, 0, "waiting child produces no wake");
+		pending = false;
+		manager.idle(job.id);
+		assert.equal(manager.status(job.id)!.waiting, false);
+		await delay(REPORT_DEBOUNCE_MS + 120);
+		assert.equal(sent.length, 1, "finished-with-no-watches wakes the parent");
+		assert.match(sent[0]!.text, /Background subagents changed state/);
+	});
+
+	it("escalates watch-driven resumes that never report, and resets on report", () => {
+		const { manager, sent } = makeWatchedManager();
+		const job = manager.create({ prompt: "t", cwd: "/tmp", spawnMode: "rw" });
+		manager.setControls(job.id, { prompt: async () => {}, steer: async () => {}, abort: () => {} });
+		manager.noteWatchResume(job.id);
+		manager.noteWatchResume(job.id);
+		assert.equal(sent.length, 0, "no escalation below the threshold");
+		manager.noteWatchResume(job.id);
+		assert.equal(sent.length, 1, "escalation at 3 resumes without a report");
+		assert.equal(sent[0]!.urgent, true);
+		assert.match(sent[0]!.text, /resumed 3x without reporting/);
+		manager.noteWatchResume(job.id);
+		assert.equal(sent.length, 1, "escalation fires once");
+		manager.submitReport(job.id, { summary: "progress" });
+		manager.noteWatchResume(job.id);
+		manager.noteWatchResume(job.id);
+		manager.noteWatchResume(job.id);
+		assert.equal(sent.filter((s) => /resumed 3x/.test(s.text)).length, 2, "counters reset after a real report");
+	});
+
+	it("closing a job reports the closure and cancels its watches", () => {
+		const { manager, closed } = makeWatchedManager();
+		const job = manager.create({ prompt: "t", cwd: "/tmp", spawnMode: "rw" });
+		manager.close(job.id);
+		assert.deepEqual(closed, [job.id]);
+	});
+});

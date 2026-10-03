@@ -11,7 +11,15 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { RESEARCH_TOOL_NAME, type ChildServicesFactory, type ChildServicesDeps, type ChildGateRequest, type ChildVerdict } from "pi-submarine-core";
+import {
+	RESEARCH_TOOL_NAME,
+	REPORT_TOOL_NAME,
+	WATCH_TOOL_NAME,
+	type ChildServicesFactory,
+	type ChildServicesDeps,
+	type ChildGateRequest,
+	type ChildVerdict,
+} from "pi-submarine-core";
 import { checkBashPermission, checkFileTarget, type PermissionCheck } from "../core/check.ts";
 import { resolveDeny, resolvePermission as resolvePermissionShared, type HazardousDenyState } from "../pipeline.ts";
 import { runResearchScript } from "../core/review-research.ts";
@@ -80,6 +88,16 @@ export function createSafetynetChildServices(storage: PermissionStorage): ChildS
 			const input = req.input;
 			const ctx = req.ctx;
 
+			// The child extension's own collaboration tools. These have no file or
+			// bash side effects for the gate to mediate: report_to_parent speaks to
+			// the parent, watch_for registers a read-only wait, codemode_research runs
+			// in the QuickJS sandbox that enforces sensitive-path refusal itself.
+			// Falling through to the fail-closed branch below silently killed child
+			// reporting for months — every report_to_parent call was blocked.
+			if (req.toolName === REPORT_TOOL_NAME || req.toolName === WATCH_TOOL_NAME || req.toolName === RESEARCH_TOOL_NAME) {
+				return undefined;
+			}
+
 			if (req.toolName === "bash") {
 				const command = input.command as string;
 				const rules = storage.getAllRules();
@@ -140,8 +158,8 @@ export function createSafetynetChildServices(storage: PermissionStorage): ChildS
 				});
 			}
 
-			// Unknown tools are filtered by the child's registry allowlist upstream;
-			// refuse anything that still reaches the gate (fail closed).
+			// Tools outside the explicit list above are refused (fail closed). The
+			// child's registry allowlist keeps most out; this is the backstop.
 			return { block: true, reason: `Tool '${req.toolName}' is not covered by the subagent permission gate` };
 		}
 

@@ -8,7 +8,7 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model, Usage } from "@earendil-works/pi-ai";
-import { createSubagentSession, type ChildServicesFactory, type ReportingOptions } from "pi-submarine-core";
+import { createSubagentSession, type ChildServicesFactory, type ReportingOptions, type WatchOptions } from "pi-submarine-core";
 import type { JobControls } from "./subagent-jobs.ts";
 
 export interface PersistentSubagentOptions {
@@ -25,12 +25,16 @@ export interface PersistentSubagentOptions {
 	 *  standalone policy). Required for build task types. */
 	services?: ChildServicesFactory | undefined;
 	reporting?: ReportingOptions;
+	/** Watch registration surface exposed to the child (`watch_for`). */
+	watches?: WatchOptions | undefined;
 	/** Invoked once the child session exists and controls are live. */
 	onControls(controls: JobControls): void;
 	/** Latest bash call output (command + tail). Replaces, never accumulates. */
 	onBashOutput(command: string, tail: string): void;
 	onUsage(usage: Usage): void;
-	onIdle(): void;
+	/** Segment ended: "completed" naturally, or "timeout" when the segment cap
+	 *  aborted it mid-command (surfaced to the parent, never as plain idle). */
+	onIdle(reason: { kind: "completed" | "timeout"; command?: string; durationMs?: number }): void;
 	onError(error: string): void;
 	/** Polled around session creation so a job closed mid-start never orphans a session. */
 	isClosed?(): boolean;
@@ -43,6 +47,13 @@ export interface PersistentSubagentHandle {
 }
 
 const SEGMENT_TIMEOUT_MS = 300_000;
+
+/** Test/live-fast override for the segment cap (PI_SUBMARINE_SEGMENT_TIMEOUT_MS, ms). */
+function segmentTimeoutDefault(): number {
+	const raw = process.env.PI_SUBMARINE_SEGMENT_TIMEOUT_MS;
+	const n = raw ? Number(raw) : NaN;
+	return Number.isFinite(n) && n > 0 ? n : SEGMENT_TIMEOUT_MS;
+}
 
 function formatBashTail(partial: unknown): string {
 	const content = (partial as { content?: Array<{ type: string; text?: string }> } | undefined)?.content;
@@ -90,6 +101,7 @@ export function startPersistentSubagent(opts: PersistentSubagentOptions): Persis
 				...(opts.modeAliases !== undefined ? { modeAliases: opts.modeAliases } : {}),
 				...(opts.services !== undefined ? { services: opts.services } : {}),
 				...(opts.reporting !== undefined ? { reporting: opts.reporting } : {}),
+				...(opts.watches !== undefined ? { watches: opts.watches } : {}),
 				compactionEnabled: true,
 				onPermissionDenied: () => {
 					permissionDenied = true;
@@ -131,16 +143,25 @@ export function startPersistentSubagent(opts: PersistentSubagentOptions): Persis
 					if (disposed || permissionDenied) return;
 					const isSteer = segmentsInFlight > 0;
 					segmentsInFlight++;
+					const timeoutMs = opts.segmentTimeoutMs ?? segmentTimeoutDefault();
+					let abortedByTimeout = false;
 					const timeoutId = setTimeout(() => {
+						abortedByTimeout = true;
 						try {
 							child.abort();
 						} catch {
 							/* best effort */
 						}
-					}, opts.segmentTimeoutMs ?? SEGMENT_TIMEOUT_MS);
+					}, timeoutMs);
 					try {
 						await child.prompt(text, { streamingBehavior: "steer" });
-						if (!isSteer) opts.onIdle();
+						if (!isSteer) {
+							opts.onIdle(
+								abortedByTimeout
+									? { kind: "timeout", command: currentBashCommand, durationMs: timeoutMs }
+									: { kind: "completed" },
+							);
+						}
 					} catch (err) {
 						opts.onError(String(err));
 					} finally {

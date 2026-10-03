@@ -14,6 +14,21 @@ import { capBashTail, capReportMessage, capReportSummary } from "pi-submarine-co
 
 export type JobState = "starting" | "running" | "idle" | "closed" | "failed";
 
+/** Why a segment ended. A timeout abort is surfaced distinctly from a
+ *  natural end so the parent is never told "idle" about killed work. */
+export interface IdleReason {
+	kind: "completed" | "timeout";
+	/** Set by the job manager when the segment settles. */
+	at?: number;
+	/** The in-flight bash command when a timeout abort cut the segment. */
+	command?: string;
+	/** Cap that fired, for the status label. */
+	durationMs?: number;
+}
+
+/** Resumes without a child report before the parent is warned. */
+export const WATCH_RESUME_ESCALATION = 3;
+
 /** Per-segment reporting bookkeeping shared with the child extension. */
 export interface SegmentState {
 	reported: boolean;
@@ -49,6 +64,9 @@ export interface SubagentJob {
 	state: JobState;
 	startedAt: number;
 	idleAt?: number;
+	idleReason?: IdleReason;
+	/** Idle with pending owned watches: the child is waiting, not done. */
+	waiting?: boolean;
 	controls?: JobControls;
 	segment: SegmentState;
 	reports: JobReport[];
@@ -56,6 +74,9 @@ export interface SubagentJob {
 	usage: Usage;
 	usageDelivered: Usage;
 	closed: boolean;
+	/** Child resumes driven by watch events since the last child report. */
+	resumesSinceReport: number;
+	resumeEscalated: boolean;
 }
 
 /** Bounded projection handed to the parent. Never transcript or raw results. */
@@ -66,6 +87,8 @@ export interface JobStatus {
 	spawnMode: string;
 	startedAt: number;
 	idleAt?: number;
+	idleReason?: IdleReason;
+	waiting: boolean;
 	reported: boolean;
 	usage: Usage;
 	lastReport?: { summary: string; body: string; at: number };
@@ -89,6 +112,10 @@ export interface JobManagerDeps {
 	/** Whether the parent is mid-turn. Wakes/reports are deferred to the turn boundary
 	 *  so a message can never be queued behind a turn and outlive its job. */
 	isParentBusy?(): boolean;
+	/** Whether a job has pending owned watches (a waiting child is not done). */
+	hasPendingWatches?(jobId: string): boolean;
+	/** A job ended for good: cancel its owned watches (watches die with owners). */
+	onJobClosed?(jobId: string): void;
 	now?(): number;
 }
 
@@ -146,6 +173,8 @@ export class SubagentJobManager {
 			usage: zeroUsage(),
 			usageDelivered: zeroUsage(),
 			closed: false,
+			resumesSinceReport: 0,
+			resumeEscalated: false,
 		};
 		this.jobs.set(id, job);
 		return job;
@@ -179,14 +208,46 @@ export class SubagentJobManager {
 		accumulateUsage(job.usage, usage);
 	}
 
-	/** A work segment finished normally. */
-	idle(id: string): void {
+	/** A work segment finished normally or was aborted by the segment timeout. */
+	idle(id: string, reason?: IdleReason): void {
 		const job = this.jobs.get(id);
 		if (!job || job.closed || job.state === "closed" || job.state === "failed") return;
 		job.state = "idle";
 		job.idleAt = this.now();
+		job.idleReason = { at: job.idleAt, ...(reason ?? { kind: "completed" }) };
+		// A killed segment rides a report so the parent can never mistake an abort
+		// for a natural end: the label is pullable via status and push-delivered.
+		if (job.idleReason.kind === "timeout") {
+			const secs = Math.round((job.idleReason.durationMs ?? 0) / 1000);
+			const cmd = job.idleReason.command ?? "(unknown command)";
+			this.submitReport(id, {
+				summary: `Segment aborted after ${secs}s while running: ${cmd}`,
+				body: "The segment timeout cut this turn mid-command. The command did not finish; re-run or re-steer if it matters.",
+			});
+		}
+		// A child waiting on its own watches is not done: no parent wake until the
+		// watches fire (or the child finishes with none pending). Ambiguity wakes.
+		job.waiting = this.deps.hasPendingWatches?.(id) ?? false;
 		this.flushPendingReports();
-		this.scheduleWake(id);
+		if (!job.waiting) this.scheduleWake(id);
+	}
+
+	/** A watch event resumed this child. Counts toward escalation when reports
+	 *  never follow; resets whenever the child actually reports. */
+	noteWatchResume(id: string): void {
+		const job = this.jobs.get(id);
+		if (!job || job.closed) return;
+		job.resumesSinceReport++;
+		if (job.resumesSinceReport >= WATCH_RESUME_ESCALATION && !job.resumeEscalated) {
+			this.submitReport(id, {
+				summary: `Watch-driven: child resumed ${job.resumesSinceReport}x without reporting`,
+				body: "A subagent is being resumed by watch events and keeps ending its turn without a report_to_parent. It may be stuck in a wait-check loop.",
+				urgent: true,
+			});
+			// Set after submitReport: the report resets per-report bookkeeping, and
+			// this latch must survive its own escalation until a REAL child report.
+			job.resumeEscalated = true;
+		}
 	}
 
 	/** A work segment or session creation failed. */
@@ -204,6 +265,8 @@ export class SubagentJobManager {
 		const job = this.jobs.get(id);
 		if (!job || job.closed) return;
 		job.segment.reported = true;
+		job.resumesSinceReport = 0;
+		job.resumeEscalated = false;
 		const report: JobReport = {
 			id: `${id}-r${job.reports.length + 1}`,
 			summary: input.summary,
@@ -359,6 +422,7 @@ export class SubagentJobManager {
 			/* best effort */
 		}
 		this.jobs.delete(id);
+		this.deps.onJobClosed?.(id);
 		return this.deliverUsage(job);
 	}
 
@@ -393,7 +457,9 @@ export class SubagentJobManager {
 			spawnMode: job.spawnMode,
 			startedAt: job.startedAt,
 			usage: job.usage,
+			waiting: job.waiting ?? false,
 			...(job.idleAt !== undefined ? { idleAt: job.idleAt } : {}),
+			...(job.idleReason !== undefined ? { idleReason: job.idleReason } : {}),
 			reported: job.segment.reported,
 			...(last ? { lastReport: { summary: last.summary, body: last.body, at: last.at } } : {}),
 			...(job.bash ? { bash: { command: job.bash.command, tail: job.bash.tail } } : {}),
