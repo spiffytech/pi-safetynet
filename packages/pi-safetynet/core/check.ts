@@ -144,9 +144,14 @@ function isExplicitRule(matchedRule: Rule | undefined): boolean {
  *  only set env vars in the current shell context and don't execute any
  *  external command.  Command substitutions within the value (e.g.
  *  `A=$(cmd)`) are extracted as separate subcommands by the parser and
- *  checked independently. */
-function isBareAssignment(subcommand: string): boolean {
-  const tokens = subcommand.trim().split(/\s+/);
+ *  checked independently.
+ *
+ *  Classification uses the parser's canonical token list, NOT a whitespace
+ *  split of the raw subcommand.  An assignment value may legitimately contain
+ *  spaces (`A=$(cmd arg)`, `A="a b"`), and the parser already keeps each
+ *  value as one token; re-splitting the raw text made those wrappers look
+ *  like unknown commands and forced an approval. */
+function isBareAssignment(tokens: string[]): boolean {
   return tokens.length > 0
     && tokens.every((t) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
 }
@@ -460,7 +465,7 @@ export function checkBashPermission(
     // `F=.env; cat $F` gets caught — and are always safe themselves.
     // Command substitutions in values are extracted as separate subcommands.
     const bareUpdatesState =
-      isBareAssignment(sub) ||
+      isBareAssignment(tokens) ||
       (tokens[0] === "export" && dwords.slice(1).every((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w)));
     if (bareUpdatesState) {
       for (const w of dwords) recordAssignment(w, vars, absCwd);

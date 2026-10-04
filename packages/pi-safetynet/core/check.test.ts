@@ -293,6 +293,82 @@ describe("checkBashPermission bare variable assignment auto-approve", () => {
     );
     assert.equal(result.action, "allow");
   });
+
+  it("auto-approves assignment values containing whitespace or substitutions", () => {
+    // Regression: isBareAssignment used to whitespace-split the raw subcommand,
+    // so any value with spaces (`A=$(cmd arg)`, `A="a b"`) failed the NAME= test
+    // and the wrapper escalated as an unknown command.
+    for (const cmd of [
+      'A=$(echo hi)',
+      'A=$(echo hi) B=$(date)',
+      'A="hello world"',
+      "A='hello world'",
+      'A=`echo hi`',
+      'A=<(echo hi)',
+    ]) {
+      const result = checkBashPermission(cmd, "build", RULES, CWD);
+      assert.equal(result.action, "allow", `${cmd} must be allowed`);
+      assert.deepEqual(result.unapproved, [], `${cmd} must not escalate`);
+    }
+  });
+
+  it("still asks when the assignment prefixes a real command", () => {
+    assert.equal(checkBashPermission("A=1 some_unknown_cmd", "build", RULES, CWD).action, "ask");
+  });
+
+  it("still denies a hazardous file reached through a command substitution", () => {
+    const result = checkBashPermission("A=$(cat .env)", "build", RULES, CWD);
+    assert.equal(result.action, "deny");
+    assert.equal(result.hazardous, true);
+  });
+
+  it("still denies a catastrophic command inside a process substitution", () => {
+    assert.equal(checkBashPermission("A=<(rm -rf /)", "build", RULES, CWD).action, "deny");
+  });
+
+  it("keeps a substitution-derived variable unresolvable for later operands", () => {
+    assert.equal(checkBashPermission("A=$(echo hi); cat $A", "build", RULES, CWD).action, "ask");
+  });
+});
+
+describe("date allowlist", () => {
+  it("allows the ISO-8601 output form without opening the clock-setting door", () => {
+    assert.equal(checkBashPermission("date -Is", "build", RULES, CWD).action, "allow");
+    assert.equal(checkBashPermission('date -s "2020-01-01"', "build", RULES, CWD).action, "ask");
+    assert.equal(checkBashPermission('date -Is -s "2020-01-01"', "build", RULES, CWD).action, "ask");
+  });
+});
+
+describe("regression: d11 nilfs monitoring command", () => {
+  // The full command that exposed both fixes: six VAR=$(...) wrappers and a
+  // trailing `date -Is`. It must auto-approve end to end.
+  const COMMAND = `L=/home/spiffytech/drive-inventory/d11-nilfs-copy2.log
+line1=$(tr '\\r' '\\n' < "$L" | grep -E '^[0-9,]+ +[0-9]+%' | tail -1)
+b1=$(echo "$line1" | awk '{gsub(/,/,"",$1); print $1}')
+t1=$(echo "$line1" | awk '{print $2}' | tr -d '%')
+sleep 60
+line2=$(tr '\\r' '\\n' < "$L" | grep -E '^[0-9,]+ +[0-9]+%' | tail -1)
+b2=$(echo "$line2" | awk '{gsub(/,/,"",$1); print $1}')
+t2=$(echo "$line2" | awk '{print $2}' | tr -d '%')
+echo "sample1: \${b1} bytes  \${t1}%"
+echo "sample2: \${b2} bytes  \${t2}%"
+echo "current rate: $(echo "scale=1; ($b2-$b1)/60/1048576" | bc) MB/s"
+echo
+echo "elapsed(transfer phase): $(tr '\\r' '\\n' < "$L" | grep -E '^[0-9,]+ +[0-9]+%' | tail -1 | awk '{print $4}')"
+echo
+echo "=== infer total from byte-% (rounded, so give a band) ==="
+for pct in $((t2)) $((t2+1)); do
+  echo "  if % is exactly $pct: total = $(echo "scale=0; $b2*100/$pct/1073741824" | bc) GiB"
+done
+echo
+df -h /run/media/spiffytech/d5e9c8b4-5629-4070-9462-f3b7b98322ee | tail -1
+date -Is`;
+
+  it("auto-approves end to end", () => {
+    const result = checkBashPermission(COMMAND, "build", RULES, CWD);
+    assert.equal(result.action, "allow");
+    assert.deepEqual(result.unapproved, []);
+  });
 });
 
 describe("read-only tools (grep/find/ls) use read permission, not bash parsing", () => {
