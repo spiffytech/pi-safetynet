@@ -8,12 +8,12 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("buildTrigger", () => {
 	it("builds pid, file, and deadline triggers", () => {
-		assert.deepEqual(buildTrigger({ pid: 42 }), { trigger: { kind: "pid-exit", pid: 42 } });
+		assert.deepEqual(buildTrigger({ pid: 42 }), { triggers: [{ kind: "pid-exit", pid: 42 }] });
 		assert.deepEqual(buildTrigger({ path: "/tmp/x", pattern: "DONE" }), {
-			trigger: { kind: "file-contains", path: "/tmp/x", pattern: "DONE" },
+			triggers: [{ kind: "file-contains", path: "/tmp/x", pattern: "DONE" }],
 		});
 		const deadline = buildTrigger({ deadlineSeconds: 5 });
-		assert.equal((deadline.trigger as { kind: string }).kind, "deadline");
+		assert.equal((deadline.triggers?.[0] as { kind: string }).kind, "deadline");
 	});
 
 	it("rejects triggerless watches and half-specified file triggers", () => {
@@ -24,23 +24,23 @@ describe("buildTrigger", () => {
 
 	it("path + quietForSeconds is a silence watch (the live-extras regression)", () => {
 		const res = buildTrigger({ path: "/tmp/x", quietForSeconds: 60 });
-		assert.deepEqual(res.trigger, { kind: "file-quiet", path: "/tmp/x", seconds: 60 });
+		assert.deepEqual(res.triggers, [{ kind: "file-quiet", path: "/tmp/x", seconds: 60 }]);
 		const fast = buildTrigger({ path: "/tmp/x", quietForSeconds: 5 });
 		assert.match((fast as { error: string }).error, /quietForSeconds must be >= 60/);
 	});
 
 	it("pid alongside a condition is a death guard — nothing is silently dropped", () => {
 		const a = buildTrigger({ pid: 42, path: "/tmp/x", pattern: "DONE" });
-		assert.deepEqual(a.trigger, { kind: "file-contains", path: "/tmp/x", pattern: "DONE" });
+		assert.deepEqual(a.triggers, [{ kind: "file-contains", path: "/tmp/x", pattern: "DONE" }]);
 		assert.equal(a.guardPid, 42);
 		const b = buildTrigger({ pid: 42, path: "/tmp/x", quietForSeconds: 60 });
-		assert.equal(b.trigger?.kind, "file-quiet");
+		assert.equal(b.triggers?.[0]?.kind, "file-quiet");
 		assert.equal(b.guardPid, 42);
 		const c = buildTrigger({ pid: 42, deadlineSeconds: 5 });
-		assert.equal(c.trigger?.kind, "deadline");
+		assert.equal(c.triggers?.[0]?.kind, "deadline");
 		assert.equal(c.guardPid, 42);
 		const d = buildTrigger({ pid: 42 }); // alone: the condition IS the exit
-		assert.deepEqual(d.trigger, { kind: "pid-exit", pid: 42 });
+		assert.deepEqual(d.triggers, [{ kind: "pid-exit", pid: 42 }]);
 		assert.equal(d.guardPid, undefined);
 	});
 
@@ -48,7 +48,7 @@ describe("buildTrigger", () => {
 		const bad = buildTrigger({ path: "/tmp/x", pattern: "(a+)+b" });
 		assert.match((bad as { error: string }).error, /backtracking/);
 		const good = buildTrigger({ path: "/tmp/x", pattern: "^ok now$" });
-		assert.ok("trigger" in (good as object) && (good as { trigger?: unknown }).trigger);
+		assert.ok("triggers" in (good as object) && (good as { triggers?: unknown[] }).triggers?.length);
 	});
 
 	it("allows heartbeat-only watches", () => {
@@ -153,6 +153,41 @@ describe("registerJobWatchTool (one surface, two scopes)", () => {
 		assert.equal(calls[3]!.method, "register");
 	});
 
+	it("the probe repro: register passes EVERY condition and lifetime through", async () => {
+		const { api, calls } = fakeApi();
+		const pi = fakePi();
+		registerJobWatchTool(pi as any, api);
+		const res = await pi.tool.execute(
+			"t1",
+			{
+				action: "register",
+				path: "/tmp/x",
+				pattern: "^ROUND DONE$",
+				quietForSeconds: 90,
+				deadlineSeconds: 180,
+				lifetimeMinutes: 5,
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		const arg = calls.find((c) => c.method === "register")?.arg as {
+			trigger?: unknown;
+			triggers?: unknown[];
+			lifetimeMinutes?: number;
+		};
+		assert.equal(arg.lifetimeMinutes, 5, "lifetime must reach the engine");
+		const kinds = (arg.triggers ?? (arg.trigger ? [arg.trigger] : [])).map((t) => (t as { kind: string }).kind);
+		assert.deepEqual(kinds.sort(), ["deadline", "file-contains", "file-quiet"], "all three conditions, none silently dropped");
+		// The echo must be a complete record: the probe read ground truth from a
+		// partial echo and concluded lifetime was dropped. Never again.
+		const echo = (res.content[0] as { text: string }).text;
+		assert.match(echo, /regex \/\^ROUND DONE\$\/m/);
+		assert.match(echo, /no output in \/tmp\/x for 90s/);
+		assert.match(echo, /deadline /);
+		assert.match(echo, /lifetime 5min/);
+	});
+
 	it("pushes kill-scope notices to the deciding model (notifyParent)", async () => {
 		const pi = fakePi();
 		const { api, notices } = fakeApi({
@@ -185,12 +220,23 @@ describe("registerJobWatchTool (one surface, two scopes)", () => {
 		assert.deepEqual(seen, ["register"], "only the api call happened");
 	});
 
-	it("survival verdicts ride list output", () => {
+	it("survival verdicts ride list output, along with the trigger set", () => {
 		const text = formatWatchViews([
-			{ id: "w-1", state: "pending", label: "x", survival: "⚠ in pi's session — will be killed when pi exits or aborts", heartbeatMs: 30_000 },
+			{
+				id: "w-1",
+				state: "pending",
+				label: "x",
+				survival: "warn",
+				heartbeatMs: 30_000,
+				triggers: [
+					{ kind: "file-contains", path: "/tmp/x", pattern: "^DONE$" },
+					{ kind: "deadline", at: 0 },
+				],
+			},
 		]);
 		assert.match(text, /w-1 \[pending\]/);
-		assert.match(text, /⚠ in pi's session/);
+		assert.match(text, /warn/);
 		assert.match(text, /heartbeat 30s/);
+		assert.match(text, /trigger: regex \/\^DONE\$\/m on \/tmp\/x \| deadline /);
 	});
 });

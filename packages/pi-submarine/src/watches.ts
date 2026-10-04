@@ -28,6 +28,8 @@ export interface WatchRecord {
 	cwd: string;
 	label: string;
 	trigger?: WatchTrigger;
+	/** Terminal triggers — ANY firing fires the watch. */
+	triggers: WatchTrigger[];
 	heartbeatMs?: number;
 	logPath?: string;
 	createdAt: number;
@@ -175,7 +177,9 @@ export class WatchManager {
 	private tickTimer: ReturnType<typeof setInterval> | undefined;
 	private readonly lastBeatAt = new Map<string, number>();
 	private readonly pendingEvents: Array<{ text: string; urgent: boolean; display: boolean }> = [];
-	private readonly matchers = new Map<string, IncrementalMatcher>();
+	/** Per-(record, pattern) streaming scan state: patterns never share offsets,
+	 *  so several conditions can watch one file without eating each other's bytes. */
+	private readonly scanState = new Map<string, { offset: number; matcher: IncrementalMatcher }>();
 	private readonly reaped = new Set<string>();
 	private lastReconcileMtime = 0;
 	private counter = 0;
@@ -232,6 +236,8 @@ export class WatchManager {
 			const parsed = JSON.parse(raw) as { version?: number; records?: WatchRecord[] };
 			for (const rec of parsed.records ?? []) {
 				if (rec && typeof rec.id === "string" && rec.cwd === this.opts.cwd) {
+					// Normalize legacy single-trigger records.
+					if (!Array.isArray(rec.triggers)) rec.triggers = rec.trigger ? [rec.trigger] : [];
 					this.records.set(rec.id, rec);
 				}
 			}
@@ -439,9 +445,14 @@ export class WatchManager {
 				// File triggers re-scan the whole log from scratch: anything that
 				// matched while pi was down must fire now, including matches that
 				// straddled the shutdown boundary.
-				if (rec.trigger?.kind === "file-contains") {
+				// File triggers re-scan the whole log from scratch: anything that
+				// matched while pi was down must fire now, including matches that
+				// straddled the shutdown boundary.
+				if (rec.triggers.some((t) => t.kind === "file-contains")) {
 					rec.logOffset = 0;
-					this.matchers.delete(rec.id);
+					for (const key of [...this.scanState.keys()]) {
+						if (key.startsWith(`${rec.id}|`)) this.scanState.delete(key);
+					}
 				}
 				const missed = this.checkTrigger(rec);
 				const expired = this.now() >= rec.expiresAt;
@@ -485,7 +496,7 @@ export class WatchManager {
 		if (this.disposed) return { ok: false, reason: "watch manager is shut down" };
 		const pending = [...this.records.values()].filter((r) => r.state === "pending").length;
 		if (pending >= MAX_WATCHES) return { ok: false, reason: `Too many watches (max ${MAX_WATCHES}). Cancel one first.` };
-		if (!input.trigger && !input.heartbeatMs) {
+		if (!input.trigger && !input.triggers?.length && !input.heartbeatMs) {
 			return { ok: false, reason: "a watch needs a trigger (pid-exit, file-contains, file-quiet, deadline) or a heartbeat" };
 		}
 		if (input.heartbeatMs !== undefined && input.heartbeatMs < this.opts.minHeartbeatMs) {
@@ -497,18 +508,23 @@ export class WatchManager {
 		if (input.guardPid !== undefined && (!Number.isInteger(input.guardPid) || input.guardPid <= 0)) {
 			return { ok: false, reason: `invalid guardPid: ${input.guardPid}` };
 		}
-		const triggerCheck = this.validateTrigger(input.trigger);
-		if (triggerCheck) return { ok: false, reason: triggerCheck };
+		const triggers = input.triggers?.length ? input.triggers : input.trigger ? [input.trigger] : [];
+		for (const t of triggers) {
+			const problem = this.validateTrigger(t);
+			if (problem) return { ok: false, reason: problem };
+		}
 		const at = this.now();
-		const pidStart = input.trigger?.kind === "pid-exit" ? this.opts.procIdentity.startTicks(input.trigger.pid) : undefined;
-		const bootId = input.trigger?.kind === "pid-exit" ? this.opts.procIdentity.bootId() : undefined;
+		const exitT = triggers.find((t) => t.kind === "pid-exit");
+		const quietT = triggers.find((t) => t.kind === "file-quiet");
+		const pidStart = exitT ? this.opts.procIdentity.startTicks(exitT.pid) : undefined;
+		const bootId = exitT ? this.opts.procIdentity.bootId() : undefined;
 		const guardStart = input.guardPid !== undefined ? this.opts.procIdentity.startTicks(input.guardPid) : undefined;
 		const guardBootId = input.guardPid !== undefined ? this.opts.procIdentity.bootId() : undefined;
 		const lifetimeMs = Math.min(
 			(input.lifetimeMinutes !== undefined ? input.lifetimeMinutes * 60_000 : this.opts.defaultLifetimeMs),
 			this.opts.maxLifetimeMs,
 		);
-		const quietSt = input.trigger?.kind === "file-quiet" ? this.fileStat(input.trigger.path) : undefined;
+		const quietSt = quietT ? this.fileStat(quietT.path) : undefined;
 		const rec: WatchRecord = {
 			id: "", // minted below, atomically with the write
 			claim: this.self(),
@@ -516,6 +532,7 @@ export class WatchManager {
 			cwd: this.opts.cwd,
 			label: capReportSummary(input.label ?? this.defaultLabel(input)),
 			...(input.trigger ? { trigger: input.trigger } : {}),
+			triggers,
 			...(input.heartbeatMs !== undefined ? { heartbeatMs: input.heartbeatMs } : {}),
 			...(input.logPath ? { logPath: input.logPath } : {}),
 			...(input.survival ? { survival: input.survival } : {}),
@@ -757,14 +774,14 @@ export class WatchManager {
 
 	private tick(rec: WatchRecord): void {
 		if (this.disposed || rec.state !== "pending") return;
-		// Trigger check FIRST: scanFile advances the offset, so a preview read
-		// before the check would eat the bytes the pattern needs to see.
+		// Trigger check first; the preview scan keeps per-pattern state, so it can
+		// never eat bytes a matcher needs.
 		const hit = this.checkTrigger(rec);
 		if (hit) {
 			this.fire(rec, hit);
 			return;
 		}
-		if (rec.trigger?.kind !== "file-contains") this.refreshPreview(rec);
+		this.refreshPreview(rec);
 		if (rec.heartbeatMs) {
 			const last = this.lastBeatAt.get(rec.id) ?? rec.createdAt;
 			if (this.now() - last >= rec.heartbeatMs) {
@@ -793,7 +810,7 @@ export class WatchManager {
 
 	private beat(rec: WatchRecord): void {
 		if (this.disposed || rec.state !== "pending") return;
-		if (rec.trigger?.kind !== "file-contains") this.refreshPreview(rec);
+		this.refreshPreview(rec);
 		const at = new Date(this.now()).toISOString();
 		const preview = rec.lastLine ? ` | last: ${rec.lastLine}` : "";
 		this.deliver(rec, `watch ${rec.id} heartbeat at ${at} [${rec.label}]${preview}`, true, false);
@@ -803,37 +820,37 @@ export class WatchManager {
 
 	/** Returns a hit description when the trigger condition holds, else null. */
 	private checkTrigger(rec: WatchRecord): string | null {
-		const t = rec.trigger;
-		if (t) {
+		for (const t of rec.triggers) {
 			switch (t.kind) {
 				case "pid-exit": {
 					const hit = this.deathVerdict(t.pid, rec.procStart, rec.bootId);
-					return hit ? hit : this.guardCheck(rec);
+					if (hit) return hit;
+					break;
 				}
 				case "file-contains": {
-					const hit = this.scanFile(rec, t);
-					return hit ? `pattern '${t.pattern}' found in ${t.path}` : this.guardCheck(rec);
+					if (this.scanFile(rec, t.path, t.pattern)) return `pattern '${t.pattern}' found in ${t.path}`;
+					break;
 				}
 				case "file-quiet": {
 					const st = this.fileStat(t.path);
-					if (st === undefined) return this.guardCheck(rec); // log not created yet: not silence
+					if (st === undefined) break; // log not created yet: not silence
 					if (st.size !== (rec.quietLastSize ?? st.size)) {
 						// It grew — and the growth time is the file's mtime, not "now":
 						// writes may have happened while pi was down.
 						rec.quietLastSize = st.size;
 						rec.lastGrowthAt = st.mtimeMs;
-						return this.guardCheck(rec);
+						break;
 					}
 					const quietSince = rec.lastGrowthAt ?? rec.createdAt;
 					const quietFor = this.now() - quietSince;
-					return quietFor >= t.seconds * 1000
-						? `no new output in ${t.path} for ${Math.round(quietFor / 1000)}s`
-						: this.guardCheck(rec);
+					if (quietFor >= t.seconds * 1000) {
+						return `no new output in ${t.path} for ${Math.round(quietFor / 1000)}s (since ${new Date(quietSince).toISOString()})`;
+					}
+					break;
 				}
 				case "deadline": {
-					return this.now() >= t.at
-						? `deadline ${new Date(t.at).toISOString()} passed`
-						: this.guardCheck(rec);
+					if (this.now() >= t.at) return `deadline ${new Date(t.at).toISOString()} passed`;
+					break;
 				}
 			}
 		}
@@ -895,9 +912,15 @@ export class WatchManager {
 	 * A shrunk file (rotation) resets the offset. Also used for previews on
 	 * watches without a file trigger.
 	 */
-	private scanFile(rec: WatchRecord, t?: Extract<WatchTrigger, { kind: "file-contains" }>): boolean {
-		const path = t?.path ?? rec.logPath;
-		if (!path) return false;
+	/**
+	 * Incremental scan of a file. `pattern` undefined = preview-only (updates
+	 *  lastLine). Each (record, pattern) pair keeps its own offset + matcher, so
+	 *  several conditions on one file never eat each other's bytes.
+	 */
+	private scanFile(rec: WatchRecord, path: string, pattern?: string): boolean {
+		const key = `${rec.id}|${pattern ?? "(preview)"}`;
+		const state = this.scanState.get(key) ?? { offset: 0, matcher: new IncrementalMatcher(pattern) };
+		this.scanState.set(key, state);
 		let size: number;
 		try {
 			size = statSync(path).size;
@@ -908,19 +931,19 @@ export class WatchManager {
 		try {
 			const fd = openSync(path, "r");
 			try {
-				if (size < rec.logOffset) {
+				if (size < state.offset) {
 					// Truncated/rotated: start over.
-					rec.logOffset = 0;
-					this.matcherFor(rec, t)?.reset();
+					state.offset = 0;
+					state.matcher.reset();
 				}
-				const len = size - rec.logOffset;
+				const len = size - state.offset;
 				if (len > 0) {
 					const buf = Buffer.alloc(len);
-					readSync(fd, buf, 0, len, rec.logOffset);
-					rec.logOffset = size;
+					readSync(fd, buf, 0, len, state.offset);
+					state.offset = size;
 					// IncrementalMatcher holds the re-scan window AND multibyte state:
 					// matches split across reads (or chars split across polls) survive.
-					const { text, hit: h } = this.matcherFor(rec, t)!.feed(buf);
+					const { text, hit: h } = state.matcher.feed(buf);
 					if (h) hit = true;
 					const lines = text.split("\n").filter((l) => l.trim().length > 0);
 					if (lines.length > 0) rec.lastLine = lines[lines.length - 1]!.slice(0, LAST_LINE_MAX);
@@ -934,18 +957,8 @@ export class WatchManager {
 		return hit;
 	}
 
-	/** Per-record streaming matcher (pattern fixed at register time). */
-	private matcherFor(rec: WatchRecord, t?: Extract<WatchTrigger, { kind: "file-contains" }>): IncrementalMatcher {
-		let m = this.matchers.get(rec.id);
-		if (!m) {
-			m = new IncrementalMatcher(t?.pattern);
-			this.matchers.set(rec.id, m);
-		}
-		return m;
-	}
-
 	private refreshPreview(rec: WatchRecord): void {
-		if (rec.logPath) this.scanFile(rec);
+		if (rec.logPath) this.scanFile(rec, rec.logPath);
 	}
 
 	/** Down-time verdict for `watch run` jobs: did it end cleanly while we were down? */
@@ -979,7 +992,7 @@ export class WatchManager {
 		const at = new Date(rec.firedAt).toISOString();
 		const preview = rec.lastLine ? `\nlast: ${rec.lastLine}` : "";
 		// pid-exit alone cannot say clean-exit vs killed; the exit artifact can.
-		const artifact = rec.trigger?.kind === "pid-exit" ? this.exitArtifactVerdict(rec) : "";
+		const artifact = rec.triggers.some((t) => t.kind === "pid-exit") ? this.exitArtifactVerdict(rec) : "";
 		this.opts.onStateChange();
 		this.deliver(rec, `watch ${rec.id} fired at ${at} [${rec.label}]: ${verdict}${artifact}${preview}`, true, true);
 	}
@@ -1014,14 +1027,17 @@ export class WatchManager {
 	}
 
 	private defaultLabel(input: WatchInput): string {
-		const t = input.trigger;
-		if (!t) return `heartbeat every ${Math.round((input.heartbeatMs ?? 0) / 1000)}s`;
-		switch (t.kind) {
-			case "pid-exit": return `pid ${t.pid} exits`;
-			case "file-contains": return `'${t.pattern}' in ${t.path}`;
-			case "file-quiet": return `silence in ${t.path} (${t.seconds}s)`;
-			case "deadline": return `deadline ${new Date(t.at).toISOString()}`;
-		}
+		const triggers = input.triggers?.length ? input.triggers : input.trigger ? [input.trigger] : [];
+		if (triggers.length === 0) return `heartbeat every ${Math.round((input.heartbeatMs ?? 0) / 1000)}s`;
+		const desc = (t: WatchTrigger): string => {
+			switch (t.kind) {
+				case "pid-exit": return `pid ${t.pid} exits`;
+				case "file-contains": return `'${t.pattern}' in ${t.path}`;
+				case "file-quiet": return `silence in ${t.path} (${t.seconds}s)`;
+				case "deadline": return `deadline ${new Date(t.at).toISOString()}`;
+			}
+		};
+		return triggers.map(desc).join(" | ");
 	}
 
 	private view(rec: WatchRecord): WatchView {
@@ -1031,6 +1047,7 @@ export class WatchManager {
 			label: rec.label,
 			state: rec.state,
 			...(rec.trigger ? { trigger: rec.trigger } : {}),
+			triggers: rec.triggers,
 			...(rec.heartbeatMs !== undefined ? { heartbeatMs: rec.heartbeatMs } : {}),
 			...(rec.logPath ? { logPath: rec.logPath } : {}),
 			createdAt: rec.createdAt,

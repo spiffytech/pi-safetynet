@@ -325,6 +325,39 @@ describe("formatWatchChip (the human's footer view)", () => {
 });
 
 describe("death guard — death is never silent", () => {
+	it("multiple conditions OR: whichever fires first wins", async () => {
+		const h = makeHarness();
+		const log = join(h.dir, "or.log");
+		writeFileSync(log, "working\n");
+		const res = h.manager.register({ kind: "parent" }, {
+			triggers: [
+				{ kind: "file-contains", path: log, pattern: "^NEVER$" },
+				{ kind: "deadline", at: Date.now() + 60 },
+			],
+			label: "or-watch",
+			lifetimeMinutes: 5,
+		});
+		assert.equal(res.ok, true);
+		assert.ok(await waitFor(() => h.events.length > 0), "the deadline leg fires");
+		assert.match(h.events[0]!.text, /deadline .* passed/);
+
+		// ...and the pattern leg works on its own watch in the same pass:
+		const log2 = join(h.dir, "or2.log");
+		writeFileSync(log2, "");
+		h.manager.register({ kind: "parent" }, {
+			triggers: [
+				{ kind: "file-contains", path: log2, pattern: "^ROUND DONE$" },
+				{ kind: "deadline", at: Date.now() + 60_000 },
+			],
+			label: "or-watch-2",
+			lifetimeMinutes: 5,
+		});
+		appendFileSync(log2, "ROUND DONE\n");
+		assert.ok(await waitFor(() => h.events.some((e) => /pattern '\^ROUND DONE\$' found/.test(e.text)), 2000), "the pattern leg fires");
+		h.manager.dispose();
+		rmSync(h.dir, { recursive: true, force: true });
+	});
+
 	it("a guarded death fires the watch even when its condition never happens", async () => {
 		let ticks = 100;
 		const h = makeHarness({
