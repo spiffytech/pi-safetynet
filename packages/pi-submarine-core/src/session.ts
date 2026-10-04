@@ -21,7 +21,7 @@ import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import type { ChildServicesFactory } from "./host-api.ts";
 import type { ReportingOptions } from "./reporting.ts";
 import type { JobWatchApi } from "./watch.ts";
-import { createChildExtension, REPORT_TOOL_NAME, RESEARCH_TOOL_NAME } from "./child-ext.ts";
+import { createChildExtension, REPORT_TOOL_NAME, RESEARCH_TOOL_NAME, type VerdictToolDef } from "./child-ext.ts";
 import { JOB_WATCH_TOOL_NAME } from "./job-watch-tool.ts";
 import { toDisplayPath } from "./paths.ts";
 import { accumulateUsage, snapshotUsage, zeroUsage } from "./usage.ts";
@@ -55,6 +55,8 @@ export interface SubagentSessionConfig {
 	paradigm?: string | undefined;
 	/** Mode-name aliasing for rule matching. */
 	modeAliases?: Record<string, string> | undefined;
+	/** Structured-verdict tool the child must call (reviewer). */
+	verdictTool?: VerdictToolDef | undefined;
 }
 
 export type CreateSubagentSessionResult =
@@ -66,12 +68,18 @@ export type CreateSubagentSessionResult =
  * must be listed here or they are filtered out of the registry and cannot be
  * activated later via setActiveTools. Exported for regression testing.
  */
-export function subagentToolNames(taskType: "explore" | "build", reporting: boolean, watches = false): string[] {
+export function subagentToolNames(
+	taskType: "explore" | "build",
+	reporting: boolean,
+	watches = false,
+	extraToolNames: readonly string[] = [],
+): string[] {
 	const base = taskType === "explore"
 		? ["read", "grep", "find", "ls", RESEARCH_TOOL_NAME]
 		: ["read", "bash", "edit", "write", "grep", "find", "ls", RESEARCH_TOOL_NAME];
 	const withReporting = reporting ? [...base, REPORT_TOOL_NAME] : base;
-	return watches ? [...withReporting, JOB_WATCH_TOOL_NAME] : withReporting;
+	const withWatches = watches ? [...withReporting, JOB_WATCH_TOOL_NAME] : withReporting;
+	return extraToolNames.length > 0 ? [...withWatches, ...extraToolNames] : withWatches;
 }
 
 /**
@@ -94,7 +102,7 @@ export async function createSubagentSession(cfg: SubagentSessionConfig): Promise
 	const settingsManager = SettingsManager.create(cfg.cwd, agentDir);
 	if (!cfg.compactionEnabled) settingsManager.setCompactionEnabled(false);
 
-	const tools = subagentToolNames(cfg.taskType, cfg.reporting !== undefined, cfg.watches !== undefined);
+	const tools = subagentToolNames(cfg.taskType, cfg.reporting !== undefined, cfg.watches !== undefined, cfg.verdictTool ? [cfg.verdictTool.name] : []);
 
 	let sessionRef: { abort: () => void } | null = null;
 	const loader = new DefaultResourceLoader({
@@ -120,6 +128,7 @@ export async function createSubagentSession(cfg: SubagentSessionConfig): Promise
 				omitContextMessage: cfg.systemPrompt !== undefined,
 				...(cfg.reporting ? { reporting: cfg.reporting } : {}),
 				...(cfg.watches ? { watches: cfg.watches } : {}),
+				...(cfg.verdictTool ? { verdict: cfg.verdictTool } : {}),
 			}),
 			cfg.systemPrompt ? createSystemPromptExtension(cfg.systemPrompt) : null,
 		].filter(Boolean) as any[],
@@ -201,6 +210,11 @@ export interface SubagentOptions {
 	systemPrompt?: string;
 	/** Override the default 300s timeout. */
 	timeoutMs?: number;
+	/** Structured-verdict tool the reviewer must call. Its arguments come back as
+	 *  `details.verdict`. */
+	verdictTool?: VerdictToolDef | undefined;
+	/** Test seam: override the subagent session factory. */
+	openSession?: (cfg: SubagentSessionConfig) => Promise<CreateSubagentSessionResult>;
 }
 
 /** Max agent turns before we abort the subagent. */
@@ -250,7 +264,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	}
 
 	let hitPermissionDenied = false;
-	const created = await createSubagentSession({
+	const created = await (opts.openSession ?? createSubagentSession)({
 		taskType,
 		cwd,
 		parentCtx,
@@ -261,6 +275,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 		...(opts.modeAliases !== undefined ? { modeAliases: opts.modeAliases } : {}),
 		...(opts.services !== undefined ? { services: opts.services } : {}),
 		...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
+		...(opts.verdictTool !== undefined ? { verdictTool: opts.verdictTool } : {}),
 		compactionEnabled: false,
 		onPermissionDenied: () => {
 			hitPermissionDenied = true;
@@ -288,6 +303,9 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	let turnCount = 0;
 	let hitTurnLimit = false;
 	let hitTimeout = false;
+	// Arguments of the structured-verdict tool, when the model called it. Returned
+	// as `details.verdict` so callers never parse a verdict out of prose.
+	let verdict: unknown;
 	// Provider failures arrive as an assistant message with stopReason "error", not as a
 	// thrown exception, so `session.prompt()` resolves normally and this is the only
 	// signal. Captured here so the result can be reported as a tool error.
@@ -323,6 +341,9 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 	const unsubscribe = session.subscribe((event) => {
 		if (event.type === "tool_execution_start") {
 			activities.push(formatActivity(event.toolName, event.args, cwd));
+			if (opts.verdictTool && event.toolName === opts.verdictTool.name) {
+				verdict = event.args;
+			}
 			emitUpdate();
 		}
 		if (event.type === "message_update") {
@@ -396,7 +417,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 			: "Subagent completed with no output.";
 		return {
 			content: [{ type: "text", text: reason }],
-			details: { aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, taskType, activities, ...(modelError ? { error: modelError } : {}) },
+			details: { aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, taskType, activities, noOutput: true, ...(verdict !== undefined ? { verdict } : {}), ...(modelError ? { error: modelError } : {}) },
 			usage: snapshotUsage(usage),
 		};
 	}
@@ -408,7 +429,7 @@ export async function runSubagent(opts: SubagentOptions): Promise<{
 
 	return {
 		content: [{ type: "text", text: fullText + suffix }],
-		details: { taskType, aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, turnCount, activities, ...(modelError ? { error: modelError } : {}) },
+		details: { taskType, aborted, hitPermissionDenied, hitTurnLimit, hitTimeout, turnCount, activities, ...(verdict !== undefined ? { verdict } : {}), ...(modelError ? { error: modelError } : {}) },
 		usage: snapshotUsage(usage),
 	};
 }

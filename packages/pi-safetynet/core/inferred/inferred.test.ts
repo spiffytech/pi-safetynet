@@ -95,7 +95,7 @@ describe("judge", () => {
 
   it("accepts the mechanical merge", async () => {
     const v = await runInferredJudge(judgeInput("git log main", "git log dev"), {
-      ask: async () => JSON.stringify({ verdict: "offer", rationale: "safe read-only" }),
+      ask: async () => ({ verdict: "offer", rationale: "safe read-only" }),
     });
     assert.equal(v.kind, "offer");
     if (v.kind === "offer") {
@@ -106,7 +106,7 @@ describe("judge", () => {
 
   it("rejects risky shapes", async () => {
     const v = await runInferredJudge(judgeInput("curl -sL x y", "curl -sL x z"), {
-      ask: async () => JSON.stringify({ verdict: "reject", rationale: "egress" }),
+      ask: async () => ({ verdict: "reject", rationale: "egress" }),
     });
     assert.equal(v.kind, "reject");
   });
@@ -114,16 +114,15 @@ describe("judge", () => {
   it("validates pin values against observed exemplars", async () => {
     const input = judgeInput("git commit -m a x", "git commit -m b y");
     const v = await runInferredJudge(input, {
-      ask: async () =>
-        JSON.stringify({
-          verdict: "offer",
-          rationale: "narrower variant",
-          candidates: [
-            { pins: { 4: "x" } },            // valid: x observed at position 4
-            { pins: { 3: "NEVER-SEEN" } },   // invalid: unobserved value
-            { pins: { 1: "commit" } },       // invalid: position 1 is not a slot
-          ],
-        }),
+      ask: async () => ({
+        verdict: "offer",
+        rationale: "narrower variant",
+        candidates: [
+          { pins: [{ index: 4, value: "x" }] },            // valid: x observed at position 4
+          { pins: [{ index: 3, value: "NEVER-SEEN" }] },   // invalid: unobserved value
+          { pins: [{ index: 1, value: "commit" }] },       // invalid: position 1 is not a slot
+        ],
+      }),
     });
     assert.equal(v.kind, "offer");
     if (v.kind === "offer") {
@@ -319,7 +318,7 @@ describe("engine", () => {
     const eng = mkEngine({
       onProposalQueued: () => {},
     });
-    eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
+    eng.judgeDeps = { ask: async () => ({ verdict: "offer", rationale: "ok" }) };
 
     eng.recordApproval(["git log main"], ["build"]);
     eng.recordApproval(["git log dev"], ["build"]);
@@ -342,7 +341,7 @@ describe("engine", () => {
 
   it("an empty approval list records nothing (auto-approved siblings are not evidence)", async () => {
     const eng = mkEngine();
-    eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
+    eng.judgeDeps = { ask: async () => ({ verdict: "offer", rationale: "ok" }) };
     eng.recordApproval([], ["build"]);
     eng.recordApproval([], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
@@ -351,7 +350,7 @@ describe("engine", () => {
 
   it("learns tool-permission targets (parity with bash)", async () => {
     const eng = mkEngine();
-    eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
+    eng.judgeDeps = { ask: async () => ({ verdict: "offer", rationale: "ok" }) };
     eng.recordApproval(["tool:web_search"], ["build"]);
     eng.recordApproval(["tool:web_search"], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
@@ -362,7 +361,7 @@ describe("engine", () => {
 
   it("reject verdict queues nothing", async () => {
     const eng = mkEngine();
-    eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "reject", rationale: "egress" }) };
+    eng.judgeDeps = { ask: async () => ({ verdict: "reject", rationale: "egress" }) };
     eng.recordApproval(["curl -s a"], ["build"]);
     eng.recordApproval(["curl -s b"], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
@@ -371,7 +370,7 @@ describe("engine", () => {
 
   it("already-allowed exemplars are silently suppressed", async () => {
     const eng = mkEngine();
-    eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
+    eng.judgeDeps = { ask: async () => ({ verdict: "offer", rationale: "ok" }) };
     eng.suppressIfAllowed = (exemplar) => exemplar === "git log main";
     eng.recordApproval(["git log main"], ["build"]);
     eng.recordApproval(["git log dev"], ["build"]);
@@ -381,7 +380,7 @@ describe("engine", () => {
 
   it("drop teaches learned boundaries", async () => {
     const eng = mkEngine();
-    eng.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
+    eng.judgeDeps = { ask: async () => ({ verdict: "offer", rationale: "ok" }) };
     eng.recordApproval(["git log main"], ["build"]);
     eng.recordApproval(["git log dev"], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
@@ -407,7 +406,7 @@ describe("engine", () => {
 
   it("does not re-offer shapes already accepted in a prior session", async () => {
     const eng1 = mkEngine();
-    eng1.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
+    eng1.judgeDeps = { ask: async () => ({ verdict: "offer", rationale: "ok" }) };
     eng1.recordApproval(["git log main"], ["build"]);
     eng1.recordApproval(["git log dev"], ["build"]);
     await new Promise((r) => setTimeout(r, 10));
@@ -415,7 +414,7 @@ describe("engine", () => {
 
     // fresh engine over the same project dir (new session)
     const eng2 = new InferredEngine(dir);
-    eng2.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
+    eng2.judgeDeps = { ask: async () => ({ verdict: "offer", rationale: "ok" }) };
     eng2.recordApproval(["git log other"], ["build"]);
     eng2.recordApproval(["git log more"], ["build"]);
     await new Promise((r) => setTimeout(r, 10));

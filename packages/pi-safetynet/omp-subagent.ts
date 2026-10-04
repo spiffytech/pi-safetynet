@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionEntriesSource } from "./core/types.ts";
+import { type SubmitVerdictTool } from "./core/reviewer-prompt.ts";
 import { debugLog } from "./core/debug-log.ts";
 
 export interface OmpSpawnResult {
@@ -38,6 +39,9 @@ export interface OmpSpawnOpts {
 	 *  no resolved model object was provided. Falls back to
 	 *  SAFETYNET_REVIEWER_MODEL env. */
 	modelPattern?: string;
+	/** Structured-verdict tool the reviewer must call. omp has no constrained
+	 *  sampling, so the plugin registers it and nags until the model calls it. */
+	verdictTool?: SubmitVerdictTool;
 }
 
 /** The live session handle returned by `createAgentSession`. Named here so
@@ -64,11 +68,26 @@ const REVIEWER_SESSION_PRELOADS = {
 	workspaceTree: { rootPath: "", rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
 };
 
+/** How many times to re-prompt the reviewer before giving up on the verdict. */
+const MAX_VERDICT_ATTEMPTS = 3;
+
 export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult> {
 	const details: Record<string, unknown> = {};
 	const reviewerT0 = Date.now();
 	let bootMs = 0;
 	let session: ReviewerSession | undefined;
+	// Arguments of the structured-verdict tool, captured by the wrapped execute.
+	let verdictArgs: unknown;
+	const verdictTool = opts.verdictTool
+		? {
+			...opts.verdictTool,
+			// Wrap so the plugin can read the verdict directly.
+			execute: async (toolCallId: string, params: any) => {
+				verdictArgs = params;
+				return opts.verdictTool!.execute(toolCallId, params);
+			},
+		}
+		: undefined;
 
 	try {
 		// Abort the reviewer session when the external cap signal fires (the
@@ -99,7 +118,8 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 			disableExtensionDiscovery: true,
 			enableMCP: false,
 			restrictToolNames: true,
-			toolNames: ["read", "grep", "glob"],
+			toolNames: ["read", "grep", "glob", ...(verdictTool ? [verdictTool.name] : [])],
+			...(verdictTool ? { customTools: [verdictTool as any], allowRestrictedCustomTools: true } : {}),
 			...REVIEWER_SESSION_PRELOADS,
 			workspaceTree: { ...REVIEWER_SESSION_PRELOADS.workspaceTree, rootPath: opts.cwd },
 			...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
@@ -138,13 +158,24 @@ export async function spawnReviewer(opts: OmpSpawnOpts): Promise<OmpSpawnResult>
 		opts.signal?.addEventListener("abort", onAbort, { once: true });
 
 		try {
-			await session.prompt(opts.prompt);
+			// Nag until the reviewer calls the verdict tool. Each `session.prompt()`
+			// resolves at a terminal message; if the verdict tool was not called, ask
+			// again (bounded). No prose parsing: the verdict is the tool arguments.
+			for (let attempt = 0; ; attempt++) {
+				await session.prompt(
+					attempt === 0
+						? opts.prompt
+						: `You did not call ${verdictTool!.name}. Call it now with your verdict for the planned action. Do not write the verdict as prose.`,
+				);
+				if (verdictArgs !== undefined || !verdictTool || attempt + 1 >= MAX_VERDICT_ATTEMPTS) break;
+			}
 		} finally {
 			opts.signal?.removeEventListener("abort", onAbort);
 		}
 		const promptMs = Date.now() - reviewerT0 - bootMs;
 		details.bootMs = bootMs;
 		details.promptMs = promptMs;
+		if (verdictArgs !== undefined) details.verdict = verdictArgs;
 		// Phase timings land in the omp debug log; correlated against
 		// ui.loop-blocked entries when a review stalls the UI.
 		if (promptMs > 3000) {

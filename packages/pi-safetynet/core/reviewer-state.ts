@@ -7,13 +7,24 @@ import type { PermissionCheck } from "./check.ts";
 import {
   REVIEWER_SYSTEM_PROMPT,
   formatActionJson,
-  parseAssessment,
+  validateAssessment,
+  buildSubmitVerdictTool,
+  SUBMIT_VERDICT_TOOL_NAME,
   compactTranscript,
   type ActionJsonOpts,
   type TranscriptEntry,
 } from "./reviewer-prompt.ts";
 import { isReadOnly } from "./profiles.ts";
 import { debugLog } from "./debug-log.ts";
+
+/** JSON.stringify that never throws (circular refs, BigInt). */
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
 
 // ─── Module state (circuit breaker + turn token) ───────────────────────────
 
@@ -98,6 +109,9 @@ export interface SpawnOpts {
   cwd: string;
   model?: any;
   thinkingLevel?: string;
+  /** Structured-verdict tool the reviewer must call. Forwarded to the subagent
+   *  runner, which registers it and returns its arguments as `details.verdict`. */
+  verdictTool?: unknown;
 }
 
 export interface SpawnResult {
@@ -306,7 +320,7 @@ async function runPermissionReviewWithModel(
   // Build task prompt. State the project root explicitly (as well as inside the
   // action JSON) so the reviewer cannot mistake a directory mentioned in the
   // transcript for the project the action runs in.
-  let taskPrompt = `## Project root\n${opts.cwd}\n\n## Transcript\n${transcriptStr}\n\n## Planned action\n${actionJson}\n\nReturn strict JSON only.`;
+  let taskPrompt = `## Project root\n${opts.cwd}\n\n## Transcript\n${transcriptStr}\n\n## Planned action\n${actionJson}\n\nCall ${SUBMIT_VERDICT_TOOL_NAME} exactly once with your verdict.`;
   if (opts.retryReason) {
     taskPrompt = `## Retry reason\n${opts.retryReason}\n\n${taskPrompt}`;
   }
@@ -326,6 +340,7 @@ async function runPermissionReviewWithModel(
     parentCtx: opts.parentCtx,
     cwd: opts.cwd,
     trustExternalPaths: true,
+    verdictTool: buildSubmitVerdictTool(),
     ...(modelOverride ? { model: modelOverride } : {}),
   });
   debugLog(
@@ -367,16 +382,34 @@ async function runPermissionReviewWithModel(
   if (result.details.aborted) {
     return { kind: "transient", message: "Reviewer was aborted" };
   }
-  if (!text) {
-    // Reached the model but got nothing usable back — a model problem the chain
-    // can route around.
-    return { kind: "fatal", message: "Reviewer returned empty output" };
+  // The reviewer reports its verdict by calling submit_verdict; read the tool
+  // arguments. No prose parsing. `details.verdict` is set by the subagent
+  // runners (pi `runSubagent`, omp `spawnReviewer`) when the tool was called.
+  const rawVerdict = result.details.verdict;
+  if (rawVerdict !== undefined) {
+    const assessment = validateAssessment(rawVerdict);
+    if (!assessment) {
+      debugLog(
+        `safetynet: reviewer "${modelSpec}" ${SUBMIT_VERDICT_TOOL_NAME} arguments failed validation: ${safeStringify(rawVerdict).slice(0, 300)}`,
+      );
+      return { kind: "fatal", message: "Reviewer submitted an invalid verdict" };
+    }
+    return { kind: "assessment", assessment };
   }
 
-  const assessment = parseAssessment(text);
-  if (!assessment) {
-    return { kind: "fatal", message: "Could not parse reviewer JSON output" };
+  // No verdict tool call. Report the known no-output cases accurately instead
+  // of blaming JSON parsing; anything else is the model declining to use it.
+  if (result.details.hitPermissionDenied) {
+    return { kind: "fatal", message: "Reviewer stopped: permission denied" };
   }
-
-  return { kind: "assessment", assessment };
+  if (result.details.noOutput) {
+    return { kind: "fatal", message: "Reviewer returned no output" };
+  }
+  if (result.details.hitTurnLimit) {
+    return { kind: "fatal", message: "Reviewer hit the turn limit before submitting a verdict" };
+  }
+  debugLog(
+    `safetynet: reviewer "${modelSpec}" did not call ${SUBMIT_VERDICT_TOOL_NAME}; raw text (${text.length} chars): ${text.slice(0, 500)}`,
+  );
+  return { kind: "fatal", message: `Reviewer did not call ${SUBMIT_VERDICT_TOOL_NAME}` };
 }

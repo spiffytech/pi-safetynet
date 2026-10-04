@@ -81,7 +81,7 @@ pi-safetynet provides a two-tier security model so you can keep the agent read-o
 
 **Auto-approve** — `/safetynet:auto` toggles automatic permission approval. When enabled, every action the ruleset flags as Ask is routed to a configurable permissions model (a read-only subagent with read/grep/find/ls) that judges the action against a risk policy instead of prompting the user. It runs alongside whatever profile (plan or build) you're in — status shows `+auto`.
 
-The reviewer returns a JSON assessment `{risk_level, user_authorization, outcome, rationale}`:
+The reviewer reports its verdict by calling the `submit_verdict` tool with `{risk_level, user_authorization, outcome, rationale}` — a JSON-schema-constrained tool call where the provider supports constrained sampling, never JSON parsed out of prose:
 
 - It judges against the **user's own messages only** — the transcript it sees contains just the human conversation, never the assistant's tool calls or outputs, so its own momentum can't look like consent. It can still verify local state itself with read-only tools.
 - **Egress is high risk.** Pushing to a remote, connecting to a host, publishing, or deploying to a destination the user never named is treated as unauthorized egress and denied, not waved through as routine.
@@ -91,7 +91,7 @@ The reviewer returns a JSON assessment `{risk_level, user_authorization, outcome
 Every denial is surfaced in two places:
 - **On the rejected tool call** — the blocked call's error result reads `Auto-denied <permission>: <target> — <rationale>` (a `Ruleset denied …` or `Denied …` prefix for deny-rule/headless denials). The reviewer's internal risk/authorization scores are not shown.
 - **To the model** — a hidden transcript message carries the same line so the reason reaches the model even when the denial aborts the turn, plus a one-line corrective instruction keyed to the denial source (mode denials: propose the change and let the user switch modes; ruleset/headless denials: stop retrying, explain what you need). When the denial aborts, the message is also rendered as a visible transcript entry next to the rejected call.
-- **Infrastructure failure** (timeout, API error, unparseable) — falls back to the interactive permission prompt with a notice. The reviewer does not retry and cannot auto-resolve the prompt: once escalated, the user decides. A stale or delayed model verdict can never convert a prompt dismissal into an approval.
+- **Infrastructure failure** (timeout, API error, no verdict) — falls back to the interactive permission prompt with a notice. The reviewer does not retry and cannot auto-resolve the prompt: once escalated, the user decides. A stale or delayed model verdict can never convert a prompt dismissal into an approval.
 
 Configure which model handles review and timeouts in global config:
 

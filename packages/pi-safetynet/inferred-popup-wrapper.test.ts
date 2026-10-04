@@ -28,7 +28,7 @@ async function makeEngine(count = 2) {
   const dir = mkdtempSync(join(tmpdir(), "safetynet-wrap-"));
   mkdirSync(join(dir, ".pi"), { recursive: true });
   const engine = new InferredEngine(dir);
-  engine.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
+  engine.judgeDeps = { ask: async () => ({ verdict: "offer", rationale: "ok" }) };
   const shapes = [["git log main", "git log dev"], ["dd if=a.img bs=4M", "dd if=b.iso bs=1M"]];
   for (let i = 0; i < count; i++) for (const c of shapes[i % shapes.length]!) engine.recordApproval([c], ["build"]);
   await new Promise((r) => setTimeout(r, 10));

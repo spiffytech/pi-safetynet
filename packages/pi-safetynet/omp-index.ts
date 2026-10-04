@@ -50,7 +50,7 @@ import {
 import { reviewBumpTurnToken } from "./core/reviewer-state.ts";
 import { InferredEngine } from "./core/inferred/engine.ts";
 import { uiArbiter } from "./core/ui-arbiter.ts";
-import { JUDGE_SYSTEM_PROMPT } from "./core/inferred/judge.ts";
+import { JUDGE_SYSTEM_PROMPT, buildJudgeTool } from "./core/inferred/judge.ts";
 import { evaluatePermission } from "./core/permissions/ruleset.ts";
 import { spawnReviewer } from "./omp-subagent.ts";
 import { reviewerSpawnModelOpts } from "./omp-pipeline.ts";
@@ -101,8 +101,9 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 					systemPrompt: JUDGE_SYSTEM_PROMPT,
 					cwd: ctx.cwd,
 					timeoutMs: 30_000,
+					verdictTool: buildJudgeTool(),
 					...reviewerSpawnModelOpts(ctx, first ? { id: first } : undefined),
-				}).then((r) => r.content.map((c) => c.text).join("\n"));
+				}).then((r) => r.details.verdict);
 			},
 		};
 		inferred.suppressIfAllowed = (exemplar: string) =>

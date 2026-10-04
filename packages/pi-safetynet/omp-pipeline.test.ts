@@ -47,12 +47,12 @@ function makeStorage() {
   } as any;
 }
 
-/** Fake reviewer: returns canned assessments (the shape parseAssessment eats). */
+/** Fake reviewer: returns canned assessments as the verdict tool arguments. */
 function spawnWith(verdicts: Array<Record<string, string>>) {
   let i = 0;
   return async () => ({
-    content: [{ type: "text", text: JSON.stringify(verdicts[Math.min(i++, verdicts.length - 1)]) }],
-    details: {},
+    content: [{ type: "text", text: "" }],
+    details: { verdict: verdicts[Math.min(i++, verdicts.length - 1)] },
   });
 }
 

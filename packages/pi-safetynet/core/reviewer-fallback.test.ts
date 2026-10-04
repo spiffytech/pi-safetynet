@@ -18,18 +18,15 @@ function opts(model: string | string[], overrides: Record<string, unknown> = {})
 }
 
 const ALLOW = (spec: string) => ({
-  content: [
-    {
-      type: "text" as const,
-      text: JSON.stringify({
-        risk_level: "low",
-        user_authorization: "high",
-        outcome: "allow",
-        rationale: `ok via ${spec}`,
-      }),
+  content: [{ type: "text" as const, text: "" }],
+  details: {
+    verdict: {
+      risk_level: "low",
+      user_authorization: "high",
+      outcome: "allow",
+      rationale: `ok via ${spec}`,
     },
-  ],
-  details: {},
+  },
 });
 
 const FAIL = { content: [{ type: "text" as const, text: "not json at all" }], details: {} };
@@ -38,14 +35,14 @@ describe("formatReviewerFallback", () => {
   it("names each failed model with its reason and the winner", () => {
     const out = formatReviewerFallback(
       [
-        { spec: "hyper/glm-5.3-flash", message: "Could not parse reviewer JSON output" },
+        { spec: "hyper/glm-5.3-flash", message: "Reviewer returned no output" },
         { spec: "hyper/qwen3.8-flash", message: "Reviewer timed out" },
       ],
       "neuralwatt/deepseek-v4.1-flash",
     );
     assert.equal(
       out,
-      "reviewer fell back: hyper/glm-5.3-flash (Could not parse reviewer JSON output), " +
+      "reviewer fell back: hyper/glm-5.3-flash (Reviewer returned no output), " +
         "hyper/qwen3.8-flash (Reviewer timed out) → neuralwatt/deepseek-v4.1-flash",
     );
   });
@@ -114,6 +111,33 @@ describe("runPermissionReview — fallback diagnostics", () => {
   it("never throws when the diagnostic sink is absent", async () => {
     const v = await runPermissionReview(opts(["a/one", "b/two"]), { spawn: async () => FAIL });
     assert.notEqual(v.kind, "assessment");
+  });
+
+  it("reports no output accurately instead of blaming JSON parsing", async () => {
+    const v = await runPermissionReview(opts(["a/one"]), {
+      spawn: async () => ({
+        content: [{ type: "text" as const, text: "Subagent completed with no output." }],
+        details: { noOutput: true },
+      }),
+    });
+    assert.equal(v.kind, "fatal");
+    assert.match((v as { message: string }).message, /returned no output/);
+  });
+
+  it("reports a missing verdict-tool call by name", async () => {
+    const v = await runPermissionReview(opts(["a/one"]), {
+      spawn: async () => ({ content: [{ type: "text" as const, text: "I think this is fine." }], details: {} }),
+    });
+    assert.equal(v.kind, "fatal");
+    assert.match((v as { message: string }).message, /did not call submit_verdict/);
+  });
+
+  it("reports an invalid verdict submission", async () => {
+    const v = await runPermissionReview(opts(["a/one"]), {
+      spawn: async () => ({ content: [{ type: "text" as const, text: "" }], details: { verdict: { risk_level: "maybe" } } }),
+    });
+    assert.equal(v.kind, "fatal");
+    assert.match((v as { message: string }).message, /invalid verdict/);
   });
 });
 

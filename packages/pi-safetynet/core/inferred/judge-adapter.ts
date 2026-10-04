@@ -13,7 +13,7 @@
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { JUDGE_SYSTEM_PROMPT } from "./judge.ts";
+import { JUDGE_SYSTEM_PROMPT, JUDGE_TOOL_NAME, buildJudgeTool } from "./judge.ts";
 import { resolveModelSpec } from "../reviewer-state.ts";
 import { loadAutoApproveConfig } from "../auto-config-state.ts";
 
@@ -54,11 +54,12 @@ function resolveJudgeModel(ctx: ExtensionContext) {
 /**
  * Build the judge's `ask` adapter. `runInferredJudge` passes the already-built
  * user prompt; this sends it as the sole message with `JUDGE_SYSTEM_PROMPT` and
- * returns the model's text. Rejections (provider error, abort, timeout) surface
- * as `transient` verdicts in the caller.
+ * the structured-verdict tool, then returns the tool-call arguments. Rejections
+ * (provider error, abort, timeout, no tool call) surface as `transient`
+ * verdicts in the caller.
  */
-export function createJudgeAsk(ctx: ExtensionContext): (prompt: string) => Promise<string> {
-	return async (prompt: string): Promise<string> => {
+export function createJudgeAsk(ctx: ExtensionContext): (prompt: string) => Promise<unknown> {
+	return async (prompt: string): Promise<unknown> => {
 		const model = resolveJudgeModel(ctx);
 		if (!model) throw new Error("No model available for inferred judge");
 
@@ -72,6 +73,7 @@ export function createJudgeAsk(ctx: ExtensionContext): (prompt: string) => Promi
 					{
 						systemPrompt: JUDGE_SYSTEM_PROMPT,
 						messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+						tools: [buildJudgeTool() as never],
 					},
 					{ signal: controller.signal },
 				)
@@ -86,9 +88,8 @@ export function createJudgeAsk(ctx: ExtensionContext): (prompt: string) => Promi
 
 		recordBackgroundUsage(ctx, "inferred_judge", message);
 
-		return message.content
-			.filter((part) => part.type === "text")
-			.map((part) => part.text)
-			.join("\n");
+		const call = message.content.find((part) => part.type === "toolCall" && part.name === JUDGE_TOOL_NAME);
+		if (!call || call.type !== "toolCall") throw new Error(`Judge did not call ${JUDGE_TOOL_NAME}`);
+		return call.arguments;
 	};
 }

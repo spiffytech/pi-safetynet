@@ -19,6 +19,7 @@
 import type { StructuralBashPattern, PatternToken } from "./shapes.ts";
 import { patternMatches, renderPattern } from "./shapes.ts";
 import { isHazardousFile } from "../bash-parser.ts";
+import { Type } from "typebox";
 
 export interface JudgeInput {
   render: string;
@@ -45,9 +46,10 @@ export type JudgeVerdict =
   | { kind: "transient"; message: string };
 
 export interface JudgeDeps {
-  /** Runs the judge model and returns its text output. Injected so tests
-   *  stub it and frontends adapt their own spawner. */
-  ask: (prompt: string) => Promise<string>;
+  /** Runs the judge model and returns its structured verdict (the
+   *  submit_judge_verdict tool arguments). Injected so tests stub it and
+   *  frontends adapt their own spawner. */
+  ask: (prompt: string) => Promise<unknown>;
 }
 
 export const JUDGE_SYSTEM_PROMPT = `You are a permission-rule safety judge. You review a proposed permission rule that was generalized from actions a user has manually approved during this session. Targets are bash commands, or tool-permission targets of the form \`tool:<name>\` (a tool approved in a read-only session); judge both the same way. Your verdict decides whether the user is shown an offer to add it permanently.
@@ -58,21 +60,61 @@ You must be conservative. Approve only patterns where the varying parts are genu
 - the varying argument is code, a script path, or anything executable,
 - generalizing feels likely to surprise the user later.
 
-Output STRICT JSON only, no prose:
-{"verdict":"offer","rationale":"<one sentence>","candidates":[{"pins":{"<slotIndex>":"<observedValue>"},"note":"<one sentence>"}]}
-{"verdict":"reject","rationale":"<one sentence>"}
+Report your verdict by calling the submit_judge_verdict tool exactly once. Do not write the verdict as prose. Arguments:
+- verdict: "offer" | "reject"
+- rationale: one sentence
+- candidates: required; pass [] when rejecting. For an offer, up to 2, most natural first. Each is {"pins":[{"index":<slotIndex>,"value":"<observedValue>"}],"note":"<one sentence>"}. "pins" narrows the rule by fixing slot positions to values the user actually approved; pass an empty pins array for the full generalization. When in doubt, reject.`;
 
-"pins" narrows the rule by fixing slot positions to values the user actually approved (omit for the full generalization). At most 2 candidates, most natural first. When in doubt, reject.`;
+/** Name of the judge's structured-verdict tool. */
+export const JUDGE_TOOL_NAME = "submit_judge_verdict";
 
-function extractJson(text: string): unknown {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end <= start) return null;
-  try {
-    return JSON.parse(text.slice(start, end + 1));
-  } catch {
-    return null;
-  }
+/** Verdict schema. Arrays are required (not optional) and pins is an array of
+ *  {index,value} rather than a dynamic map, so the whole schema is
+ *  strict-compatible — constrained sampling actually constrains it. */
+export const JUDGE_VERDICT_SCHEMA = Type.Object(
+  {
+    verdict: Type.Union([Type.Literal("offer"), Type.Literal("reject")]),
+    rationale: Type.String(),
+    candidates: Type.Array(
+      Type.Object(
+        {
+          pins: Type.Array(
+            Type.Object(
+              { index: Type.Integer(), value: Type.String() },
+              { additionalProperties: false },
+            ),
+          ),
+          note: Type.Optional(Type.String()),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+/**
+ * The judge's verdict tool. A plain object registered on the omp subagent
+ * (as a verdict tool, with the nag loop) and passed as a tool declaration on
+ * the pi direct model call, so both read arguments instead of parsing prose.
+ */
+export function buildJudgeTool() {
+  return {
+    name: JUDGE_TOOL_NAME,
+    label: "Submit judge verdict",
+    description:
+      "Submit the inferred-rule verdict. Call this exactly once as your final action; never write the verdict as prose.",
+    promptSnippet: "Submit the inferred-rule verdict",
+    parameters: JUDGE_VERDICT_SCHEMA,
+    constrainedSampling: { type: "json_schema" as const, strict: "prefer" as const },
+    async execute(_toolCallId: string, params: unknown) {
+      return {
+        content: [{ type: "text" as const, text: "Verdict recorded." }],
+        details: params,
+        terminate: true,
+      };
+    },
+  };
 }
 
 interface JudgeJson {
@@ -145,21 +187,21 @@ export function buildJudgePrompt(input: JudgeInput): string {
     ...lines.map((l) => `  - ${l}`),
     "",
     "Decide: offer this rule to the user, reject it, or offer a narrower pin variant.",
-    "Return strict JSON only.",
+    `Call ${JUDGE_TOOL_NAME} with your verdict.`,
   ].join("\n");
 }
 
 export async function runInferredJudge(input: JudgeInput, deps: JudgeDeps): Promise<JudgeVerdict> {
-  let text: string;
+  let raw: unknown;
   try {
-    text = await deps.ask(buildJudgePrompt(input));
+    raw = await deps.ask(buildJudgePrompt(input));
   } catch (err) {
     return { kind: "transient", message: String(err) };
   }
 
-  const parsed = extractJson(text) as JudgeJson | null;
+  const parsed = raw as JudgeJson | null;
   if (!parsed || typeof parsed !== "object") {
-    return { kind: "transient", message: "Judge returned unparseable output" };
+    return { kind: "transient", message: `Judge did not call ${JUDGE_TOOL_NAME}` };
   }
   const rationale = typeof parsed.rationale === "string" ? parsed.rationale : "";
 
@@ -179,14 +221,15 @@ export async function runInferredJudge(input: JudgeInput, deps: JudgeDeps): Prom
   for (const raw of rawCandidates) {
     if (typeof raw !== "object" || raw === null) continue;
     const o = raw as Record<string, unknown>;
-    if (typeof o.pins !== "object" || o.pins === null) continue;
+    const rawPins = Array.isArray(o.pins) ? o.pins : [];
     const pins: Record<number, string> = {};
     let valid = true;
-    for (const [k, v] of Object.entries(o.pins)) {
-      const pos = Number(k);
-      if (!Number.isInteger(pos) || typeof v !== "string") { valid = false; break; }
-      if (input.pattern.tokens[pos]?.kind !== "slot") { valid = false; break; } // pin at non-slot position: meaningless
-      pins[pos] = v;
+    for (const p of rawPins) {
+      if (typeof p !== "object" || p === null) { valid = false; break; }
+      const { index: pos, value } = p as Record<string, unknown>;
+      if (!Number.isInteger(pos) || typeof value !== "string") { valid = false; break; }
+      if (input.pattern.tokens[pos as number]?.kind !== "slot") { valid = false; break; } // pin at non-slot position: meaningless
+      pins[pos as number] = value;
     }
     if (!valid) continue;
     const built = applyPins(input.pattern, pins);

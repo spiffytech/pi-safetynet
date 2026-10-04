@@ -13,7 +13,7 @@ import { join } from "node:path";
 
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import { createJudgeAsk, recordBackgroundUsage } from "./judge-adapter.ts";
-import { JUDGE_SYSTEM_PROMPT } from "./judge.ts";
+import { JUDGE_SYSTEM_PROMPT, JUDGE_TOOL_NAME, JUDGE_VERDICT_SCHEMA } from "./judge.ts";
 
 const MODEL = { id: "judge-model", provider: "judge-provider", api: "anthropic-messages", name: "judge" };
 
@@ -31,7 +31,7 @@ function usage(input: number, output: number): Usage {
 function assistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 	return {
 		role: "assistant",
-		content: [{ type: "text", text: '{"verdict":"offer"}' }],
+		content: [{ type: "toolCall", id: "call-1", name: JUDGE_TOOL_NAME, arguments: { verdict: "offer" } }],
 		api: "anthropic-messages",
 		provider: "judge-provider",
 		model: "judge-model",
@@ -87,18 +87,24 @@ afterEach(() => {
 });
 
 describe("createJudgeAsk", () => {
-	it("sends only the judge system prompt and the judge prompt", async () => {
+	it("sends only the judge system prompt, the judge prompt, and the verdict tool", async () => {
 		const h = makeCtx(async () => assistantMessage());
 		const ask = createJudgeAsk(h.ctx);
 
-		const text = await ask("A bash shape recurred. Return strict JSON only.");
+		const verdict = await ask("A bash shape recurred. Decide.");
 
 		assert.equal(h.streams, 1);
 		assert.equal(h.sentContext.systemPrompt, JUDGE_SYSTEM_PROMPT);
 		assert.equal(h.sentContext.messages.length, 1, "exactly one message");
 		assert.equal(h.sentContext.messages[0].role, "user");
-		assert.equal(h.sentContext.messages[0].content, "A bash shape recurred. Return strict JSON only.");
-		assert.equal(text, '{"verdict":"offer"}');
+		assert.equal(h.sentContext.messages[0].content, "A bash shape recurred. Decide.");
+		assert.equal(h.sentContext.tools?.[0]?.name, JUDGE_TOOL_NAME, "verdict tool declared");
+		assert.deepEqual(verdict, { verdict: "offer" }, "returns the tool-call arguments, not prose");
+	});
+
+	it("rejects when the model never calls the verdict tool", async () => {
+		const h = makeCtx(async () => assistantMessage({ content: [{ type: "text", text: '{"verdict":"offer"}' }] }));
+		await assert.rejects(() => createJudgeAsk(h.ctx)("prompt"), /did not call submit_judge_verdict/);
 	});
 
 	it("records the harvested usage as an inferred_judge entry", async () => {
@@ -140,8 +146,8 @@ describe("createJudgeAsk", () => {
 	it("tolerates a sessionManager without appendUsage", async () => {
 		const h = makeCtx(async () => assistantMessage());
 		h.ctx.sessionManager = {};
-		const text = await createJudgeAsk(h.ctx)("prompt");
-		assert.equal(text, '{"verdict":"offer"}');
+		const verdict = await createJudgeAsk(h.ctx)("prompt");
+		assert.deepEqual(verdict, { verdict: "offer" });
 	});
 
 	it("aborts the request when the judge times out", async (t) => {
@@ -156,6 +162,26 @@ describe("createJudgeAsk", () => {
 		const pending = createJudgeAsk(h.ctx)("prompt");
 		t.mock.timers.tick(30_000);
 		await assert.rejects(() => pending, /judge timed out/);
+	});
+});
+
+describe("judge verdict schema", () => {
+	it("stays strict-compatible so constrained sampling is actually applied", () => {
+		const s = JUDGE_VERDICT_SCHEMA as any;
+		assert.equal(s.additionalProperties, false);
+		assert.ok(s.required.includes("candidates"), "candidates must be required (an optional array becomes an unsupported anyOf-with-null)");
+		assert.equal(s.properties.candidates.type, "array");
+		const candidate = s.properties.candidates.items;
+		assert.equal(candidate.additionalProperties, false);
+		assert.ok(candidate.required.includes("pins"), "pins must be required");
+		assert.equal(candidate.properties.pins.type, "array");
+		assert.ok(!("patternProperties" in candidate.properties.pins), "pins must be an array, not a dynamic map");
+		assert.equal(candidate.properties.pins.items.properties.index.type, "integer");
+		// No optional object/array property: it would be wrapped in anyOf-with-null and rejected.
+		for (const key of Object.keys(s.properties)) {
+			if (s.required.includes(key)) continue;
+			assert.ok(!["object", "array"].includes(s.properties[key].type), `${key} is an optional ${s.properties[key].type}`);
+		}
 	});
 });
 

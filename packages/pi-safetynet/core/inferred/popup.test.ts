@@ -34,7 +34,7 @@ async function makeComponent(opts: { theme?: PopupTheme; finished?: () => void; 
   const dir = mkdtempSync(join(tmpdir(), "safetynet-popup-"));
   mkdirSync(join(dir, ".pi"), { recursive: true });
   const engine = new InferredEngine(dir);
-  engine.judgeDeps = { ask: async () => JSON.stringify({ verdict: "offer", rationale: "ok" }) };
+  engine.judgeDeps = { ask: async () => ({ verdict: "offer", rationale: "ok" }) };
   engine.recordApproval(["git log main"], ["build"]);
   engine.recordApproval(["git log dev"], ["build"]);
   engine.recordApproval(["dd if=a.img bs=4M"], ["build"]);

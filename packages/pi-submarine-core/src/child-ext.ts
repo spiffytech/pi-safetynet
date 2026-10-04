@@ -23,6 +23,8 @@ import { isSensitivePath as defaultIsSensitivePath, normalizeToolPath } from "./
 const SUBAGENT_EPHEMERAL_CUSTOM_TYPE = "safetynet:subagent-ephemeral";
 /** customType for the one-shot settle-guard reminder injected into the child. */
 const REPORT_REMINDER_CUSTOM_TYPE = "safetynet:report-reminder";
+/** customType for the settle-guard reminder that demands the verdict tool. */
+const VERDICT_REMINDER_CUSTOM_TYPE = "safetynet:verdict-reminder";
 
 /** Name of the child→parent report tool. */
 export const REPORT_TOOL_NAME = "report_to_parent";
@@ -32,11 +34,33 @@ export const RESEARCH_TOOL_NAME = "codemode_research";
 const EXPLORE_TOOL_NAMES = ["read", "grep", "find", "ls", RESEARCH_TOOL_NAME];
 const BUILD_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", RESEARCH_TOOL_NAME];
 
-/** Active tool names for a subagent, plus report/watch tools when wired. */
-export function activeToolNames(taskType: "explore" | "build", reporting: boolean, watches = false): string[] {
+/** Active tool names for a subagent, plus report/watch/extra tools when wired. */
+export function activeToolNames(
+	taskType: "explore" | "build",
+	reporting: boolean,
+	watches = false,
+	extraToolNames: readonly string[] = [],
+): string[] {
 	const base = taskType === "explore" ? EXPLORE_TOOL_NAMES : BUILD_TOOL_NAMES;
 	const withReporting = reporting ? [...base, REPORT_TOOL_NAME] : [...base];
-	return watches ? [...withReporting, JOB_WATCH_TOOL_NAME] : withReporting;
+	const withWatches = watches ? [...withReporting, JOB_WATCH_TOOL_NAME] : withReporting;
+	return extraToolNames.length > 0 ? [...withWatches, ...extraToolNames] : withWatches;
+}
+
+/** Structural verdict-tool definition supplied by the host. Kept minimal so
+ *  pi-safetynet can build ONE object and register it on the pi and omp SDKs. */
+export interface VerdictToolDef {
+	name: string;
+	label: string;
+	description: string;
+	promptSnippet?: string;
+	promptGuidelines?: string[];
+	parameters: unknown;
+	constrainedSampling?: unknown;
+	execute: (
+		toolCallId: string,
+		params: any,
+	) => Promise<{ content: { type: "text"; text: string }[]; details?: unknown; terminate?: boolean }>;
 }
 
 export interface ChildExtensionOpts {
@@ -64,6 +88,10 @@ export interface ChildExtensionOpts {
 	 *  registered — the SAME surface the parent gets: the child can run/adopt/
 	 *  watch background work without sleeping; a fired watch resumes the child. */
 	watches?: JobWatchApi;
+	/** Structured-verdict tool the child must call. Registered, activated, and
+	 *  allowlisted like any child tool; a one-shot settle guard nudges the model
+	 *  until it calls the tool (mirrors the report guard). */
+	verdict?: VerdictToolDef;
 }
 
 /** Build the child extension factory for one subagent session. */
@@ -87,22 +115,53 @@ export function createChildExtension(opts: ChildExtensionOpts): (pi: ExtensionAP
 		});
 		const isSensitive = services.isSensitivePath ?? defaultIsSensitivePath;
 
+		const extraToolNames = opts.verdict ? [opts.verdict.name] : [];
+		let verdictCalled = false;
+		let verdictNudged = false;
+
 		// Force the correct active tool set. bindExtensions resets tools to defaults
 		// (read, bash, edit, write), so the subagent LLM would see edit/write/bash
 		// instead of read-only tools unless we fix it here.
 		pi.on("session_start", async () => {
-			pi.setActiveTools(activeToolNames(opts.taskType, opts.reporting !== undefined, opts.watches !== undefined));
+			pi.setActiveTools(activeToolNames(opts.taskType, opts.reporting !== undefined, opts.watches !== undefined, extraToolNames));
 		});
 
 		registerCollaboration(pi, opts.reporting);
 		registerWatches(pi, opts.watches);
 		services.registerChildTools?.(pi);
 
+		// Structured verdict: register the tool, track whether it was called, and
+		// nudge once at settle if it was not. Constrained sampling constrains the
+		// tool ARGUMENTS, not the model's decision to call it — this guard closes
+		// that gap so no path has to parse a verdict out of prose.
+		if (opts.verdict) {
+			const verdict = opts.verdict;
+			pi.registerTool(verdict as any);
+			// Track the executed call (not `tool_call`, so the allowlist/gate handler
+			// keeps its registration order). Tool started ⇒ it was called.
+			pi.on("tool_execution_start", (event) => {
+				if (event.toolName === verdict.name) verdictCalled = true;
+			});
+			pi.on("agent_before_settle", async () => {
+				if (verdictCalled || verdictNudged) return undefined;
+				verdictNudged = true;
+				return {
+					entries: [{
+						type: "custom_message" as const,
+						customType: VERDICT_REMINDER_CUSTOM_TYPE,
+						content: `You must call ${verdict.name} to report your verdict before finishing. Do not write the verdict as prose.`,
+						display: false,
+					}],
+					continue: true,
+				};
+			});
+		}
+
 		if (opts.taskType === "explore") {
 			// Defense-in-depth: block any tool outside the allowlist, and enforce the
 			// sensitive-file block. Without it a read-only child is a
 			// secret-exfiltration path the parent itself would deny (`read .env`).
-			const allowedTools = new Set(activeToolNames("explore", opts.reporting !== undefined, opts.watches !== undefined));
+			const allowedTools = new Set(activeToolNames("explore", opts.reporting !== undefined, opts.watches !== undefined, extraToolNames));
 			pi.on("tool_call", async (event: ToolCallEvent, _ctx: ExtensionContext) => {
 				if (!allowedTools.has(event.toolName)) {
 					return { block: true, reason: `Tool '${event.toolName}' is not available in explore mode` };

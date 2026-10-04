@@ -94,8 +94,8 @@ function makeReviewSpawn(verdicts: any[]) {
   return async () => {
     const v = verdicts[Math.min(i++, verdicts.length - 1)]!;
     return {
-      content: [{ type: "text", text: JSON.stringify(v.assessment) }],
-      details: {},
+      content: [{ type: "text", text: "" }],
+      details: { verdict: v.assessment },
     };
   };
 }

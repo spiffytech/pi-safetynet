@@ -2,7 +2,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   REVIEWER_SYSTEM_PROMPT,
-  parseAssessment,
+  validateAssessment,
+  buildSubmitVerdictTool,
+  SUBMIT_VERDICT_TOOL_NAME,
   formatActionJson,
   compactTranscript,
 } from "./reviewer-prompt.ts";
@@ -66,44 +68,52 @@ describe("REVIEWER_SYSTEM_PROMPT policy content", () => {
   });
 });
 
-// ─── parseAssessment: user_authorization defaulting ─────────────────────────
+// ─── validateAssessment + the submit_verdict tool ─────────────────────────
 
-describe("parseAssessment", () => {
-  it("defaults a missing user_authorization to unknown", () => {
-    const json = JSON.stringify({
-      risk_level: "high",
-      outcome: "deny",
-      rationale: "destructive",
-    });
-    const a = parseAssessment(json);
-    assert.ok(a, "assessment parses");
+describe("validateAssessment", () => {
+  it("accepts a full verdict and defaults a missing user_authorization to unknown", () => {
+    const a = validateAssessment({ risk_level: "high", outcome: "deny", rationale: "destructive" });
+    assert.ok(a, "assessment validates");
     assert.equal(a!.user_authorization, "unknown");
   });
 
   it("keeps an explicit user_authorization", () => {
-    const json = JSON.stringify({
-      risk_level: "low",
-      user_authorization: "high",
-      outcome: "allow",
-      rationale: "user asked for it",
-    });
-    const a = parseAssessment(json);
+    const a = validateAssessment({ risk_level: "low", user_authorization: "high", outcome: "allow", rationale: "user asked for it" });
     assert.ok(a);
     assert.equal(a!.user_authorization, "high");
   });
 
-  it("still rejects malformed output", () => {
-    assert.equal(parseAssessment("not json at all"), undefined);
+  it("rejects malformed arguments instead of coercing them", () => {
+    assert.equal(validateAssessment("not an object"), undefined);
+    assert.equal(validateAssessment({ risk_level: "maybe", outcome: "allow", rationale: "x" }), undefined);
+    assert.equal(validateAssessment({ risk_level: "low", user_authorization: "totally", outcome: "allow", rationale: "x" }), undefined);
+    assert.equal(validateAssessment({ risk_level: "low", outcome: "maybe", rationale: "x" }), undefined);
+    assert.equal(validateAssessment({ risk_level: "low", outcome: "allow", rationale: "   " }), undefined);
+  });
+});
+
+describe("submit_verdict tool", () => {
+  it("carries the assessment schema and constrained sampling", () => {
+    const tool = buildSubmitVerdictTool();
+    assert.equal(tool.name, SUBMIT_VERDICT_TOOL_NAME);
+    assert.deepEqual(tool.constrainedSampling, { type: "json_schema", strict: "prefer" });
+    const params = tool.parameters as { type: string; properties: Record<string, unknown>; required: string[] };
+    assert.equal(params.type, "object");
+    assert.equal(Object.keys(params.properties).length, 4);
+    assert.deepEqual([...params.required].sort(), ["outcome", "rationale", "risk_level", "user_authorization"]);
   });
 
-  it("still rejects output with an invalid user_authorization", () => {
-    const json = JSON.stringify({
-      risk_level: "low",
-      user_authorization: "totally",
-      outcome: "allow",
-      rationale: "x",
-    });
-    assert.equal(parseAssessment(json), undefined);
+  it("returns the arguments as details and terminates", async () => {
+    const tool = buildSubmitVerdictTool();
+    const args = { risk_level: "low", user_authorization: "high", outcome: "allow", rationale: "ok" };
+    const res = await tool.execute("call-1", args);
+    assert.deepEqual(res.details, args);
+    assert.equal(res.terminate, true);
+  });
+
+  it("the system prompt names the tool and no longer requests JSON prose", () => {
+    assert.match(REVIEWER_SYSTEM_PROMPT, /submit_verdict/);
+    assert.ok(!/Return strict JSON only/.test(REVIEWER_SYSTEM_PROMPT), "must not ask for JSON prose");
   });
 });
 
@@ -165,8 +175,8 @@ describe("runPermissionReview — profile canonicalization to ro/rw", () => {
         spawn: async (opts: any) => {
           captured = opts.prompt as string;
           return {
-            content: [{ type: "text", text: JSON.stringify({ risk_level: "low", user_authorization: "high", outcome: "allow", rationale: "ok" }) }],
-            details: {},
+            content: [{ type: "text", text: "" }],
+            details: { verdict: { risk_level: "low", user_authorization: "high", outcome: "allow", rationale: "ok" } },
           };
         },
       },
@@ -219,10 +229,10 @@ describe("runPermissionReview trajectory (user-messages-only transcript)", () =>
         spawn: async (opts: any) => {
           capturedPrompt = opts.prompt;
           return {
-            content: [{ type: "text", text: JSON.stringify({
-              risk_level: "low", user_authorization: "unknown", outcome: "allow", rationale: "ok",
-            }) }],
-            details: {},
+            content: [{ type: "text", text: "" }],
+            details: {
+              verdict: { risk_level: "low", user_authorization: "unknown", outcome: "allow", rationale: "ok" },
+            },
           };
         },
       },
@@ -257,10 +267,8 @@ describe("runPermissionReview trajectory (user-messages-only transcript)", () =>
         spawn: async (opts: any) => {
           capturedPrompt = opts.prompt;
           return {
-            content: [{ type: "text", text: JSON.stringify({
-              risk_level: "low", user_authorization: "high", outcome: "allow", rationale: "ok",
-            }) }],
-            details: {},
+            content: [{ type: "text", text: "" }],
+            details: { verdict: { risk_level: "low", user_authorization: "high", outcome: "allow", rationale: "ok" } },
           };
         },
       },

@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createChildExtension, activeToolNames, type ChildServicesFactory, type ChildGateRequest, type ChildVerdict } from "./index.ts";
+import { createChildExtension, activeToolNames, type ChildServicesFactory, type ChildGateRequest, type ChildVerdict, type VerdictToolDef } from "./index.ts";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -99,6 +99,7 @@ function buildChild(opts: {
 	taskType: "explore" | "build";
 	omitContextMessage?: boolean;
 	services?: ChildServicesFactory;
+	verdict?: VerdictToolDef;
 } = { taskType: "explore" }) {
 	const factory = createChildExtension({
 		taskType: opts.taskType,
@@ -108,6 +109,7 @@ function buildChild(opts: {
 		services: opts.services ?? fakeServices().factory,
 		serviceInputs: { trustExternalPaths: false, paradigm: "plan-build", modeAliases: {} },
 		...(opts.omitContextMessage !== undefined ? { omitContextMessage: opts.omitContextMessage } : {}),
+		...(opts.verdict !== undefined ? { verdict: opts.verdict } : {}),
 	});
 	const pi = createMockPi();
 	factory(pi as unknown as ExtensionAPI);
@@ -329,5 +331,57 @@ describe("activeToolNames", () => {
 		assert.deepEqual(activeToolNames("explore", false), ["read", "grep", "find", "ls", "codemode_research"]);
 		assert.deepEqual(activeToolNames("explore", true).at(-1), "report_to_parent");
 		assert.deepEqual(activeToolNames("build", false), ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode_research"]);
+	});
+
+	it("appends extra tool names", () => {
+		assert.deepEqual(
+			activeToolNames("explore", false, false, ["submit_verdict"]),
+			["read", "grep", "find", "ls", "codemode_research", "submit_verdict"],
+		);
+	});
+});
+
+// ─── Structured verdict tool ───────────────────────────────────────────────
+
+describe("child extension — structured verdict", () => {
+	const tool: VerdictToolDef = {
+		name: "submit_verdict",
+		label: "Submit verdict",
+		description: "verdict",
+		parameters: { type: "object" },
+		async execute() {
+			return { content: [{ type: "text" as const, text: "ok" }] };
+		},
+	};
+
+	it("registers the verdict tool and activates it on session_start", async () => {
+		const pi = buildChild({ taskType: "explore", verdict: tool });
+		assert.ok(pi.registeredTools.some((t) => t.name === "submit_verdict"), "verdict tool registered");
+		await pi.handlers.get("session_start")![0]!({}, createMockCtx());
+		assert.ok(pi.activeTools.includes("submit_verdict"), "verdict tool active");
+	});
+
+	it("allowlists the verdict tool in explore mode", async () => {
+		const pi = buildChild({ taskType: "explore", verdict: tool });
+		const handler = pi.handlers.get("tool_call")![0]!;
+		const result = await handler(makeToolCallEvent("submit_verdict", { risk_level: "low" }), createMockCtx());
+		assert.equal(result, undefined, "verdict tool allowed");
+	});
+
+	it("nudges once at settle when the verdict tool was not called", async () => {
+		const pi = buildChild({ taskType: "explore", verdict: tool });
+		const settle = pi.handlers.get("agent_before_settle")![0]!;
+		const first = await settle({}, createMockCtx());
+		assert.equal(first?.continue, true);
+		assert.equal(first!.entries[0].customType, "safetynet:verdict-reminder");
+		const second = await settle({}, createMockCtx());
+		assert.equal(second, undefined, "nudges once, then stays silent");
+	});
+
+	it("does not nudge after the verdict tool is called", async () => {
+		const pi = buildChild({ taskType: "explore", verdict: tool });
+		await pi.handlers.get("tool_execution_start")![0]!({ toolName: "submit_verdict" }, createMockCtx());
+		const result = await pi.handlers.get("agent_before_settle")![0]!({}, createMockCtx());
+		assert.equal(result, undefined);
 	});
 });
