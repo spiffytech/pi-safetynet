@@ -418,11 +418,16 @@ export class WatchManager {
 		this.holdDelivery = true;
 		try {
 			const rearmed: string[] = [];
+			const held: string[] = [];
+			let firedDown = 0;
 			for (const rec of [...this.records.values()]) {
 				if (rec.state !== "pending") continue;
 				// Sibling session already holds the waiters? Hands off — its wakes,
 				// its list row for us. Dead holder's claims fall through to ours.
-				if (!this.tryClaim(rec)) continue;
+				if (!this.tryClaim(rec)) {
+					held.push(`${rec.id}@s${rec.claim?.pid ?? "?"} [${rec.label}]`);
+					continue;
+				}
 				// Jobs are in-memory: a child-owned record whose job is gone (pi died
 				// mid-watch) is inherited by the parent so the monitoring intent
 				// survives. Deliberate deaths (close/mode-kill) cancel via cancelOwnedBy
@@ -442,20 +447,30 @@ export class WatchManager {
 				const expired = this.now() >= rec.expiresAt;
 				if (expired) {
 					this.fire(rec, "watch expired (lifetime cap) while pi was down");
+					firedDown++;
 				} else if (missed) {
 					this.fire(rec, `fired while pi was down: ${missed}${this.exitArtifactVerdict(rec)}`);
+					firedDown++;
 				} else {
 					this.arm(rec);
 					rearmed.push(`${rec.id} [${rec.label}]`);
 				}
 			}
-			// The model must know its watches exist even when nothing fired:
-			// an un-announced pending watch is a job silently dropped on the floor.
+			// The adoption notice is an INVENTORY: every watch that survived the
+			// restart, whoever holds it, and the truth about down-time fires. A
+			// summary that reads like "everything" but silently omits a sibling-held
+			// watch is how jobs get dropped on the floor.
+			const parts: string[] = [];
 			if (rearmed.length > 0) {
-				this.queueParent(
-					`job_watch: ${rearmed.length} watch(es) re-armed after restart — still waiting: ${rearmed.join(", ")}. Nothing fired while pi was down.`,
-					false,
-				);
+				parts.push(`${rearmed.length} watch(es) re-armed after restart — still waiting: ${rearmed.join(", ")}`);
+			}
+			if (held.length > 0) parts.push(`held by another session: ${held.join(", ")}`);
+			if (parts.length > 0) {
+				const tail =
+					firedDown > 0
+						? `${firedDown} fired while pi was down — see the events above.`
+						: "Nothing fired while pi was down.";
+				this.queueParent(`job_watch: ${parts.join(" | ")}. ${tail}`, false);
 			}
 		} finally {
 			this.holdDelivery = false;

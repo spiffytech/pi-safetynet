@@ -829,7 +829,9 @@ describe("concurrent sessions sharing one store", () => {
 		b.manager.flushEvents();
 		assert.ok(await waitFor(() => duo.a.events.length > 0), "owner (A) sees the fire");
 		await delay(120);
-		assert.equal(b.events.length, 0, "sibling (B) stays silent — A's waiters, A's wake");
+		assert.equal(b.events.filter((e) => /fired at/.test(e.text)).length, 0, "sibling (B) sends no wake — A's waiters, A's wake");
+		assert.equal(b.events.length, 1, "but B's adoption notice inventories the held watch");
+		assert.match(b.events[0]!.text, /held by another session: w-[\w-]+@s100/);
 		const view = b.manager.list().find((v) => v.id === res.id);
 		assert.equal(view?.claimedBy, 100, "but it is visible in B's list, marked held by session 100");
 		cleanup(duo.dir, duo.a, b);
@@ -901,6 +903,53 @@ describe("concurrent sessions sharing one store", () => {
 		assert.ok(await waitFor(() => b.events.some((e) => /fired at/.test(e.text)), 2000), "and completes the wait");
 		assert.equal(duo.a.events.filter((e) => /fired at/.test(e.text)).length, 0, "the stale holder's late fire is suppressed — exactly one wake");
 		cleanup(duo.dir, duo.a, b);
+	});
+
+	it("the adoption notice inventories everything and tells the truth about fires", async () => {
+		const duo = makeDuo();
+		// Z: claimed by a session that stays alive through the restart.
+		const c = makeHarness({
+			storePath: duo.storePath,
+			cwd: duo.cwd,
+			procIdentity: duo.procIdentity,
+			selfIdentity: () => ({ pid: 300, start: 3 }),
+		});
+		duo.alive.add(300);
+		c.manager.register({ kind: "parent" }, {
+			trigger: { kind: "deadline", at: Date.now() + 60_000 },
+			label: "held-z",
+			lifetimeMinutes: 5,
+		});
+		// X and Y: owned by A, which dies. Y's condition happens while down.
+		const log = join(duo.dir, "inventory.log");
+		writeFileSync(log, "working\n");
+		duo.a.manager.register({ kind: "parent" }, {
+			trigger: { kind: "deadline", at: Date.now() + 60_000 },
+			label: "rearm-x",
+			lifetimeMinutes: 5,
+		});
+		duo.a.manager.register({ kind: "parent" }, {
+			trigger: { kind: "file-contains", path: log, pattern: "^DONE$" },
+			label: "fires-y",
+			lifetimeMinutes: 5,
+		});
+		duo.a.manager.dispose();
+		duo.alive.delete(100);
+		appendFileSync(log, "DONE\n"); // completes while pi is down
+		const b = sibling(duo);
+		b.manager.reattachPending();
+		b.manager.flushEvents();
+		assert.ok(
+			await waitFor(() => b.events.some((e) => /fired while pi was down: pattern/.test(e.text)), 2000),
+			"the down-time fire has its own event",
+		);
+		const notice = b.events.find((e) => /re-armed after restart/.test(e.text));
+		assert.ok(notice, "the adoption notice exists");
+		assert.match(notice.text, /rearm-x/);
+		assert.match(notice.text, /held by another session: w-[\w-]+@s300 \[held-z\]/);
+		assert.match(notice.text, /1 fired while pi was down — see the events above/);
+		assert.doesNotMatch(notice.text, /Nothing fired/);
+		cleanup(duo.dir, c, b);
 	});
 
 	it("sibling records survive each other's saves", async () => {
