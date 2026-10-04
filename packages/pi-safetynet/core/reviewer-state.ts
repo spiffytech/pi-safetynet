@@ -343,8 +343,16 @@ async function runPermissionReviewWithModel(
     verdictTool: buildSubmitVerdictTool(),
     ...(modelOverride ? { model: modelOverride } : {}),
   });
+  // Turn count + tool activity answer the recurring question of whether the
+  // reviewer is a genuine investigating subagent (reads/greps/research) or an
+  // effectively one-shot verdict. Both fields are already returned by
+  // runSubagent and were previously discarded here — logging them is free.
+  const turns = result.details.turnCount;
+  const activities = Array.isArray(result.details.activities) ? result.details.activities : undefined;
   debugLog(
-    `safetynet: review timing — model="${modelSpec}" transcript=${transcriptMs}ms resolve=${spawnT0 - reviewT0 - transcriptMs}ms spawn=${Date.now() - spawnT0}ms total=${Date.now() - reviewT0}ms`,
+    `safetynet: review timing — model="${modelSpec}" transcript=${transcriptMs}ms resolve=${spawnT0 - reviewT0 - transcriptMs}ms spawn=${Date.now() - spawnT0}ms total=${Date.now() - reviewT0}ms`
+    + (typeof turns === "number" ? ` turns=${turns}` : "")
+    + (activities ? ` tools=${JSON.stringify(activities)}` : ""),
   );
 
   // Classify the result
