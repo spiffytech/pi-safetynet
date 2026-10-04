@@ -29,6 +29,21 @@ describe("buildTrigger", () => {
 		assert.match((fast as { error: string }).error, /quietForSeconds must be >= 60/);
 	});
 
+	it("pid alongside a condition is a death guard — nothing is silently dropped", () => {
+		const a = buildTrigger({ pid: 42, path: "/tmp/x", pattern: "DONE" });
+		assert.deepEqual(a.trigger, { kind: "file-contains", path: "/tmp/x", pattern: "DONE" });
+		assert.equal(a.guardPid, 42);
+		const b = buildTrigger({ pid: 42, path: "/tmp/x", quietForSeconds: 60 });
+		assert.equal(b.trigger?.kind, "file-quiet");
+		assert.equal(b.guardPid, 42);
+		const c = buildTrigger({ pid: 42, deadlineSeconds: 5 });
+		assert.equal(c.trigger?.kind, "deadline");
+		assert.equal(c.guardPid, 42);
+		const d = buildTrigger({ pid: 42 }); // alone: the condition IS the exit
+		assert.deepEqual(d.trigger, { kind: "pid-exit", pid: 42 });
+		assert.equal(d.guardPid, undefined);
+	});
+
 	it("rejects catastrophically-backtracking patterns at register time", () => {
 		const bad = buildTrigger({ path: "/tmp/x", pattern: "(a+)+b" });
 		assert.match((bad as { error: string }).error, /backtracking/);

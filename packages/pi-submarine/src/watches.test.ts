@@ -324,6 +324,80 @@ describe("formatWatchChip (the human's footer view)", () => {
 	});
 });
 
+describe("death guard — death is never silent", () => {
+	it("a guarded death fires the watch even when its condition never happens", async () => {
+		let ticks = 100;
+		const h = makeHarness({
+			pollIntervalMs: 10,
+			procIdentity: {
+				bootId: () => "boot-A",
+				startTicks: () => (ticks === 0 ? undefined : ticks),
+				alive: () => ticks !== 0,
+			},
+		});
+		const log = join(h.dir, "guard.log");
+		writeFileSync(log, "working\n");
+		const res = h.manager.register({ kind: "parent" }, {
+			trigger: { kind: "file-contains", path: log, pattern: "^NEVER$" },
+			guardPid: 777,
+			label: "guarded",
+			lifetimeMinutes: 5,
+		});
+		assert.equal(res.ok, true);
+		await delay(60);
+		assert.equal(h.events.length, 0, "pattern unmatched and the pid lives");
+		ticks = 0; // the guarded job dies without ever writing the pattern
+		assert.ok(await waitFor(() => h.events.length > 0), "death fires the watch");
+		assert.match(h.events[0]!.text, /guard: pid 777 exited/);
+		h.manager.dispose();
+		rmSync(h.dir, { recursive: true, force: true });
+	});
+
+	it("the condition wins the race — the guard is a backstop, not a hijack", async () => {
+		const h = makeHarness();
+		const log = join(h.dir, "race.log");
+		writeFileSync(log, "working\n");
+		h.manager.register({ kind: "parent" }, {
+			trigger: { kind: "file-contains", path: log, pattern: "^FINISHED$" },
+			guardPid: 777,
+			lifetimeMinutes: 5,
+		});
+		appendFileSync(log, "FINISHED\n");
+		assert.ok(await waitFor(() => h.events.length > 0), "condition fires");
+		assert.match(h.events[0]!.text, /pattern '\^FINISHED\$' found/);
+		assert.doesNotMatch(h.events[0]!.text, /guard:/);
+		h.manager.dispose();
+		rmSync(h.dir, { recursive: true, force: true });
+	});
+
+	it("guard death while pi was down surfaces at reattach", async () => {
+		const h = makeHarness({
+			procIdentity: { bootId: () => "boot-A", startTicks: () => 1, alive: () => true },
+		});
+		h.manager.register({ kind: "parent" }, {
+			trigger: { kind: "deadline", at: Date.now() + 60_000 },
+			guardPid: 999,
+			label: "guarded-down",
+			lifetimeMinutes: 5,
+		});
+		h.manager.dispose();
+		const h2 = makeHarness({
+			storePath: h.storePath,
+			cwd: join(h.dir, "cwd"),
+			procIdentity: { bootId: () => "boot-A", startTicks: () => undefined, alive: () => false },
+		});
+		h2.manager.reattachPending();
+		h2.manager.flushEvents();
+		assert.ok(
+			await waitFor(() => h2.events.some((e) => /fired while pi was down: guard: pid 999 exited/.test(e.text)), 2000),
+			"the guarded death is reported at adoption",
+		);
+		h2.manager.dispose();
+		rmSync(h.dir, { recursive: true, force: true });
+		rmSync(h2.dir, { recursive: true, force: true });
+	});
+});
+
 // ─── WatchManager ───
 
 describe("WatchManager", () => {

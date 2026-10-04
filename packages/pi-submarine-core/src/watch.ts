@@ -27,6 +27,9 @@ export type WatchOwner = { kind: "parent" } | { kind: "child"; jobId: string };
 export interface WatchInput {
 	/** Terminal trigger; omit for a heartbeat-only watch (cancelled manually). */
 	trigger?: WatchTrigger | undefined;
+	/** Death guard: if this pid ends (exit, reboot, pid reuse), the watch fires
+	 *  even when its own condition never happens. Death is never silent. */
+	guardPid?: number | undefined;
 	/** Preview/progress source: the last non-empty line rides every event. */
 	logPath?: string | undefined;
 	/** Heartbeat cadence in ms; each tick delivers a preview wake. */
@@ -57,6 +60,8 @@ export interface WatchView {
 	survival?: string | undefined;
 	/** Set when a sibling session holds the waiters for this watch. */
 	claimedBy?: number | undefined;
+	/** Set when this watch is death-guarded by a pid. */
+	guardPid?: number | undefined;
 }
 
 /** Result of an api call that creates a watch. */

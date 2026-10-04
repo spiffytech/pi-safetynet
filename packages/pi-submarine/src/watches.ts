@@ -41,6 +41,10 @@ export interface WatchRecord {
 	 *  is not an identity — pids recycle across reboots. */
 	bootId?: string;
 	procStart?: number;
+	/** Death guard: identity of the guarding pid (fires the watch when it ends). */
+	guardPid?: number;
+	guardBootId?: string;
+	guardStart?: number;
 	/** Process identity of the session that owns the waiters. Two live pi
 	 *  sessions share one store: only the claim holder arms/announces; everyone
 	 *  else sees the record in list and may cancel/extend it. */
@@ -475,11 +479,16 @@ export class WatchManager {
 				reason: `heartbeat ${input.heartbeatMs}ms below minimum ${this.opts.minHeartbeatMs}ms`,
 			};
 		}
+		if (input.guardPid !== undefined && (!Number.isInteger(input.guardPid) || input.guardPid <= 0)) {
+			return { ok: false, reason: `invalid guardPid: ${input.guardPid}` };
+		}
 		const triggerCheck = this.validateTrigger(input.trigger);
 		if (triggerCheck) return { ok: false, reason: triggerCheck };
 		const at = this.now();
 		const pidStart = input.trigger?.kind === "pid-exit" ? this.opts.procIdentity.startTicks(input.trigger.pid) : undefined;
 		const bootId = input.trigger?.kind === "pid-exit" ? this.opts.procIdentity.bootId() : undefined;
+		const guardStart = input.guardPid !== undefined ? this.opts.procIdentity.startTicks(input.guardPid) : undefined;
+		const guardBootId = input.guardPid !== undefined ? this.opts.procIdentity.bootId() : undefined;
 		const lifetimeMs = Math.min(
 			(input.lifetimeMinutes !== undefined ? input.lifetimeMinutes * 60_000 : this.opts.defaultLifetimeMs),
 			this.opts.maxLifetimeMs,
@@ -497,6 +506,9 @@ export class WatchManager {
 			...(input.survival ? { survival: input.survival } : {}),
 			...(bootId !== undefined ? { bootId } : {}),
 			...(pidStart !== undefined ? { procStart: pidStart } : {}),
+			...(input.guardPid !== undefined ? { guardPid: input.guardPid } : {}),
+			...(guardBootId !== undefined ? { guardBootId } : {}),
+			...(guardStart !== undefined ? { guardStart } : {}),
 			...(quietSt ? { quietLastSize: quietSt.size, lastGrowthAt: quietSt.mtimeMs } : {}),
 			createdAt: at,
 			expiresAt: at + lifetimeMs,
@@ -777,50 +789,66 @@ export class WatchManager {
 	/** Returns a hit description when the trigger condition holds, else null. */
 	private checkTrigger(rec: WatchRecord): string | null {
 		const t = rec.trigger;
-		if (!t) return null;
-		switch (t.kind) {
-			case "pid-exit": {
-				// A pid alone is not an identity: across reboots pids recycle. Match on
-				// process start ticks when the pid is alive, and on the kernel boot id
-				// when it is not, so "gone" is never mistaken for "still running".
-				const start = this.opts.procIdentity.startTicks(t.pid);
-				const alive = start !== undefined || this.opts.procIdentity.alive(t.pid);
-				if (!alive) {
-					const boot = this.opts.procIdentity.bootId();
-					if (rec.bootId !== undefined && boot !== undefined && boot !== rec.bootId) {
-						return `machine rebooted while we were away; pid ${t.pid} is gone`;
+		if (t) {
+			switch (t.kind) {
+				case "pid-exit": {
+					const hit = this.deathVerdict(t.pid, rec.procStart, rec.bootId);
+					return hit ? hit : this.guardCheck(rec);
+				}
+				case "file-contains": {
+					const hit = this.scanFile(rec, t);
+					return hit ? `pattern '${t.pattern}' found in ${t.path}` : this.guardCheck(rec);
+				}
+				case "file-quiet": {
+					const st = this.fileStat(t.path);
+					if (st === undefined) return this.guardCheck(rec); // log not created yet: not silence
+					if (st.size !== (rec.quietLastSize ?? st.size)) {
+						// It grew — and the growth time is the file's mtime, not "now":
+						// writes may have happened while pi was down.
+						rec.quietLastSize = st.size;
+						rec.lastGrowthAt = st.mtimeMs;
+						return this.guardCheck(rec);
 					}
-					return `pid ${t.pid} exited`;
+					const quietSince = rec.lastGrowthAt ?? rec.createdAt;
+					const quietFor = this.now() - quietSince;
+					return quietFor >= t.seconds * 1000
+						? `no new output in ${t.path} for ${Math.round(quietFor / 1000)}s`
+						: this.guardCheck(rec);
 				}
-				if (rec.procStart !== undefined && start !== undefined && start !== rec.procStart) {
-					return `pid ${t.pid} was reused by an unrelated process — the watched job is gone`;
+				case "deadline": {
+					return this.now() >= t.at
+						? `deadline ${new Date(t.at).toISOString()} passed`
+						: this.guardCheck(rec);
 				}
-				return null;
-			}
-			case "file-contains": {
-				const hit = this.scanFile(rec, t);
-				return hit ? `pattern '${t.pattern}' found in ${t.path}` : null;
-			}
-			case "file-quiet": {
-				const st = this.fileStat(t.path);
-				if (st === undefined) return null; // log not created yet: not silence
-				if (st.size !== (rec.quietLastSize ?? st.size)) {
-					// It grew — and the growth time is the file's mtime, not "now":
-					// writes may have happened while pi was down.
-					rec.quietLastSize = st.size;
-					rec.lastGrowthAt = st.mtimeMs;
-					return null;
-				}
-				const quietSince = rec.lastGrowthAt ?? rec.createdAt;
-				const quietFor = this.now() - quietSince;
-				return quietFor >= t.seconds * 1000
-					? `no new output in ${t.path} for ${Math.round(quietFor / 1000)}s`
-					: null;
-			}
-			case "deadline": {
-				return this.now() >= t.at ? `deadline ${new Date(t.at).toISOString()} passed` : null;
 			}
 		}
+		return this.guardCheck(rec);
+	}
+
+	/** The death guard: whatever else a watch waits for, a guarded pid ending
+	 *  (exit / reboot / pid reuse) fires it. Death is never silent. */
+	private guardCheck(rec: WatchRecord): string | null {
+		if (rec.guardPid === undefined) return null;
+		const verdict = this.deathVerdict(rec.guardPid, rec.guardStart, rec.guardBootId);
+		return verdict ? `guard: ${verdict}` : null;
+	}
+
+	/** Death of a pid, with the identity nuance: "gone" vs "reused" vs
+	 *  "machine rebooted" are different verdicts. */
+	private deathVerdict(pid: number, start: number | undefined, bootId: string | undefined): string | null {
+		const s = this.opts.procIdentity.startTicks(pid);
+		const alive = s !== undefined || this.opts.procIdentity.alive(pid);
+		if (!alive) {
+			const boot = this.opts.procIdentity.bootId();
+			if (bootId !== undefined && boot !== undefined && boot !== bootId) {
+				return `machine rebooted while we were away; pid ${pid} is gone`;
+			}
+			return `pid ${pid} exited`;
+		}
+		if (start !== undefined && s !== undefined && s !== start) {
+			return `pid ${pid} was reused by an unrelated process — the watched job is gone`;
+		}
+		return null;
 	}
 
 	private validateTrigger(t: WatchTrigger | undefined): string | null {
@@ -996,6 +1024,7 @@ export class WatchManager {
 			...(rec.verdict !== undefined ? { verdict: rec.verdict } : {}),
 			...(rec.lastLine !== undefined ? { lastLine: rec.lastLine } : {}),
 			...(rec.survival !== undefined ? { survival: rec.survival } : {}),
+			...(rec.guardPid !== undefined ? { guardPid: rec.guardPid } : {}),
 			...(rec.claim && rec.claim.pid !== this.self().pid ? { claimedBy: rec.claim.pid } : {}),
 		};
 	}

@@ -25,7 +25,7 @@ export function buildTrigger(params: {
 	deadlineSeconds?: number;
 	quietForSeconds?: number;
 	heartbeatSeconds?: number;
-}): { trigger?: WatchTrigger; error?: never } | { trigger?: never; error: string } {
+}): { trigger?: WatchTrigger; guardPid?: number; error?: never } | { trigger?: never; guardPid?: never; error: string } {
 	const wantsQuiet = params.quietForSeconds !== undefined;
 	const wantsFile = params.path !== undefined && params.pattern !== undefined;
 	if (params.pattern !== undefined && params.path === undefined) {
@@ -35,26 +35,31 @@ export function buildTrigger(params: {
 	if (params.path !== undefined && params.pattern === undefined && !wantsQuiet) {
 		return { error: "file trigger needs both path and pattern (or path + quietForSeconds)" };
 	}
-	const has = params.pid !== undefined || wantsFile || params.deadlineSeconds !== undefined || wantsQuiet;
-	if (!has && params.heartbeatSeconds === undefined) {
+	const hasCondition = wantsFile || wantsQuiet || params.deadlineSeconds !== undefined;
+	if (!hasCondition && params.pid === undefined && params.heartbeatSeconds === undefined) {
 		return { error: "job_watch needs a trigger (pid | path+pattern | quietForSeconds | deadlineSeconds) or heartbeatSeconds" };
 	}
-	if (params.pid !== undefined) return { trigger: { kind: "pid-exit", pid: params.pid } };
+	// A pid alongside another condition is a death GUARD (death always wakes);
+	// alone it is the condition itself. Nothing is silently dropped.
+	const guard = hasCondition && params.pid !== undefined ? params.pid : undefined;
+	const guarded = <T extends object>(t: T) => ({ trigger: t, ...(guard !== undefined ? { guardPid: guard } : {}) });
 	if (wantsFile) {
 		const bad = validatePatternRegex(params.pattern!);
 		if (bad) return { error: bad };
-		return { trigger: { kind: "file-contains", path: params.path!, pattern: params.pattern! } };
+		return guarded({ kind: "file-contains", path: params.path!, pattern: params.pattern! });
 	}
 	if (wantsQuiet) {
 		if (!(params.quietForSeconds! >= 60)) return { error: "quietForSeconds must be >= 60 (silence is not speed; give the job room)" };
 		if (!params.path) return { error: "quietForSeconds needs a path (the log whose silence to watch)" };
-		return { trigger: { kind: "file-quiet", path: params.path, seconds: params.quietForSeconds! } };
+		return guarded({ kind: "file-quiet", path: params.path, seconds: params.quietForSeconds! });
 	}
 	if (params.deadlineSeconds !== undefined) {
 		if (!(params.deadlineSeconds > 0)) return { error: "deadlineSeconds must be > 0" };
-		return { trigger: { kind: "deadline", at: Date.now() + params.deadlineSeconds * 1000 } };
+		return guarded({ kind: "deadline", at: Date.now() + params.deadlineSeconds * 1000 });
 	}
-	return {};
+	// pid alone: the condition IS the exit.
+	if (params.pid !== undefined) return { trigger: { kind: "pid-exit", pid: params.pid } };
+	return {}; // heartbeat-only
 }
 
 /**
@@ -173,6 +178,7 @@ export function formatWatchViews(views: Array<Pick<WatchView, "id" | "state" | "
 		.map((v) => {
 			const parts = [`${v.id} [${v.state}]`, v.label];
 			if (v.state === "pending" && v.heartbeatMs) parts.push(`heartbeat ${Math.round(v.heartbeatMs / 1000)}s`);
+			if (v.guardPid !== undefined) parts.push(`guard:pid ${v.guardPid}`);
 			if (v.claimedBy !== undefined) parts.push(`held by session ${v.claimedBy}`);
 			if (v.survival) parts.push(v.survival);
 			if (v.verdict) parts.push(`verdict: ${v.verdict}`);
@@ -182,9 +188,10 @@ export function formatWatchViews(views: Array<Pick<WatchView, "id" | "state" | "
 		.join("\n");
 }
 
-function formatCreate(res: JobWatchCreateResult, action: string, trigger: WatchTrigger | undefined, heartbeatMs?: number): string {
+function formatCreate(res: JobWatchCreateResult, action: string, trigger: WatchTrigger | undefined, heartbeatMs?: number, guardPid?: number): string {
 	if (!res.ok) return res.reason;
 	const parts = [`job_watch ${res.id}: ${action === "run" ? `spawned pid ${res.pid} detached, logging to ${res.logPath}` : action === "attach" ? `attached to pid ${(trigger as { pid?: number })?.pid ?? "?"}` : "registered"} [${triggerDesc(trigger)}]`];
+	if (guardPid !== undefined) parts.push(`guard: death of pid ${guardPid} fires it too`);
 	if (heartbeatMs) parts.push(`heartbeat ${Math.round(heartbeatMs / 1000)}s`);
 	if (res.survival) parts.push(res.survival);
 	if (res.logPath && action !== "run") parts.push(`log: ${res.logPath}`);
@@ -198,14 +205,14 @@ export function registerJobWatchTool(pi: ExtensionAPI, api: JobWatchApi): void {
 		name: JOB_WATCH_TOOL_NAME,
 		label: "Job Watch",
 		description:
-			"Watch background work without babysitting: notified on pid-exit, file regex, silence, deadline, or heartbeat. " +
+			"Watch background work without babysitting: notified on pid-exit, file regex, silence, deadline, or heartbeat — any watch can carry a pid so death always wakes. " +
 			"Prefer over sleep/poll loops. Actions: run (launch detached + watch) | attach (adopt work you backgrounded) | register | list | tail | extend | cancel.",
 		promptSnippet: "Run/watch background jobs, get notified on events",
 		namespace: { name: "pi-submarine", description: "background subagents and job watches" },
 		parameters: Type.Object({
 			action: Type.Optional(Type.String({ description: "run|attach|register|list|tail|extend|cancel" })),
 			command: Type.Optional(Type.String({ description: "run: command (detached, survives pi)" })),
-			pid: Type.Optional(Type.Number({ description: "fire when pid exits" })),
+			pid: Type.Optional(Type.Number({ description: "fires on exit; alongside another trigger, death-guards it too" })),
 			path: Type.Optional(Type.String({ description: "file to watch" })),
 			pattern: Type.Optional(Type.String({ description: "regex (m-flagged; ^…$ = whole line)" })),
 			deadlineSeconds: Type.Optional(Type.Number({ description: "fire in N seconds" })),
@@ -220,7 +227,12 @@ export function registerJobWatchTool(pi: ExtensionAPI, api: JobWatchApi): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			// Bare `pid:` means "adopt this process" — the attach path (survival
 			// verdict + log adoption) is what a pid-only call wants.
-			const pidOnly = params.pid !== undefined && params.path === undefined && params.pattern === undefined && params.deadlineSeconds === undefined;
+			const pidOnly =
+				params.pid !== undefined &&
+				params.path === undefined &&
+				params.pattern === undefined &&
+				params.deadlineSeconds === undefined &&
+				params.quietForSeconds === undefined;
 			const action = (params.action ?? (pidOnly ? "attach" : "register")).toLowerCase();
 			const heartbeatMs = params.heartbeatSeconds !== undefined ? params.heartbeatSeconds * 1000 : undefined;
 
@@ -252,6 +264,7 @@ export function registerJobWatchTool(pi: ExtensionAPI, api: JobWatchApi): void {
 
 			let res: JobWatchCreateResult;
 			let trigger: WatchTrigger | undefined;
+			let guardPid: number | undefined;
 			if (action === "run") {
 				if (!params.command) return { content: [{ type: "text", text: "run needs a command" }], details: { error: "missing command" } };
 				res = await api.run({
@@ -276,8 +289,10 @@ export function registerJobWatchTool(pi: ExtensionAPI, api: JobWatchApi): void {
 				const built = buildTrigger(params);
 				if ("error" in built) return { content: [{ type: "text", text: built.error }], details: { error: built.error } };
 				trigger = built.trigger;
+				guardPid = built.guardPid;
 				res = api.register({
 					...(trigger ? { trigger } : {}),
+					...(built.guardPid !== undefined ? { guardPid: built.guardPid } : {}),
 					...(params.logPath ? { logPath: params.logPath } : {}),
 					...(heartbeatMs !== undefined ? { heartbeatMs } : {}),
 					...(params.label ? { label: params.label } : {}),
@@ -286,7 +301,7 @@ export function registerJobWatchTool(pi: ExtensionAPI, api: JobWatchApi): void {
 			}
 
 			if (res.ok && res.notice) api.notifyParent(res.notice);
-			const text = formatCreate(res, action, trigger, heartbeatMs) + (res.ok && res.notice ? `\n${res.notice}` : "");
+			const text = formatCreate(res, action, trigger, heartbeatMs, guardPid) + (res.ok && res.notice ? `\n${res.notice}` : "");
 			return { content: [{ type: "text", text }], details: res.ok ? { watchId: res.id, ...(res.notice ? { notice: res.notice } : {}) } : { error: res.reason } };
 		},
 	});
