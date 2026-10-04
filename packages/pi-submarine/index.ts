@@ -37,7 +37,7 @@ import {
 	type SubagentJob,
 } from "./src/subagent-jobs.ts";
 import { startPersistentSubagent } from "./src/subagent-runner.ts";
-import { WatchManager, watchStorePath } from "./src/watches.ts";
+import { WatchManager, watchStorePath, formatWatchChip } from "./src/watches.ts";
 import { createJobWatchApi, type CommandVerdict } from "./src/job-watch-api.ts";
 import { consumeSubagentFailure, clearSubagentFailures, recordSubagentFailure } from "./src/failure.ts";
 import { standaloneChildServices } from "./src/standalone-services.ts";
@@ -85,8 +85,13 @@ function refreshJobsStatus(): void {
 	const jobs = jobManager.list().filter((j) => j.state !== "failed");
 	const running = jobs.filter((j) => j.state === "starting" || j.state === "running").length;
 	const idle = jobs.filter((j) => j.state === "idle").length;
+	// The human's only at-a-glance view of background work: subagent jobs plus
+	// what the watches are waiting on and who holds them.
+	const sub = jobs.length ? `⏳ ${running} running, ${idle} idle` : undefined;
+	const chip = formatWatchChip(watchManager?.list() ?? []);
+	const text = [sub, chip].filter(Boolean).join(" · ");
 	try {
-		uiCtx.ui.setStatus("safetynet-jobs", jobs.length ? `⏳ ${running} running, ${idle} idle` : undefined);
+		uiCtx.ui.setStatus("safetynet-jobs", text || undefined);
 	} catch {
 		/* footer may be torn down */
 	}
@@ -488,9 +493,9 @@ export default function piSubmarineExtension(pi: ExtensionAPI): void {
 			minHeartbeatMs: num("PI_SUBMARINE_WATCH_MIN_HEARTBEAT_MS", 60_000),
 			pollIntervalMs: num("PI_SUBMARINE_WATCH_POLL_MS", 1_000),
 			maxLifetimeMs: num("PI_SUBMARINE_WATCH_MAX_LIFETIME_MS", 24 * 60 * 60_000),
-			sendParentEvent: (text, urgent) => {
+			sendParentEvent: (text, urgent, display) => {
 				pi.sendMessage(
-					{ customType: WATCH_EVENT_CUSTOM_TYPE, content: text, display: false },
+					{ customType: WATCH_EVENT_CUSTOM_TYPE, content: text, display: display ?? true },
 					urgent ? { triggerTurn: true, deliverAs: "followUp" } : {},
 				);
 			},
@@ -506,6 +511,7 @@ export default function piSubmarineExtension(pi: ExtensionAPI): void {
 				const job = jobManager?.get(jobId);
 				return !!job && !job.closed;
 			},
+			onStateChange: () => refreshJobsStatus(),
 			canDeliver: () => !compactionActive && !parentBusy,
 		});
 	}

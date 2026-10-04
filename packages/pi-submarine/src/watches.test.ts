@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rm
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WatchManager, watchStorePath, WATCH_EXIT_MARKER, IncrementalMatcher, OVERLAP_BYTES } from "./watches.ts";
+import { WatchManager, watchStorePath, WATCH_EXIT_MARKER, IncrementalMatcher, OVERLAP_BYTES, formatWatchChip } from "./watches.ts";
 import type { WatchManagerOptions } from "./watches.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -285,6 +285,42 @@ describe("reboot & pid-reuse identity", () => {
 		assert.match(h.events[0]!.text, /no exit artifact/);
 		h.manager.dispose();
 		rmSync(h.dir, { recursive: true, force: true });
+	});
+});
+
+describe("formatWatchChip (the human's footer view)", () => {
+	const view = (over: Partial<import("pi-submarine-core").WatchView>): import("pi-submarine-core").WatchView => ({
+		id: "w-1",
+		state: "pending",
+		label: "pid 777 exits",
+		owner: { kind: "parent" },
+		createdAt: 0,
+		expiresAt: 0,
+		...over,
+	});
+
+	it("is silent when nothing is being waited on", () => {
+		assert.equal(formatWatchChip([]), undefined);
+		assert.equal(formatWatchChip([view({ state: "fired" })]), undefined);
+	});
+
+	it("shows what is waited on and who holds it", () => {
+		const chip = formatWatchChip([
+			view({}),
+			view({ id: "w-2", label: "a-very-long-label-that-just-keeps-going-on-forever", claimedBy: 200 }),
+		]);
+		assert.ok(chip);
+		assert.match(chip, /⏱ 2 waiting/);
+		assert.match(chip, /w-1: pid 777 exits/);
+		assert.match(chip, /w-2@s200:/);
+		assert.match(chip, /…/);
+	});
+
+	it("caps the list at three with a +N", () => {
+		const chip = formatWatchChip([view({ id: "w-1" }), view({ id: "w-2" }), view({ id: "w-3" }), view({ id: "w-4" })]);
+		assert.ok(chip);
+		assert.match(chip, /\+1$/);
+		assert.doesNotMatch(chip, /w-4/);
 	});
 });
 

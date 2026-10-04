@@ -68,8 +68,10 @@ export interface WatchManagerOptions {
 	/** Hard ceiling for any lifetime or extension (the forgotten-watch guillotine). */
 	maxLifetimeMs?: number;
 	now?: () => number;
-	/** Deliver an event to the parent session (urgent = triggers a turn). */
-	sendParentEvent(text: string, urgent: boolean): void;
+	/** Deliver an event to the parent session (urgent = triggers a turn).
+	 *  `display` marks human-visible entries (fires/warnings/notices — NOT
+	 *  heartbeats, which would spam the transcript). */
+	sendParentEvent(text: string, urgent: boolean, display?: boolean): void;
 	/** Resume a child job with an event. Returns false when the job is gone. */
 	resumeChild(jobId: string, text: string): boolean;
 	/** Whether a child job is still live (restart-orphan detection at reattach). */
@@ -79,6 +81,9 @@ export interface WatchManagerOptions {
 	/** This session's process identity (claims). Injectable so tests can
 	 *  simulate two live sessions in one process. */
 	selfIdentity?: () => { pid: number; start?: number };
+	/** Human-facing liveness: called whenever watch state changes so a UI can
+	 *  show what is owned and being waited on. */
+	onStateChange?(): void;
 	/** Deferral gate: false while the parent compacts or is mid-turn. */
 	canDeliver?(): boolean;
 }
@@ -154,17 +159,18 @@ export function watchStorePath(agentDir: string, cwd: string): string {
 }
 
 export class WatchManager {
-	private readonly opts: Required<Omit<WatchManagerOptions, "now" | "canDeliver" | "isChildLive" | "procIdentity" | "selfIdentity">> & {
+	private readonly opts: Required<Omit<WatchManagerOptions, "now" | "canDeliver" | "isChildLive" | "procIdentity" | "selfIdentity" | "onStateChange">> & {
 		now: () => number;
 		canDeliver: () => boolean;
 		isChildLive: (jobId: string) => boolean;
 		procIdentity: ProcIdentity;
 		selfIdentity: () => { pid: number; start?: number };
+		onStateChange: () => void;
 	};
 	private readonly records = new Map<string, WatchRecord>();
 	private tickTimer: ReturnType<typeof setInterval> | undefined;
 	private readonly lastBeatAt = new Map<string, number>();
-	private readonly pendingEvents: Array<{ text: string; urgent: boolean }> = [];
+	private readonly pendingEvents: Array<{ text: string; urgent: boolean; display: boolean }> = [];
 	private readonly matchers = new Map<string, IncrementalMatcher>();
 	private readonly reaped = new Set<string>();
 	private lastReconcileMtime = 0;
@@ -194,6 +200,7 @@ export class WatchManager {
 					const start = readProcStat(process.pid).start;
 					return { pid: process.pid, ...(start !== undefined ? { start } : {}) };
 				}),
+			onStateChange: options.onStateChange ?? (() => {}),
 			canDeliver: options.canDeliver ?? (() => true),
 		};
 		this.load();
@@ -450,6 +457,7 @@ export class WatchManager {
 			this.holdDelivery = false;
 		}
 		this.save();
+		this.opts.onStateChange();
 	}
 
 	// ─── Registration surface ───────────────────────────────────────────────
@@ -478,7 +486,7 @@ export class WatchManager {
 		);
 		const quietSt = input.trigger?.kind === "file-quiet" ? this.fileStat(input.trigger.path) : undefined;
 		const rec: WatchRecord = {
-			id: `w-${this.self().pid}-${++this.counter}`,
+			id: "", // minted below, atomically with the write
 			claim: this.self(),
 			owner,
 			cwd: this.opts.cwd,
@@ -495,9 +503,27 @@ export class WatchManager {
 			state: "pending",
 			logOffset: 0,
 		};
+		// Ids are minted from the shared store under the lock: `w-<n>`, unique
+		// per cwd across concurrent sessions, and short enough to live in a
+		// status line. (Session identity is the claim's job, not the id's.)
+		const minted = this.commit((fileRecs) => {
+			let max = 0;
+			for (const key of [...fileRecs.keys(), ...this.records.keys()]) {
+				const n = Number(key.replace(/^w-/, ""));
+				if (Number.isInteger(n)) max = Math.max(max, n);
+			}
+			rec.id = `w-${max + 1}`;
+			fileRecs.set(rec.id, rec);
+			return rec.id;
+		});
+		if (minted === undefined) {
+			// Lock trouble: fall back to a pid-scoped id and persist the usual way.
+			rec.id = `w-${this.self().pid}-${++this.counter}`;
+			this.save();
+		}
 		this.records.set(rec.id, rec);
 		this.arm(rec);
-		this.save();
+		this.opts.onStateChange();
 		return { ok: true, id: rec.id };
 	}
 
@@ -514,6 +540,7 @@ export class WatchManager {
 		rec.firedAt = this.now();
 		this.disarm(rec);
 		this.persist(rec);
+		this.opts.onStateChange();
 		return { ok: true, reason: `cancelled ${id}` };
 	}
 
@@ -531,6 +558,7 @@ export class WatchManager {
 		rec.expiresAt = this.now() + ms;
 		rec.expiryWarned = false;
 		this.persist(rec);
+		this.opts.onStateChange();
 		return { ok: true, reason: `extended ${id} by ${Math.round(ms / 60_000)}min — now expires ${new Date(rec.expiresAt).toISOString()}` };
 	}
 
@@ -608,7 +636,7 @@ export class WatchManager {
 		while (this.pendingEvents.length > 0 && this.opts.canDeliver()) {
 			const ev = this.pendingEvents[0]!;
 			try {
-				this.opts.sendParentEvent(ev.text, ev.urgent);
+				this.opts.sendParentEvent(ev.text, ev.urgent, ev.display);
 				this.pendingEvents.shift();
 			} catch {
 				break; // retry at the next boundary
@@ -653,6 +681,7 @@ export class WatchManager {
 				// Sibling holds it while alive; adopt it the moment the holder dies.
 				if (!this.claimLive(rec) && this.tryClaim(rec)) {
 					this.arm(rec);
+					this.opts.onStateChange();
 					this.queueParent(`job_watch: took over ${rec.id} [${rec.label}] — its session ended`, false);
 				}
 				continue;
@@ -727,6 +756,7 @@ export class WatchManager {
 				rec,
 				`⚠ watch ${rec.id} [${rec.label}] expires in ~${minsLeft}min. Still needed? Extend it: job_watch extend (id=${rec.id}, lifetimeMinutes=…)`,
 				true,
+				true,
 			);
 		}
 		if (this.now() >= rec.expiresAt) {
@@ -739,7 +769,7 @@ export class WatchManager {
 		if (rec.trigger?.kind !== "file-contains") this.refreshPreview(rec);
 		const at = new Date(this.now()).toISOString();
 		const preview = rec.lastLine ? ` | last: ${rec.lastLine}` : "";
-		this.deliver(rec, `watch ${rec.id} heartbeat at ${at} [${rec.label}]${preview}`, true);
+		this.deliver(rec, `watch ${rec.id} heartbeat at ${at} [${rec.label}]${preview}`, true, false);
 	}
 
 	// ─── Trigger evaluation ─────────────────────────────────────────────────
@@ -907,7 +937,8 @@ export class WatchManager {
 		const preview = rec.lastLine ? `\nlast: ${rec.lastLine}` : "";
 		// pid-exit alone cannot say clean-exit vs killed; the exit artifact can.
 		const artifact = rec.trigger?.kind === "pid-exit" ? this.exitArtifactVerdict(rec) : "";
-		this.deliver(rec, `watch ${rec.id} fired at ${at} [${rec.label}]: ${verdict}${artifact}${preview}`, true);
+		this.opts.onStateChange();
+		this.deliver(rec, `watch ${rec.id} fired at ${at} [${rec.label}]: ${verdict}${artifact}${preview}`, true, true);
 	}
 
 	/**
@@ -915,28 +946,28 @@ export class WatchManager {
 	 * job is gone (closed, or a restart orphaned it) the parent hears instead.
 	 * Parent events defer while the parent is busy/compacting.
 	 */
-	private deliver(rec: WatchRecord, text: string, urgent: boolean): void {
+	private deliver(rec: WatchRecord, text: string, urgent: boolean, display: boolean): void {
 		const capped = capBashTail(text);
 		if (rec.owner.kind === "child") {
 			if (!this.opts.resumeChild(rec.owner.jobId, capped)) {
-				this.queueParent(`${capped}\n(owner job ${rec.owner.jobId} is gone; acting on its behalf)`, true);
+				this.queueParent(`${capped}\n(owner job ${rec.owner.jobId} is gone; acting on its behalf)`, true, display);
 			}
 			return;
 		}
-		this.queueParent(capped, urgent);
+		this.queueParent(capped, urgent, display);
 	}
 
-	private queueParent(text: string, urgent: boolean): void {
+	private queueParent(text: string, urgent: boolean, display = true): void {
 		if (!this.holdDelivery && this.opts.canDeliver()) {
 			try {
-				this.opts.sendParentEvent(text, urgent);
+				this.opts.sendParentEvent(text, urgent, display);
 				return;
 			} catch {
 				// A send can fail at session boundaries (e.g. before the first turn);
 				// hold the event and let flushEvents() retry at the next boundary.
 			}
 		}
-		this.pendingEvents.push({ text, urgent });
+		this.pendingEvents.push({ text, urgent, display });
 	}
 
 	private defaultLabel(input: WatchInput): string {
@@ -968,6 +999,22 @@ export class WatchManager {
 			...(rec.claim && rec.claim.pid !== this.self().pid ? { claimedBy: rec.claim.pid } : {}),
 		};
 	}
+}
+
+/**
+ * Human-facing status chip: what is being waited on and who holds it
+ * (`w-2@s200` = a sibling session owns the waiters). Undefined when nothing
+ * is pending — the footer reverts to silence.
+ */
+export function formatWatchChip(views: WatchView[]): string | undefined {
+	const pending = views.filter((v) => v.state === "pending");
+	if (pending.length === 0) return undefined;
+	const items = pending.slice(0, 3).map((v) => {
+		const label = v.label.length > 32 ? `${v.label.slice(0, 31)}…` : v.label;
+		return `${v.id}${v.claimedBy !== undefined ? `@s${v.claimedBy}` : ""}: ${label}`;
+	});
+	const more = pending.length > 3 ? ` +${pending.length - 3}` : "";
+	return `⏱ ${pending.length} waiting: ${items.join(", ")}${more}`;
 }
 
 function sameOwner(a: WatchOwner, b: WatchOwner): boolean {
