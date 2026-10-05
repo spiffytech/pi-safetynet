@@ -177,6 +177,11 @@ describe("profiles", () => {
       assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("interpreter one-liners"));
     });
 
+    it("points at a read-only alternative before reaching for interpreter one-liners", () => {
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("read-only alternative"));
+      assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("sandboxed code tool"));
+    });
+
     it("forbids delegating implementation to a subagent and points to the rw switch", () => {
       assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("delegating implementation to a subagent"));
       assert.ok(READ_ONLY_SYSTEM_PROMPT_BLOCK.includes("Do not spawn a subagent to implement changes while in read-only mode"));

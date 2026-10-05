@@ -164,6 +164,11 @@ describe("denialGuidance / denialMessage", () => {
     }
   });
 
+  it("mode guidance points at a read-only alternative before asking for a write mode", () => {
+    assert.match(denialGuidance("mode"), /read-only alternative/);
+    assert.match(denialGuidance("mode"), /let the user/);
+  });
+
   it("composes label + reason + guidance", () => {
     const detail = denialDetail("read", "/etc/passwd", "Hazardous file", "ruleset");
     const guidance = denialGuidance("ruleset");

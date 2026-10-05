@@ -204,7 +204,7 @@ export function denialDetail(
 export function denialGuidance(source: DenialSource): string {
   switch (source) {
     case "mode":
-      return "Describe the intended change and let the user switch to a write mode instead; do not retry the write or work around it.";
+      return "Check whether you have a read-only alternative that accomplishes this; if not, describe the intended change and let the user switch to a write mode. Do not retry the write or work around it.";
     case "ruleset":
       return "If this action is necessary, explain why and ask the user; otherwise continue without it. Do not retry the denied action.";
     case "headless":

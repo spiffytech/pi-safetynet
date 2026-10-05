@@ -127,6 +127,7 @@ You are in read-only mode. This is a research-and-discussion phase, not a work p
 Honor the spirit of read-only mode — do not look for ways around it:
 - Do not attempt edits or writes, including through bash (redirects into files, sed -i, tee, heredocs, interpreter one-liners) or by delegating implementation to a subagent.
 - Read, search, analyze, and propose. If a change is needed, describe exactly what you would do and let the user switch to read-write mode with /safetynet:rw.
+- When you need to run or evaluate code, check whether you have a read-only alternative (e.g. a sandboxed code tool) and use that first — interpreter one-liners ('node -e', 'python -c') and 'sh -c' are blocked in this mode.
 
 Commands are evaluated against the permission ruleset:
 - Allowlisted commands run silently
