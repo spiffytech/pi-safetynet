@@ -555,7 +555,9 @@ export default function piSubmarineExtension(pi: ExtensionAPI): void {
 		refreshJobsStatus();
 	});
 
-	// Defer subagent wakes while the parent compacts; drain when it finishes.
+	// Defer subagent wakes and watch events while the parent compacts; drain both
+	// when it finishes (a watch that fires mid-compaction must not wait for the
+	// next turn boundary to surface).
 	pi.on("session_before_compact", async () => {
 		compactionActive = true;
 		if (compactionWatchdog) clearTimeout(compactionWatchdog);
@@ -564,6 +566,7 @@ export default function piSubmarineExtension(pi: ExtensionAPI): void {
 			compactionWatchdog = undefined;
 			compactionActive = false;
 			jobManager?.drain();
+			watchManager?.flushEvents();
 		}, 5 * 60_000);
 	});
 	const onCompactionDone = async () => {
@@ -573,6 +576,7 @@ export default function piSubmarineExtension(pi: ExtensionAPI): void {
 		}
 		compactionActive = false;
 		jobManager?.drain();
+		watchManager?.flushEvents();
 	};
 	pi.on("session_compact", onCompactionDone);
 	pi.on("session_compact_failed", onCompactionDone);
