@@ -82,8 +82,19 @@ export function loadAutoApproveConfig(): AutoApproveConfig {
       timeoutMs: typeof raw.timeoutMs === "number" ? raw.timeoutMs : 90000,
       maxDenials: typeof raw.maxDenials === "number" ? raw.maxDenials : 3,
       latencyWarnEmaMs: typeof raw.latencyWarnEmaMs === "number" ? raw.latencyWarnEmaMs : 8000,
+      reviewMode: raw.reviewMode === "session" ? "session" : "one-shot",
     };
   } catch {
     return {};
   }
+}
+
+/** The active review methodology. Env SAFETYNET_REVIEW_MODE ("session" /
+ *  "one-shot") overrides the config file for quick flipping; anything else
+ *  falls through to `autoApprove.reviewMode`, defaulting to the one-shot
+ *  reviewer. The session reviewer is available but deactivated. */
+export function reviewMode(): "one-shot" | "session" {
+  const env = process.env.SAFETYNET_REVIEW_MODE?.trim();
+  if (env === "session" || env === "one-shot") return env;
+  return loadAutoApproveConfig().reviewMode ?? "one-shot";
 }

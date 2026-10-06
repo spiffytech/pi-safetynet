@@ -141,6 +141,12 @@ export interface SubmitVerdictTool {
 
 // ─── Action JSON serialization ─────────────────────────────────────────────
 
+/** Appended to the system prompt when the review runs one-shot (no session, no
+ *  tools). It overrides the tool-facing sections above: those describe the
+ *  session reviewer's research tools, which do not exist here. */
+export const ONE_SHOT_ADDENDUM = `## One-shot mode (this review has NO tools)
+You have no tools except submit_verdict: no read, grep, find, ls, or codemode_research, and no way to inspect the filesystem. Disregard every reference above to research tools — the "Identity and scope" tool list and the "Investigation" section describe a different harness. Judge from the transcript and the planned action JSON alone. Local state you cannot verify from that text stays unverified: apply the Investigation rule "if unverifiable, lean conservative". Answer with exactly one submit_verdict call.`;
+
 export interface ActionJsonOpts {
   permission: "bash" | "read" | "edit";
   target: string;
@@ -148,6 +154,10 @@ export interface ActionJsonOpts {
   subcommands?: string[];
   redirectTargets?: Array<{ permission: "read" | "edit"; path: string }>;
   profile?: string;
+  /** The check flagged this action as hazardous (deny-strike territory). */
+  hazardous?: boolean;
+  /** Why the check wants a human/reviewer: the ruleset's stated reason. */
+  reason?: string;
 }
 
 const MAX_ACTION_CHARS = 16_000;
@@ -166,6 +176,8 @@ export function formatActionJson(opts: ActionJsonOpts): string {
   };
   if (opts.subcommands && opts.subcommands.length > 0) obj.subcommands = opts.subcommands;
   if (opts.redirectTargets && opts.redirectTargets.length > 0) obj.redirectTargets = opts.redirectTargets;
+  if (opts.hazardous) obj.hazardous = true;
+  if (opts.reason) obj.reason = opts.reason;
   const text = JSON.stringify(obj, null, 2);
   return truncateText(text, MAX_ACTION_CHARS);
 }

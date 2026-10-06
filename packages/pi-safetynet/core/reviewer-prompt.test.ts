@@ -7,6 +7,7 @@ import {
   SUBMIT_VERDICT_TOOL_NAME,
   formatActionJson,
   compactTranscript,
+  ONE_SHOT_ADDENDUM,
 } from "./reviewer-prompt.ts";
 import { runPermissionReview } from "./reviewer-state.ts";
 
@@ -142,6 +143,39 @@ describe("formatActionJson", () => {
     const obj = JSON.parse(json);
     assert.ok(!("egress" in obj), "no egress field — reviewer identifies egress from the command itself");
   });
+
+  it("carries the check's hazardous flag and stated reason", () => {
+    const json = formatActionJson({
+      permission: "bash",
+      target: "rm -rf build",
+      cwd: "/tmp",
+      hazardous: true,
+      reason: "Bash denied: no matching allow rule",
+    });
+    const obj = JSON.parse(json);
+    assert.equal(obj.hazardous, true);
+    assert.equal(obj.reason, "Bash denied: no matching allow rule");
+  });
+
+  it("omits hazardous/reason when unset", () => {
+    const obj = JSON.parse(formatActionJson({ permission: "read", target: "/tmp/a", cwd: "/tmp" }));
+    assert.ok(!("hazardous" in obj));
+    assert.ok(!("reason" in obj));
+  });
+});
+
+// ─── ONE_SHOT_ADDENDUM ─────────────────────────────────────────────────────────
+
+describe("ONE_SHOT_ADDENDUM", () => {
+  it("states the reviewer has no tools and overrides the research-tool sections", () => {
+    assert.match(ONE_SHOT_ADDENDUM, /NO tools/);
+    assert.match(ONE_SHOT_ADDENDUM, /Disregard every reference above to research tools/);
+  });
+
+  it("keeps the conservative default for unverifiable local state", () => {
+    assert.match(ONE_SHOT_ADDENDUM, /if unverifiable, lean conservative/);
+    assert.match(ONE_SHOT_ADDENDUM, /exactly one submit_verdict call/);
+  });
 });
 
 // ─── compactTranscript (trajectory data is already user-only) ───────────────
@@ -213,7 +247,7 @@ describe("runPermissionReview trajectory (user-messages-only transcript)", () =>
     ];
   }
 
-  it("includes only user messages in the prompt sent to the reviewer", async () => {
+  it("keeps the transcript user-only; assistant prose rides along quarantined as untrusted intent", async () => {
     let capturedPrompt = "";
     const verdict = await runPermissionReview(
       {
@@ -239,16 +273,24 @@ describe("runPermissionReview trajectory (user-messages-only transcript)", () =>
     );
 
     assert.ok(verdict && verdict.kind === "assessment", "review classifies the canned result");
-    assert.match(capturedPrompt, /tell me about code patterns/, "user message is in transcript");
-    assert.match(capturedPrompt, /no, I only asked for an explanation/, "latest user message is in transcript");
+    const transcriptOnly = capturedPrompt.slice(
+      capturedPrompt.indexOf("## Transcript"),
+      capturedPrompt.indexOf("## Assistant's stated intent"),
+    );
+    assert.match(transcriptOnly, /tell me about code patterns/, "user message is in transcript");
+    assert.match(transcriptOnly, /no, I only asked for an explanation/, "latest user message is in transcript");
     assert.ok(
-      !capturedPrompt.includes("deploy it to your server"),
+      !transcriptOnly.includes("deploy it to your server"),
       "assistant message must NOT be in the transcript (momentum-bias excluded)",
     );
     assert.ok(
-      !capturedPrompt.includes("ssh prod deploy --force"),
+      !transcriptOnly.includes("ssh prod deploy --force"),
       "assistant tool output must NOT be in the transcript",
     );
+    // The actor's last prose is situational context — present, but visibly
+    // quarantined so it can never read as authorization.
+    assert.match(capturedPrompt, /## Assistant's stated intent \(UNTRUSTED/);
+    assert.match(capturedPrompt, /running: ssh prod deploy --force/);
   });
 
   it("states the action's project root explicitly in the task prompt", async () => {

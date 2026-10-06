@@ -80,6 +80,7 @@ import {
 	reviewRecordLatency,
 	reviewLatencyEma,
 } from "./core/reviewer-state.ts";
+import { pickReviewSpawn } from "./core/one-shot-review.ts";
 import { loadAutoApproveConfig, isAutoEnabled } from "./core/auto-config-state.ts";
 
 export interface OmpPipelineDeps {
@@ -211,15 +212,17 @@ export async function resolveOmpPermission(
 						target: opts.target,
 						check,
 						cwd: deps.ctx.cwd,
-						parentCtx: { sessionManager: deps.ctx.sessionManager, modelRegistry: deps.ctx.modelRegistry },
+						parentCtx: { sessionManager: deps.ctx.sessionManager, modelRegistry: deps.ctx.modelRegistry, model: deps.ctx.model },
 						profile: isReadOnly(deps.profile) ? "ro" : "rw",
 						timeoutMs: config.timeoutMs ?? 90000,
 						signal: capController.signal,
 						...(modelSpecs.length > 0 ? { model: modelSpecs } : {}),
 					},
 					{ spawn:
-						deps.reviewSpawn ??
-						(async (o) => {
+						pickReviewSpawn(deps.reviewSpawn, async (o: any) => {
+							// Session reviewer (autoApprove.reviewMode: "session") — the
+							// intense path. The default methodology is the one-shot
+							// reviewer in core/one-shot-review.ts.
 							const { spawnReviewer } = await import("./omp-subagent.ts");
 							return spawnReviewer({
 								...o,

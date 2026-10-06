@@ -83,6 +83,10 @@ export interface AutoApproveConfig {
   /** Warn (sticky UI widget) when the reviewer-latency EMA exceeds this many
    *  milliseconds. Default 8000. */
   latencyWarnEmaMs?: number;
+  /** Review methodology: "one-shot" (default) = one model completion decides;
+   *  "session" = the intense session reviewer with read/grep/glob research.
+   *  Env SAFETYNET_REVIEW_MODE overrides this value. */
+  reviewMode?: "one-shot" | "session";
 }
 
 /** Configurable prompt keybindings (key identifiers as understood by

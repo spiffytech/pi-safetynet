@@ -28,6 +28,7 @@ import {
   reviewIsActive, reviewSetActive,
   resetReviewStateForTests,
 } from "./core/reviewer-state.ts";
+import { pickReviewSpawn } from "./core/one-shot-review.ts";
 
 // ─── Deps ─────────────────────────────────────────────────────────────────
 
@@ -423,9 +424,11 @@ export async function resolvePermission(
             ...(config.model ? { model: config.model } : {}),
           },
           {
-            spawn: deps.reviewSpawn ?? (async (spawnOpts: any) => {
-              // Reviewer children run explore-style (read-only) but still get the
-              // host's research tool; sessions come from the shared runtime package.
+            spawn: pickReviewSpawn(deps.reviewSpawn, async (spawnOpts: any) => {
+              // Session reviewer (autoApprove.reviewMode: "session") — the
+              // intense path: an explore-style (read-only) child session with
+              // the host's research tool. The default methodology is the
+              // one-shot reviewer in core/one-shot-review.ts.
               const { runSubagent } = await import("pi-submarine-core");
               const { createSafetynetChildServices } = await import("./src/child-services.ts");
               return runSubagent({ ...spawnOpts, services: createSafetynetChildServices(deps.storage) });
