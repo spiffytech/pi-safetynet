@@ -513,48 +513,6 @@ function registerPlanTools(pi: ExtensionAPI) {
   });
 }
 
-function buildAnswerComponent(theme: Theme, content: string): Container {
-  const container = new Container();
-
-  const md = new Markdown(content, 1, 0, getMarkdownTheme());
-  container.addChild(md);
-
-  const footer = new Text(theme.fg("muted", "  ↵ Reply with feedback"), 0, 1);
-
-  const outer = new Container();
-  outer.addChild(container);
-  outer.addChild(footer);
-  return outer;
-}
-
-function renderAnswerResult(result: { content: { type: string; text?: string }[]; details: unknown }, _options: unknown, theme: Theme) {
-  const message = (result.details as { message?: unknown } | undefined)?.message;
-  if (typeof message !== "string") {
-    return new Text("", 0, 0);
-  }
-  return buildAnswerComponent(theme, message);
-}
-
-function registerAnswerTool(pi: ExtensionAPI) {
-  pi.registerTool({
-    name: "answer",
-    label: "Answer",
-    description: "Provide an answer to the user's question and end the turn. Use when the user asks for clarification, a question, or something that doesn't require modifying files or the plan.",
-    parameters: Type.Object({
-      message: Type.String({ description: "The answer to display to the user (markdown)" }),
-    }),
-    renderResult: renderAnswerResult,
-    ...(typeof process !== 'undefined' && { renderShell: 'self' as const }),
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      return {
-        content: [{ type: "text", text: params.message }],
-        details: { message: params.message },
-        terminate: true as const,
-      };
-    },
-  });
-}
-
 function switchToProfile(ctx: ExtensionContext, profile: ProfileName): void {
   const target = normalizeProfile(profile);
   const current = getCurrentProfile();
@@ -807,7 +765,6 @@ export default async function safetynetExtension(api: ExtensionAPI) {
   autoDenyConfig = loadAutoDeny();
 
   registerPlanTools(pi);
-  // registerAnswerTool(pi); // temporarily disabled
   announceSafetynetHost(pi, storage);
   registerCommands(pi);
   registerShortcuts(pi);
