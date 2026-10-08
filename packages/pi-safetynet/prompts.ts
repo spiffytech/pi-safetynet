@@ -29,6 +29,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { toDisplayPath } from "pi-submarine-core";
 import type { PromptKeybindings, PermissionDuration } from "./core/types.ts";
 import { uiArbiter, createGateSettlement } from "./core/ui-arbiter.ts";
+import { watchGateLiveness } from "./core/gate-liveness.ts";
 import { debugLog } from "./core/debug-log.ts";
 
 export type { PermissionDuration };
@@ -76,6 +77,8 @@ export interface PermissionPromptOptions {
   keybindings: PromptKeybindings;
   /** Optional signal to dismiss the prompt externally (auto-review escalation). */
   abortSignal?: AbortSignal;
+  /** Who is asking — a child (subagent) gate may not displace a parent's. */
+  owner?: "parent" | "child";
 }
 
 // ─── Internal types ────────────────────────────────────────────────────────
@@ -666,23 +669,37 @@ export async function showPermissionPrompt(
   // below would never settle, and pi awaits extension tool_call handlers with no
   // timeout: the session parks forever with no prompt on screen. A deny keeps
   // the turn alive.
+  const gate = createGateSettlement<PermissionPromptResult | null>(
+    () => ({
+      kind: "deny",
+      explanation:
+        "approval prompt was dismissed before you answered it (another approval took the screen, or the session UI was replaced)",
+    }),
+    { owner: opts.owner },
+  );
   if (uiArbiter.currentPriority() === "p0") {
     debugLog(
       `safetynet: displacing an open gate — it resolves as a deny (${opts.permission} ${opts.target})`,
     );
   }
-  const gate = createGateSettlement<PermissionPromptResult | null>(() => ({
-    kind: "deny",
-    explanation: "approval prompt was dismissed (the UI surface was replaced or torn down)",
-  }));
-  uiArbiter.acquire(gate.entry);
+  if (!uiArbiter.acquire(gate.entry)) {
+    // A child gate may not take the screen from a parent's: the parent would be
+    // denied without the user ever seeing its prompt. Deny, and let the caller
+    // retry once the parent's has been answered.
+    debugLog(`safetynet: gate refused — a parent gate owns the screen (${opts.permission} ${opts.target})`);
+    return {
+      kind: "deny",
+      explanation: "another approval prompt is already on screen; retry once it is answered",
+    };
+  }
   debugLog(`safetynet: gate open — ${opts.permission} ${opts.target}`);
+  let stopLiveness: () => void = () => {};
   const finish = (result: PermissionPromptResult | null): void => {
     debugLog(`safetynet: gate settle ${result === null ? "aborted" : result.kind} — ${opts.permission} ${opts.target}`);
     gate.finish(result);
   };
   try {
-    return await withToolsExpanded(ctx, () =>
+    const harness = withToolsExpanded(ctx, () =>
     ctx.ui.custom<PermissionPromptResult | null>((tui, theme, _keybindings, done) => {
       gate.bind(done);
       const denyEditor = new Editor(tui, {
@@ -734,9 +751,43 @@ export async function showPermissionPrompt(
       };
 
       return wrapper;
-    }),
-  );
+    }, {
+      // An overlay, deliberately. A non-overlay `ui.custom` is mounted by
+      // replacing the editor container, and every later
+      // `editorContainer.clear()` — a slash command, a model selector, another
+      // extension's dialog — detaches it without calling `done`, stranding this
+      // gate. Overlays live outside that container, so that class disappears.
+      overlay: true,
+      // No maxHeight: pi applies it as slice(0, maxHeight), which drops the
+      // BOTTOM — precisely where the duration row, the [Deny…] row and the help
+      // line live. Left unbounded, an over-tall prompt overflows off the top
+      // instead, so its controls stay reachable.
+      overlayOptions: { anchor: "center", width: "80%" },
+      onHandle: (handle) => {
+        // The handle doubles as the liveness sensor: pi can still pop an
+        // overlay wholesale (resetExtensionUI on a session switch or `/reload`,
+        // or another overlay's close popping the topmost). A gate that is gone
+        // from the screen must still resolve itself.
+        stopLiveness = watchGateLiveness(handle, () => {
+          // Resolve without telling pi: our overlay is already gone, and pi's
+          // close() calls hideOverlay(), which pops the TOPMOST overlay — now
+          // somebody else's. hide() is identity-safe, a no-op once our entry has
+          // left the stack.
+          debugLog(`safetynet: gate overlay gone — resolving as a deny (${opts.permission} ${opts.target})`);
+          handle.hide();
+          gate.lose({
+            kind: "deny",
+            explanation: "approval prompt was removed from the screen before you answered it",
+          });
+        });
+      },
+    }));
+    // Once the gate resolves by another path, a late harness failure must not
+    // become an unhandled rejection.
+    void harness.catch(() => {});
+    return await Promise.race([harness, gate.answered]);
   } finally {
+    stopLiveness();
     uiArbiter.release(gate.entry);
   }
 }

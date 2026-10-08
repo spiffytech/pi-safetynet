@@ -11,6 +11,10 @@ function entry(priority: "p0" | "p1", onDismiss?: () => void): ArbiterEntry {
   return { priority, dismiss: onDismiss ?? (() => {}) };
 }
 
+function gate(owner: "parent" | "child", onDismiss?: () => void): ArbiterEntry {
+  return { priority: "p0", owner, dismiss: onDismiss ?? (() => {}) };
+}
+
 describe("ui arbiter", () => {
   it("P1 acquires when idle", () => {
     const e = entry("p1");
@@ -80,6 +84,48 @@ describe("ui arbiter", () => {
   });
 });
 
+describe("gate ownership", () => {
+  it("a child gate may not take the screen from a parent gate", () => {
+    const parent = gate("parent");
+    const child = gate("child");
+    assert.equal(uiArbiter.acquire(parent), true);
+    assert.equal(uiArbiter.acquire(child), false, "refused, so the parent is never denied unseen");
+    assert.equal(uiArbiter.isShowing(), true);
+    uiArbiter.release(parent);
+    assert.equal(uiArbiter.isShowing(), false);
+  });
+
+  it("a parent gate preempts a showing child gate", () => {
+    let dismissed = 0;
+    const child = gate("child", () => dismissed++);
+    const parent = gate("parent");
+    assert.equal(uiArbiter.acquire(child), true);
+    assert.equal(uiArbiter.acquire(parent), true);
+    assert.equal(dismissed, 1, "the child gate resolves as a deny");
+    uiArbiter.release(parent);
+    assert.equal(uiArbiter.isShowing(), false);
+  });
+
+  it("within one rank the newer gate still wins", () => {
+    let dismissed = 0;
+    const a = gate("child", () => dismissed++);
+    const b = gate("child");
+    assert.equal(uiArbiter.acquire(a), true);
+    assert.equal(uiArbiter.acquire(b), true);
+    assert.equal(dismissed, 1);
+    uiArbiter.release(b);
+    assert.equal(uiArbiter.isShowing(), false);
+  });
+
+  it("a gate defaults to parent when no owner is given", () => {
+    const defaulted = entry("p0");
+    const child = gate("child");
+    assert.equal(uiArbiter.acquire(defaulted), true);
+    assert.equal(uiArbiter.acquire(child), false);
+    uiArbiter.release(defaulted);
+  });
+});
+
 describe("gate settlement", () => {
   it("dismiss resolves the gate as a deny", () => {
     const gate = createGateSettlement<string>(() => "DENIED");
@@ -120,5 +166,46 @@ describe("gate settlement", () => {
     assert.equal(uiArbiter.isShowing(), true);
     uiArbiter.release(b.entry);
     assert.equal(uiArbiter.isShowing(), false);
+  });
+
+  it("lose resolves the gate without telling the harness", () => {
+    const harness: string[] = [];
+    const gate = createGateSettlement<string>(() => "DENIED");
+    gate.bind((r) => harness.push(r));
+    gate.lose("LOST");
+    return gate.answered.then((answer) => {
+      assert.equal(answer, "LOST");
+      assert.deepEqual(
+        harness,
+        [],
+        "calling done() here would make pi pop whatever overlay is topmost now",
+      );
+    });
+  });
+
+  it("lose is ignored before bind, so a gate cannot settle before it mounts", () => {
+    const harness: string[] = [];
+    const gate = createGateSettlement<string>(() => "DENIED");
+    gate.lose("LOST");
+    gate.bind((r) => harness.push(r));
+    gate.finish("APPROVED");
+    return gate.answered.then((answer) => {
+      assert.equal(answer, "APPROVED");
+      assert.deepEqual(harness, ["APPROVED"]);
+    });
+  });
+
+  it("lose is one-shot like every other path", () => {
+    const harness: string[] = [];
+    const gate = createGateSettlement<string>(() => "DENIED");
+    gate.bind((r) => harness.push(r));
+    gate.lose("LOST");
+    gate.lose("LOST-AGAIN");
+    gate.finish("APPROVED");
+    gate.entry.dismiss();
+    return gate.answered.then((answer) => {
+      assert.equal(answer, "LOST");
+      assert.deepEqual(harness, []);
+    });
   });
 });

@@ -79,7 +79,9 @@ export function createSafetynetChildServices(storage: PermissionStorage): ChildS
 					},
 					sendDenial,
 				},
-				opts,
+				// A subagent's gate is outranked by the parent session's: a child may
+				// never take the approval screen from the user's own session.
+				{ ...opts, owner: "child" as const },
 			);
 		}
 

@@ -48,6 +48,8 @@ export interface OmpPermissionPromptOptions {
 	/** True when re-prompting after rules were added but still insufficient. */
 	reprompt?: boolean;
 	keybindings: PromptKeybindings;
+	/** Who is asking — a child (subagent) gate may not displace a parent's. */
+	owner?: "parent" | "child";
 }
 
 interface CommandListItem {
@@ -565,16 +567,27 @@ export async function showOmpPermissionPrompt(
 	// later clear — a slash command, a selector, another extension's dialog, a
 	// session teardown — detaches the component without calling `done`, and the
 	// harness awaits this gate inside a tool_call handler.
+	const gate = createGateSettlement<OmpPermissionPromptResult | null>(
+		() => ({
+			kind: "deny",
+			explanation:
+				"approval prompt was dismissed before you answered it (another approval took the screen, or the session UI was replaced)",
+		}),
+		{ owner: opts.owner },
+	);
 	if (uiArbiter.currentPriority() === "p0") {
 		debugLog(
 			`safetynet: displacing an open gate — it resolves as a deny (${opts.permission} ${opts.target})`,
 		);
 	}
-	const gate = createGateSettlement<OmpPermissionPromptResult | null>(() => ({
-		kind: "deny",
-		explanation: "approval prompt was dismissed (the UI surface was replaced or torn down)",
-	}));
-	uiArbiter.acquire(gate.entry);
+	if (!uiArbiter.acquire(gate.entry)) {
+		// A child gate may not take the screen from a parent's.
+		debugLog(`safetynet: gate refused — a parent gate owns the screen (${opts.permission} ${opts.target})`);
+		return {
+			kind: "deny",
+			explanation: "another approval prompt is already on screen; retry once it is answered",
+		};
+	}
 	debugLog(`safetynet: gate open — ${opts.permission} ${opts.target}`);
 	const finish = (result: OmpPermissionPromptResult | null): void => {
 		debugLog(`safetynet: gate settle ${result === null ? "aborted" : result.kind} — ${opts.permission} ${opts.target}`);
@@ -622,6 +635,14 @@ export async function showOmpPermissionPrompt(
 		};
 
 		return wrapper;
+		}, {
+			// An overlay, deliberately — see prompts.ts. A non-overlay `custom` is
+			// mounted by replacing the editor container, and any later
+			// `editorContainer.clear()` detaches it without calling `done`.
+			overlay: true,
+			// No maxHeight: it is applied as slice(0, maxHeight), which would drop
+			// the controls at the bottom of the prompt.
+			overlayOptions: { anchor: "center", width: "80%" },
 		});
 	} finally {
 		uiArbiter.release(gate.entry);

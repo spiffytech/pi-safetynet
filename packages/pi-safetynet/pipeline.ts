@@ -336,6 +336,9 @@ export async function resolvePermission(
     target: string;
     check: PermissionCheck;
     recheck: () => PermissionCheck;
+    /** Who is asking. Child (subagent) gates are outranked by the parent's, so
+     *  a subagent can never take the screen from the session the user drives. */
+    owner?: "parent" | "child";
   },
 ): Promise<{ block: boolean; reason: string } | undefined> {
   const { action } = opts.check;
@@ -549,6 +552,7 @@ export async function resolvePermission(
       reprompt,
       keybindings: deps.keybindings,
     };
+    if (opts.owner !== undefined) promptOpts.owner = opts.owner;
     if (opts.check.unapproved && opts.check.unapproved.length > 0) promptOpts.unapproved = opts.check.unapproved;
     if (opts.check.unapprovedDisplay && opts.check.unapprovedDisplay.length > 0) promptOpts.unapprovedDisplay = opts.check.unapprovedDisplay;
     if (opts.check.redirectTargets?.length) promptOpts.redirectTargets = opts.check.redirectTargets;

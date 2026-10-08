@@ -4,10 +4,12 @@
  *
  * Priority classes:
  *   - P0: gating prompts (permission prompts, hazardous nudges). They block
- *     a tool call, so they ALWAYS win immediately. Acquiring P0 preempts
- *     whatever is showing — a P1 defers (nothing it gates is blocked), and a
- *     displaced P0 resolves as a deny. Of two racing P0s the newer wins;
- *     priority ordering (parent before child) is not yet a policy.
+ *     a tool call, so they win immediately. Acquiring P0 preempts whatever is
+ *     showing — a P1 defers (nothing it gates is blocked) and a displaced P0
+ *     resolves as a deny. Parent gates outrank child gates: a child may not
+ *     take the screen from a parent, which would deny the parent without the
+ *     user ever seeing its prompt, while a parent preempts a child's. Within
+ *     one rank the newer gate wins.
  *   - P1: non-blocking interactive surfaces (inferred-rule review popup).
  *     Only one P1 shows at a time; a P1 arriving while anything is showing
  *     is denied (caller skips — the queue + badge remain).
@@ -26,10 +28,19 @@ type Priority = "p0" | "p1";
 
 export interface ArbiterEntry {
   priority: Priority;
+  /** Who is asking. "parent" is the session the user is driving; "child" is a
+   *  subagent. A child gate may not displace a parent's. Defaults to
+   *  "parent". */
+  owner?: "parent" | "child";
   /** Force-dismiss the component. P1 defers/hides and must never abort the
    *  agent. P0 must resolve its pending gate — as a DENY, never an abort — so
    *  that an eviction or teardown can never strand the tool call awaiting it. */
   dismiss: () => void;
+}
+
+/** Parent gates outrank child gates. */
+function p0Rank(entry: ArbiterEntry): number {
+  return entry.owner === "child" ? 0 : 1;
 }
 
 class UiArbiter {
@@ -39,14 +50,26 @@ class UiArbiter {
    *  entry object itself — release(entry) matches by identity. */
   acquire(entry: ArbiterEntry): boolean {
     if (entry.priority === "p0") {
-      // A P0 preempts whatever is showing: a P1 defers, and a displaced P0
-      // resolves as a deny rather than being left stranded. The harness mounts
-      // the new gate over the old one, so an un-dismissed old gate would await
-      // forever. WHICH of two racing gates should win (parent vs child) is a
-      // separate policy question — today the newer one does.
-      const preempted = this.current;
+      const current = this.current;
+      if (!current) {
+        this.current = entry;
+        return true;
+      }
+      if (current.priority === "p1") {
+        // A gate preempts a non-blocking surface. A dismissed P1 defers — its
+        // state is the persistent queue — so nothing is lost.
+        this.current = entry;
+        current.dismiss();
+        return true;
+      }
+      // P0 vs P0. A child gate must not take the screen from a parent gate:
+      // the parent would be denied without the user ever seeing its prompt.
+      // Returning false lets the caller resolve itself as a deny and retry.
+      if (p0Rank(entry) < p0Rank(current)) return false;
+      // Same rank, or a parent arriving behind a child: the newer gate wins
+      // and the displaced one resolves as a deny rather than awaiting forever.
       this.current = entry;
-      preempted?.dismiss();
+      current.dismiss();
       return true;
     }
     if (this.current) return false; // P1 while anything is showing
@@ -100,29 +123,59 @@ class UiArbiter {
 export interface GateSettlement<T> {
   /** Arbiter entry to acquire; its `dismiss` resolves the gate as a deny. */
   entry: ArbiterEntry;
+  /** Resolves once the gate is answered by any path, including one that never
+   *  tells the harness (see `lose`). Await this alongside the harness promise. */
+  answered: Promise<T>;
   /** Hand in the harness's `done` callback. */
   bind(done: (result: T) => void): void;
-  /** Resolve the gate. Later calls — and any later dismiss — are no-ops. */
+  /** The user answered, or the harness asked for dismissal: resolve AND tell the
+   *  harness, so it tears down its own surface. Later calls are no-ops. */
   finish(result: T): void;
+  /** The harness surface is already gone: resolve WITHOUT telling the harness.
+   *  pi's overlay `close()` calls `hideOverlay()`, which pops the TOPMOST
+   *  overlay — for a gate that has already been removed that is somebody else's
+   *  surface. Ignored before `bind`: a gate that never mounted cannot be lost. */
+  lose(result: T): void;
 }
 
-export function createGateSettlement<T>(onDismissed: () => T): GateSettlement<T> {
-  let resolve: ((result: T) => void) | null = null;
-  let settled = false;
-  const settle = (result: T): void => {
-    if (settled) return;
-    settled = true;
-    resolve?.(result);
+export function createGateSettlement<T>(
+  onDismissed: () => T,
+  opts: { owner?: "parent" | "child" | undefined } = {},
+): GateSettlement<T> {
+  let resolveHarness: ((result: T) => void) | null = null;
+  let resolveAnswered: ((result: T) => void) | null = null;
+  let settled: { value: T } | null = null;
+  const answered = new Promise<T>((resolve) => {
+    resolveAnswered = resolve;
+  });
+  const settle = (result: T, tellHarness: boolean): void => {
+    if (settled !== null) return;
+    settled = { value: result };
+    if (tellHarness) resolveHarness?.(result);
+    resolveAnswered?.(result);
   };
   return {
-    entry: { priority: "p0", dismiss: () => settle(onDismissed()) },
-    bind(done) {
-      resolve = done;
-      // Dismissed between acquire and mount: resolve now rather than leave the
-      // caller's await dangling.
-      if (settled) done(onDismissed());
+    answered,
+    entry: {
+      priority: "p0",
+      owner: opts.owner ?? "parent",
+      dismiss: () => settle(onDismissed(), true),
     },
-    finish: settle,
+    bind(done) {
+      resolveHarness = done;
+      // Unreachable in practice — the harness calls the factory synchronously
+      // right after acquire, and both `lose` and a sibling gate's `dismiss`
+      // happen after mount. Kept so an already-answered gate can never wedge a
+      // mount that has nowhere to report to.
+      if (settled !== null) done(settled.value);
+    },
+    finish(result) {
+      settle(result, true);
+    },
+    lose(result) {
+      if (resolveHarness === null) return;
+      settle(result, false);
+    },
   };
 }
 
