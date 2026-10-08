@@ -24,7 +24,8 @@ import {
 import { DynamicBorder, getEditorTheme, Settings, type Theme, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { toDisplayPath } from "pi-submarine-core";
 import type { PromptKeybindings, PermissionDuration } from "./core/types.ts";
-import { uiArbiter } from "./core/ui-arbiter.ts";
+import { uiArbiter, createGateSettlement } from "./core/ui-arbiter.ts";
+import { debugLog } from "./core/debug-log.ts";
 
 export type OmpPermissionPromptResult =
 	| {
@@ -558,10 +559,30 @@ export async function showOmpPermissionPrompt(
 
 	// Arbiter P0: gating prompt — preempts any showing P1 (proposal popup
 	// defers to its persistent queue; nothing is lost).
-	const arbiterEntry = { priority: "p0" as const, dismiss: () => {} };
-	uiArbiter.acquire(arbiterEntry);
+	//
+	// `dismiss` must resolve the gate (see core/ui-arbiter's createGateSettlement):
+	// a non-overlay `custom` is mounted by replacing the editor container, so any
+	// later clear — a slash command, a selector, another extension's dialog, a
+	// session teardown — detaches the component without calling `done`, and the
+	// harness awaits this gate inside a tool_call handler.
+	if (uiArbiter.currentPriority() === "p0") {
+		debugLog(
+			`safetynet: displacing an open gate — it resolves as a deny (${opts.permission} ${opts.target})`,
+		);
+	}
+	const gate = createGateSettlement<OmpPermissionPromptResult | null>(() => ({
+		kind: "deny",
+		explanation: "approval prompt was dismissed (the UI surface was replaced or torn down)",
+	}));
+	uiArbiter.acquire(gate.entry);
+	debugLog(`safetynet: gate open — ${opts.permission} ${opts.target}`);
+	const finish = (result: OmpPermissionPromptResult | null): void => {
+		debugLog(`safetynet: gate settle ${result === null ? "aborted" : result.kind} — ${opts.permission} ${opts.target}`);
+		gate.finish(result);
+	};
 	try {
 		return await ctx.ui.custom<OmpPermissionPromptResult | null>((tui, theme, _keybindings, done) => {
+		gate.bind(done);
 		const denyEditor = new Editor(getEditorTheme());
 		// We bind submission ourselves (Enter on the deny row submits the whole
 		// buffer); the editor's native Enter behaviour is disabled.
@@ -577,8 +598,8 @@ export async function showOmpPermissionPrompt(
 			denyEditor,
 			opts.keybindings,
 		);
-		inner.onConfirm = (result) => done(result);
-		inner.onCancel = () => done(null);
+		inner.onConfirm = (result) => finish(result);
+		inner.onCancel = () => finish(null);
 
 		const wrapper = new BorderedPermissionPrompt(inner, theme);
 
@@ -603,6 +624,6 @@ export async function showOmpPermissionPrompt(
 		return wrapper;
 		});
 	} finally {
-		uiArbiter.release(arbiterEntry);
+		uiArbiter.release(gate.entry);
 	}
 }

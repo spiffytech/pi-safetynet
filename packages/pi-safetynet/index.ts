@@ -54,6 +54,7 @@ import { normalizePathForMatching, toRecursiveGlob, normalizeToolPath } from "pi
 import { resolvePermission as resolvePermissionShared, makeTempRule, headlessDeny as hd, denyResultFromPrompt as drfp, resolveDeny, strikeDeny, type HazardousDenyState } from "./pipeline.ts";
 import { isAutoEnabled, toggleAutoEnabled, restoreAutoEnabled, resetAutoEnabledForNewSession, setAutoEnabled } from "./core/auto-config-state.ts";
 import { InferredEngine } from "./core/inferred/engine.ts";
+import { debugLog } from "./core/debug-log.ts";
 import { uiArbiter } from "./core/ui-arbiter.ts";
 import { createJudgeAsk } from "./core/inferred/judge-adapter.ts";
 import { loadLearnedBoundaries } from "./core/inferred/learned.ts";
@@ -226,7 +227,28 @@ function trustExternalActive(): boolean {
   return loadTrustExternalPaths() || pi.getFlag("trust-external-paths") === true;
 }
 
+/** A tool_call handler that never returns is invisible in the logs — pi awaits
+ *  extension handlers with no timeout, so a stranded gate parks the session
+ *  forever with nothing to look at. The prompt paths log their own open/settle
+ *  (see showPermissionPrompt); this catches everything else that stalls. */
+const SLOW_TOOL_CALL_MS = 2_000;
+
 async function handleToolCall(
+  event: ToolCallEvent,
+  ctx: ExtensionContext,
+): Promise<{ block: boolean; reason: string } | undefined> {
+  const t0 = Date.now();
+  const result = await handleToolCallInner(event, ctx);
+  const ms = Date.now() - t0;
+  if (ms >= SLOW_TOOL_CALL_MS || result?.block) {
+    debugLog(
+      `safetynet: tool_call ${event.toolName} resolve=${ms}ms${result?.block ? " blocked" : ""}`,
+    );
+  }
+  return result;
+}
+
+async function handleToolCallInner(
   event: ToolCallEvent,
   ctx: ExtensionContext,
 ): Promise<{ block: boolean; reason: string } | undefined> {

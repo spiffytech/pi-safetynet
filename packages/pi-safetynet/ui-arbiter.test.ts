@@ -1,10 +1,11 @@
 /**
- * ui-arbiter.test.ts — lock the coordination contract: P0 preempts P1,
- * P1 denied while busy, release is identity-guarded.
+ * ui-arbiter.test.ts — lock the coordination contract: P0 preempts P1, P1
+ * denied while busy, a displaced gate is dismissed (never stranded), reset
+ * dismisses whatever is showing, and release is identity-guarded.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { uiArbiter, type ArbiterEntry } from "./core/ui-arbiter.ts";
+import { uiArbiter, createGateSettlement, type ArbiterEntry } from "./core/ui-arbiter.ts";
 
 function entry(priority: "p0" | "p1", onDismiss?: () => void): ArbiterEntry {
   return { priority, dismiss: onDismiss ?? (() => {}) };
@@ -45,12 +46,26 @@ describe("ui arbiter", () => {
     assert.equal(uiArbiter.isShowing(), false);
   });
 
-  it("P0 acquiring while P0 showing replaces cleanly", () => {
-    const a = entry("p0");
+  it("P0 preempting a showing P0 dismisses the displaced one", () => {
+    let dismissed = 0;
+    const a = entry("p0", () => dismissed++);
     const b = entry("p0");
     assert.equal(uiArbiter.acquire(a), true);
     assert.equal(uiArbiter.acquire(b), true);
+    assert.equal(dismissed, 1, "the displaced gate was dismissed, not stranded");
+    // The displaced entry's late release must not clear the live one.
+    uiArbiter.release(a);
+    assert.equal(uiArbiter.isShowing(), true);
     uiArbiter.release(b);
+    assert.equal(uiArbiter.isShowing(), false);
+  });
+
+  it("reset dismisses a showing P0 instead of leaving it pending", () => {
+    let dismissed = 0;
+    const p0 = entry("p0", () => dismissed++);
+    assert.equal(uiArbiter.acquire(p0), true);
+    uiArbiter.reset();
+    assert.equal(dismissed, 1, "a pending gate must resolve, not await forever");
     assert.equal(uiArbiter.isShowing(), false);
   });
 
@@ -62,5 +77,48 @@ describe("ui arbiter", () => {
     uiArbiter.release(ghost);
     assert.equal(uiArbiter.isShowing(), true);
     uiArbiter.release(p0);
+  });
+});
+
+describe("gate settlement", () => {
+  it("dismiss resolves the gate as a deny", () => {
+    const gate = createGateSettlement<string>(() => "DENIED");
+    const seen: string[] = [];
+    gate.bind((r) => seen.push(r));
+    gate.entry.dismiss();
+    assert.deepEqual(seen, ["DENIED"]);
+  });
+
+  it("dismiss before the mount resolves as soon as done is bound", () => {
+    const gate = createGateSettlement<string>(() => "DENIED");
+    gate.entry.dismiss();
+    const seen: string[] = [];
+    gate.bind((r) => seen.push(r));
+    assert.deepEqual(seen, ["DENIED"]);
+  });
+
+  it("settles exactly once — later finishes and dismisses are no-ops", () => {
+    const gate = createGateSettlement<string>(() => "DENIED");
+    const seen: string[] = [];
+    gate.bind((r) => seen.push(r));
+    gate.finish("APPROVED");
+    gate.finish("APPROVED");
+    gate.entry.dismiss();
+    assert.deepEqual(seen, ["APPROVED"]);
+  });
+
+  it("a racing gate resolves the earlier one as a deny, not a stranded await", () => {
+    const denials: string[] = [];
+    const a = createGateSettlement<string>(() => "DENIED-A");
+    a.bind((r) => denials.push(r));
+    const b = createGateSettlement<string>(() => "DENIED-B");
+
+    assert.equal(uiArbiter.acquire(a.entry), true);
+    assert.equal(uiArbiter.acquire(b.entry), true); // preempts a
+    assert.deepEqual(denials, ["DENIED-A"]);
+    uiArbiter.release(a.entry); // late release must not clear b
+    assert.equal(uiArbiter.isShowing(), true);
+    uiArbiter.release(b.entry);
+    assert.equal(uiArbiter.isShowing(), false);
   });
 });

@@ -168,12 +168,16 @@ describe("arbiter reset (session teardown)", () => {
     assert.equal(uiArbiter.isShowing(), false);
   });
 
-  it("never dismisses a P0 gating prompt (that would deny a tool call)", () => {
+  it("dismisses a showing P0 too — a denied tool call beats a stranded one", () => {
     let dismissed = 0;
     const p0 = { priority: "p0" as const, dismiss: () => dismissed++ };
     assert.equal(uiArbiter.acquire(p0), true);
     uiArbiter.reset();
-    assert.equal(dismissed, 0, "P0 must survive a reset");
-    assert.equal(uiArbiter.isShowing(), false, "but the stale slot is cleared");
+    assert.equal(
+      dismissed,
+      1,
+      "leaving the gate pending strands the tool call: pi awaits extension tool_call handlers with no timeout",
+    );
+    assert.equal(uiArbiter.isShowing(), false);
   });
 });

@@ -28,7 +28,8 @@ export interface DenyEditor {
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { toDisplayPath } from "pi-submarine-core";
 import type { PromptKeybindings, PermissionDuration } from "./core/types.ts";
-import { uiArbiter } from "./core/ui-arbiter.ts";
+import { uiArbiter, createGateSettlement } from "./core/ui-arbiter.ts";
+import { debugLog } from "./core/debug-log.ts";
 
 export type { PermissionDuration };
 
@@ -655,11 +656,35 @@ export async function showPermissionPrompt(
 
   // Arbiter P0: gating prompt — preempts any showing P1 (proposal popup
   // defers to its persistent queue; nothing is lost).
-  const arbiterEntry = { priority: "p0" as const, dismiss: () => {} };
-  uiArbiter.acquire(arbiterEntry);
+  //
+  // Every path that can resolve this prompt funnels through the shared one-shot
+  // settlement, and `dismiss` resolves it as a DENY. pi mounts a non-overlay
+  // `ui.custom` by replacing the editor container, so any later
+  // `editorContainer.clear()` — a slash command, a selector, another extension's
+  // dialog, `resetExtensionUI` on a session switch or `/reload` — detaches this
+  // component without ever calling `done`. Without a real dismiss the await
+  // below would never settle, and pi awaits extension tool_call handlers with no
+  // timeout: the session parks forever with no prompt on screen. A deny keeps
+  // the turn alive.
+  if (uiArbiter.currentPriority() === "p0") {
+    debugLog(
+      `safetynet: displacing an open gate — it resolves as a deny (${opts.permission} ${opts.target})`,
+    );
+  }
+  const gate = createGateSettlement<PermissionPromptResult | null>(() => ({
+    kind: "deny",
+    explanation: "approval prompt was dismissed (the UI surface was replaced or torn down)",
+  }));
+  uiArbiter.acquire(gate.entry);
+  debugLog(`safetynet: gate open — ${opts.permission} ${opts.target}`);
+  const finish = (result: PermissionPromptResult | null): void => {
+    debugLog(`safetynet: gate settle ${result === null ? "aborted" : result.kind} — ${opts.permission} ${opts.target}`);
+    gate.finish(result);
+  };
   try {
     return await withToolsExpanded(ctx, () =>
     ctx.ui.custom<PermissionPromptResult | null>((tui, theme, _keybindings, done) => {
+      gate.bind(done);
       const denyEditor = new Editor(tui, {
         borderColor: (s: string) => theme.fg("accent", s),
         selectList: {
@@ -683,12 +708,12 @@ export async function showPermissionPrompt(
         denyEditor,
         opts.keybindings,
       );
-      inner.onConfirm = (result) => done(result);
-      inner.onCancel = () => done(null);
+      inner.onConfirm = (result) => finish(result);
+      inner.onCancel = () => finish(null);
 
       // Wire external abort signal (auto-review escalation)
       if (opts.abortSignal) {
-        opts.abortSignal.addEventListener("abort", () => done(null), { once: true });
+        opts.abortSignal.addEventListener("abort", () => finish(null), { once: true });
       }
 
       const wrapper = new BorderedPermissionPrompt(inner, theme);
@@ -712,7 +737,7 @@ export async function showPermissionPrompt(
     }),
   );
   } finally {
-    uiArbiter.release(arbiterEntry);
+    uiArbiter.release(gate.entry);
   }
 }
 
