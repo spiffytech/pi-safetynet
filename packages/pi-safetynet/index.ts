@@ -16,7 +16,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PromptKeybindings } from "./core/types.ts";
 import type { Rule, Ruleset, TempRule, ProfileName, PermissionAction, KeybindingsConfig, AutoDenyConfig } from "./core/types.ts";
-import questionnaire from "./questionnaire.ts";
 import { renderCustomFooter } from "./footer.ts";
 import { loadTrustExternalPaths, loadDefaultProfile, loadParadigm, loadKeybindings, loadAutoDeny, loadToggleModeKey } from "./core/global-config.ts";
 import { evaluatePermission } from "./core/permissions/ruleset.ts";
@@ -787,7 +786,6 @@ export default async function safetynetExtension(api: ExtensionAPI) {
 
   registerPlanTools(pi);
   // registerAnswerTool(pi); // temporarily disabled
-  // questionnaire(pi); // disabled
   announceSafetynetHost(pi, storage);
   registerCommands(pi);
   registerShortcuts(pi);
