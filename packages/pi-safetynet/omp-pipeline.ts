@@ -19,6 +19,7 @@ import { normalizePathForMatching, toRecursiveGlob } from "pi-submarine-core";
 import type { PermissionCheck } from "./core/check.ts";
 import { actionWrites, patternHasBashGlob } from "./core/check.ts";
 import { isReadOnly } from "./core/profiles.ts";
+import { surfaceDenial, clearDenialBanner } from "./core/denial-notice.ts";
 // omp's SDK is TS-source (Bun-only); keep these two imports lazy so this
 // pipeline module loads under Node for tests. Production resolves them at the
 // call sites below (reviewer spawn and the interactive prompt).
@@ -161,12 +162,21 @@ export async function resolveOmpPermission(
 	for (;;) {
 		const { action } = check;
 
-		if (action === "allow") return undefined;
+		if (action === "allow") {
+			clearDenialBanner(deps.ctx.ui);
+			return undefined;
+		}
 
 		if (action === "deny") {
 			const label = opts.permission[0]!.toUpperCase() + opts.permission.slice(1);
 			const reason =
 				check.reason ?? `${label} denied: no matching allow rule`;
+			surfaceDenial(deps.ctx.ui, {
+				source: "ruleset",
+				permission: opts.permission,
+				target: opts.target,
+				reason,
+			});
 			return { block: true, reason };
 		}
 
@@ -182,6 +192,12 @@ export async function resolveOmpPermission(
 			// Writes only the reviewer can spot (git commit, touch, mkdir)
 			// are covered by the prompt's Session-mode rule.
 			if (isReadOnly(deps.profile) && actionWrites(opts.permission, check)) {
+				surfaceDenial(deps.ctx.ui, {
+					source: "mode",
+					permission: opts.permission,
+					target: opts.target,
+					reason: "read-only mode prevents writes",
+				});
 				return {
 					block: true,
 					reason: `Mode denied ${opts.permission}: ${opts.target} — read-only mode prevents writes; switch to ${deps.profile === "ro" ? "rw" : "build"} mode to implement`,
@@ -250,6 +266,7 @@ export async function resolveOmpPermission(
 						// A glob would mint a rule matching a broader family; approve this
 						// invocation only.
 						if (opts.permission === "bash" && (check.unapproved ?? []).some(patternHasBashGlob)) {
+							clearDenialBanner(deps.ctx.ui);
 							deps.ctx.ui.notify("Auto-review allowed this call only: a shell glob can't be saved as a rule.", "info");
 							return undefined;
 						}
@@ -258,8 +275,19 @@ export async function resolveOmpPermission(
 						deps.storage.addTempRules(tempRules);
 						if (opts.permission === "bash") deps.inferred?.recordApproval(check.unapproved ?? [], [deps.profile]);
 						const recheckResult = opts.recheck();
-						if (recheckResult.action === "allow") return undefined;
+						if (recheckResult.action === "allow") {
+							clearDenialBanner(deps.ctx.ui);
+							return undefined;
+						}
 					} else if (verdict.assessment.outcome === "deny") {
+						surfaceDenial(deps.ctx.ui, {
+							source: "reviewer",
+							permission: opts.permission,
+							target: opts.target,
+							reason: verdict.assessment.rationale,
+							risk: verdict.assessment.risk_level,
+							authorization: verdict.assessment.user_authorization,
+						});
 						const count = reviewIncrementDenies();
 						const maxDenials = config.maxDenials ?? 3;
 						if (count >= maxDenials) {
@@ -336,6 +364,9 @@ export async function resolveOmpPermission(
 				: `User denied ${opts.permission}`;
 			return { block: true, reason };
 		}
+
+		// The user approved (possibly overriding an earlier denial).
+		clearDenialBanner(deps.ctx.ui);
 
 		const { approved, skipped, skippedDisplay, duration } = result;
 

@@ -20,6 +20,12 @@ import { PermissionStorage } from "./core/permissions/index.ts";
 import type { PermissionCheck } from "./core/check.ts";
 import { actionWrites, patternHasBashGlob } from "./core/check.ts";
 import { isHazardousFile, subcommandTokenLists } from "./core/bash-parser.ts";
+import {
+  surfaceDenial,
+  clearDenialBanner,
+  type DenialSource,
+  type DenialUI,
+} from "./core/denial-notice.ts";
 import { isAutoEnabled, loadAutoApproveConfig, setAutoEnabled } from "./core/auto-config-state.ts";
 import type { InferredEngine } from "./core/inferred/engine.ts";
 import {
@@ -106,7 +112,7 @@ export function strikeDeny(opts: {
   reason: string;
   source: DenialSource;
   autoDeny: AutoDenyConfig;
-  displayCtx: { abort(): void };
+  displayCtx: { abort(): void; ui?: DenialUI };
   sendDenial: ((text: string, mode: "hidden" | "visible") => void) | undefined;
   onDenied: (() => void) | undefined;
   state: DenyStrikeState;
@@ -114,6 +120,12 @@ export function strikeDeny(opts: {
   hazardous?: boolean;
 }): { block: true; reason: string } {
   const detail = denialMessage(opts.permission, opts.target, opts.reason, opts.source);
+  surfaceDenial(opts.displayCtx.ui, {
+    source: opts.source,
+    permission: opts.permission,
+    target: opts.target,
+    reason: opts.reason,
+  });
 
   if (opts.hazardous) {
     opts.sendDenial?.(detail, "hidden");
@@ -137,7 +149,7 @@ export function resolveDeny(opts: {
   target: string;
   reason: string;
   autoDeny: AutoDenyConfig;
-  displayCtx: { abort(): void };
+  displayCtx: { abort(): void; ui?: DenialUI };
   sendDenial: ((text: string, mode: "hidden" | "visible") => void) | undefined;
   onDenied: (() => void) | undefined;
   state: DenyStrikeState;
@@ -180,7 +192,7 @@ export function denyResultFromPrompt(
 }
 
 /** Source of a denial, used to label the surfaced line. */
-export type DenialSource = "reviewer" | "ruleset" | "headless" | "mode";
+export type { DenialSource };
 
 /** Build a self-contained, human-readable denial line: what was denied and why.
  *  risk_level / user_authorization stay internal to the reviewer decision —
@@ -377,7 +389,10 @@ export async function resolvePermission(
   };
 
   // ── Allow / Deny short-circuits ──────────────────────────────────────────
-  if (action === "allow") return undefined;
+  if (action === "allow") {
+    clearDenialBanner(deps.displayCtx.ui);
+    return undefined;
+  }
 
   if (action === "deny") {
     const label = opts.permission[0]!.toUpperCase() + opts.permission.slice(1);
@@ -462,6 +477,7 @@ export async function resolvePermission(
         // A glob in an approved command would mint a rule matching a broader
         // family (`rm -rf *` \u2192 `rm -rf .*`). Approve this invocation only.
         if (opts.permission === "bash" && (opts.check.unapproved ?? []).some(patternHasBashGlob)) {
+          clearDenialBanner(deps.displayCtx.ui);
           deps.displayCtx.ui.notify(` Reviewer allowed (risk: ${v.assessment.risk_level}, auth: ${v.assessment.user_authorization})`, "info");
           deps.sendAutoApproval?.(v.assessment.risk_level, v.assessment.user_authorization);
           return undefined;
@@ -473,6 +489,7 @@ export async function resolvePermission(
 
         const recheckResult = opts.recheck();
         if (recheckResult.action === "allow") {
+          clearDenialBanner(deps.displayCtx.ui);
           deps.displayCtx.ui.notify(` Reviewer allowed (risk: ${v.assessment.risk_level}, auth: ${v.assessment.user_authorization})`, "info");
           deps.sendAutoApproval?.(v.assessment.risk_level, v.assessment.user_authorization);
           return undefined;
@@ -483,7 +500,14 @@ export async function resolvePermission(
 
       if (v.kind === "assessment" && v.assessment.outcome === "deny") {
         // Deny
-        deps.displayCtx.ui.notify(` Reviewer denied: ${v.assessment.rationale}`, "warning");
+        surfaceDenial(deps.displayCtx.ui, {
+          source: "reviewer",
+          permission: opts.permission,
+          target: opts.target,
+          reason: v.assessment.rationale,
+          risk: v.assessment.risk_level,
+          authorization: v.assessment.user_authorization,
+        });
         const detail = denialMessage(opts.permission, opts.target, v.assessment.rationale);
         // Secret-touching denials block but never abort and never consume the
         // reviewer budget: the block protects the secret, while ending the turn
@@ -612,6 +636,7 @@ export async function resolvePermission(
       }
       const staleOnce = modeFlipBlock();
       if (staleOnce) return staleOnce;
+      clearDenialBanner(deps.displayCtx.ui);
       deps.sendManualApproval();
       return undefined;
     }
@@ -637,6 +662,7 @@ export async function resolvePermission(
       const staleGlob = modeFlipBlock();
       if (staleGlob) return staleGlob;
       deps.displayCtx.ui.notify("Approved for this call only: a shell glob can't be saved as a rule.", "warning");
+      clearDenialBanner(deps.displayCtx.ui);
       deps.sendManualApproval();
       return undefined;
     }
@@ -704,6 +730,7 @@ export async function resolvePermission(
     // Recheck
     const recheckResult = opts.recheck();
     opts.check = recheckResult;
+    clearDenialBanner(deps.displayCtx.ui);
     deps.sendManualApproval();
     if (recheckResult.action === "allow") return modeFlipBlock();
     if (recheckResult.action === "deny") {
