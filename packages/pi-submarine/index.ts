@@ -478,17 +478,24 @@ export default function piSubmarineExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	/** Build the watch manager for a session cwd. Waiters die with the process;
-	 *  the record store outlives it, so pi restarts never lose a watch. */
-	function makeWatchManager(): WatchManager {
+	/** Build the watch manager for the current pi session. Watches are scoped to
+	 *  the session that created them — the store is keyed by session id, not
+	 *  cwd — so no other session can see, manage, or inherit them. Waiters die
+	 *  with the process, but the store outlives it, so resuming the same session
+	 *  re-attaches its watches. */
+	function makeWatchManager(): WatchManager | undefined {
 		const agentDir = process.env.PI_AGENT_DIR ?? `${process.env.HOME ?? "/home"}/.pi/agent`;
 		const cwd = uiCtx?.cwd ?? process.cwd();
+		// No session identity → no store. Never fall back to a cwd-keyed store:
+		// that is exactly the cross-session sharing this scoping removes.
+		const sessionId = uiCtx?.sessionManager.getSessionId();
+		if (!sessionId) return undefined;
 		const num = (name: string, dflt: number): number => {
 			const n = Number(process.env[name]);
 			return Number.isFinite(n) && n > 0 ? n : dflt;
 		};
 		return new WatchManager({
-			storePath: watchStorePath(agentDir, cwd),
+			storePath: watchStorePath(agentDir, sessionId),
 			cwd,
 			minHeartbeatMs: num("PI_SUBMARINE_WATCH_MIN_HEARTBEAT_MS", 60_000),
 			pollIntervalMs: num("PI_SUBMARINE_WATCH_POLL_MS", 1_000),
@@ -526,12 +533,13 @@ export default function piSubmarineExtension(pi: ExtensionAPI): void {
 		}
 		currentThinkingLevel = pi.getThinkingLevel();
 		// New session: kill this process's live jobs (their watches die with them,
-		// via onJobClosed), then adopt persisted watches. Child-owned records whose
-		// jobs only vanished because pi restarted are inherited by the parent.
+		// via onJobClosed), then adopt this session's persisted watches. Child-owned
+		// records whose jobs only vanished because pi restarted are inherited by
+		// the parent.
 		watchManager?.dispose();
 		watchManager = makeWatchManager();
 		jobManager?.resetForSession();
-		watchManager.reattachPending();
+		watchManager?.reattachPending();
 		compactionActive = false;
 		parentBusy = false;
 		if (compactionWatchdog) {

@@ -17,7 +17,6 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { readSync, openSync, closeSync, statSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { dirname, join } from "node:path";
-import { createHash } from "node:crypto";
 import { lockSync } from "proper-lockfile";
 import type { WatchInput, WatchOwner, WatchTrigger, WatchView } from "pi-submarine-core";
 import { capReportSummary, capBashTail, readProcStat, readBootId, validatePatternRegex } from "pi-submarine-core";
@@ -47,9 +46,9 @@ export interface WatchRecord {
 	guardPid?: number;
 	guardBootId?: string;
 	guardStart?: number;
-	/** Process identity of the session that owns the waiters. Two live pi
-	 *  sessions share one store: only the claim holder arms/announces; everyone
-	 *  else sees the record in list and may cancel/extend it. */
+	/** Process identity of the session that owns the waiters. A session store
+	 *  is normally held by exactly one process; if the same session is opened in
+	 *  two (e.g. `pi --continue` twice), only the claim holder arms/announces. */
 	claim?: { pid: number; start?: number };
 	/** Byte offset into logPath already scanned for the pattern/preview. */
 	logOffset: number;
@@ -62,7 +61,8 @@ export interface WatchRecord {
 }
 
 export interface WatchManagerOptions {
-	/** Where records persist. One store per cwd, so adoption is automatic. */
+	/** Where records persist. One store per pi session, so restart re-attaches
+	 *  automatically and no other session can ever read it. */
 	storePath: string;
 	cwd: string;
 	/** Smallest allowed heartbeat (guards against wake spam). */
@@ -158,10 +158,16 @@ const STORE_VERSION = 1;
 /** Exit artifact appended by `watch run`'s wrapper, used for down-time verdicts. */
 export const WATCH_EXIT_MARKER = "__WATCH_EXIT=";
 
-/** Store path for a cwd: one JSON file per working directory. */
-export function watchStorePath(agentDir: string, cwd: string): string {
-	const key = createHash("sha256").update(cwd).digest("hex").slice(0, 16);
-	return join(agentDir, "pi-submarine", `watches-${key}.json`);
+/** Store path for a pi session: one JSON file per session. Watches are scoped
+ *  to the session that created them, so a session only ever opens its own
+ *  store — no other session (same cwd or not) can see, manage, or inherit
+ *  them. Keying on the session id (not the cwd) is also what makes a watch
+ *  survive pi restart: resuming the same session reopens the same file. */
+export function watchStorePath(agentDir: string, sessionId: string): string {
+	// Session ids are UUIDv7 (alnum + '-'); sanitize defensively so a
+	// hand-edited session header can never escape the pi-submarine dir.
+	const safe = sessionId.replace(/[^A-Za-z0-9._-]/g, "_");
+	return join(agentDir, "pi-submarine", `watches-${safe}.json`);
 }
 
 export class WatchManager {
@@ -213,8 +219,9 @@ export class WatchManager {
 		};
 		this.load();
 		// The shared tick runs for the manager's whole life (not per record): a
-		// session with zero claimed watches must still notice sibling records,
-		// their deaths (takeover), and their updates (reconcile).
+		// session with zero claimed watches must still notice records held by
+		// another process of this session, their deaths (takeover), and their
+		// updates (reconcile).
 		this.tickTimer = setInterval(() => this.runTick(), this.opts.pollIntervalMs);
 		this.tickTimer.unref?.();
 	}
@@ -235,7 +242,8 @@ export class WatchManager {
 		try {
 			const parsed = JSON.parse(raw) as { version?: number; records?: WatchRecord[] };
 			for (const rec of parsed.records ?? []) {
-				if (rec && typeof rec.id === "string" && rec.cwd === this.opts.cwd) {
+				// A session store holds only this session's records; no cwd filter.
+				if (rec && typeof rec.id === "string") {
 					// Normalize legacy single-trigger records.
 					if (!Array.isArray(rec.triggers)) rec.triggers = rec.trigger ? [rec.trigger] : [];
 					this.records.set(rec.id, rec);
@@ -251,7 +259,8 @@ export class WatchManager {
 			terminal.sort((a, b) => (b.firedAt ?? b.createdAt) - (a.firedAt ?? a.createdAt));
 			const cutoff = this.now() - TERMINAL_RETENTION_MS;
 			terminal.forEach((r, i) => {
-				// Never reap a record a live sibling session is still waiting on.
+				// Never reap a record another process of this session is still
+				// waiting on.
 				if (i >= TERMINAL_KEEP && (r.firedAt ?? r.createdAt) < cutoff && !this.claimLive(r)) {
 					this.records.delete(r.id);
 					this.reaped.add(r.id);
@@ -345,8 +354,9 @@ export class WatchManager {
 
 	/**
 	 * Take the waiter claim for this session — the concurrency core. False when
-	 * a live sibling session already holds it (its waiters, its wakes; we just
-	 * watch it in list). Stale claims (dead holder) are taken over silently.
+	 * another process of this session already holds it (its waiters, its wakes;
+	 * we just watch it in list). Stale claims (dead holder) are taken over
+	 * silently.
 	 */
 	private tryClaim(rec: WatchRecord): boolean {
 		const got = this.commit((fileRecs) => {
@@ -365,15 +375,15 @@ export class WatchManager {
 	}
 
 	/**
-	 * Write OUR records (and unclaimed-new ones); preserve sibling-held records
-	 * verbatim — mutate only what you claim. Terminal state always wins, so a
-	 * sibling's cancel of one of ours survives.
+	 * Write OUR records (and unclaimed-new ones); preserve records held by
+	 * another process verbatim — mutate only what you claim. Terminal state
+	 * always wins, so their cancel of one of ours survives.
 	 */
 	private save(): void {
 		this.commit((fileRecs) => {
 			for (const rec of this.records.values()) {
 				if (this.reaped.has(rec.id)) continue;
-				if (!this.isMine(rec)) continue; // sibling's record: keep their copy
+				if (!this.isMine(rec)) continue; // held by another process: keep their copy
 				const theirs = fileRecs.get(rec.id);
 				if (theirs && theirs.state !== "pending" && rec.state === "pending") continue; // terminal wins
 				fileRecs.set(rec.id, rec);
@@ -381,15 +391,15 @@ export class WatchManager {
 		});
 	}
 
-	/** Write exactly one record — for deliberate mutations of a sibling's
-	 *  record (cross-session cancel/extend are legal). */
+	/** Write exactly one record — for deliberate mutations of a record held by
+	 *  another process of this session. */
 	private persistOne(rec: WatchRecord): void {
 		this.commit((fileRecs) => fileRecs.set(rec.id, rec));
 	}
 
 	/**
 	 * Persist a firing as a claim-checked state transition. Returns false when
-	 * another session holds the claim or has already completed the record — its
+	 * another process holds the claim or has already completed the record — its
 	 * wake, not ours. This is what makes "the claim holder completes the wait"
 	 * deterministic even when a stale holder fires late.
 	 */
@@ -428,8 +438,8 @@ export class WatchManager {
 			let firedDown = 0;
 			for (const rec of [...this.records.values()]) {
 				if (rec.state !== "pending") continue;
-				// Sibling session already holds the waiters? Hands off — its wakes,
-				// its list row for us. Dead holder's claims fall through to ours.
+				// Another pi process already holds the waiters for this session?
+				// Hands off — its wakes, its list row for us. Dead holders fall through.
 				if (!this.tryClaim(rec)) {
 					held.push(`${rec.id}@s${rec.claim?.pid ?? "?"} [${rec.label}]`);
 					continue;
@@ -468,14 +478,13 @@ export class WatchManager {
 				}
 			}
 			// The adoption notice is an INVENTORY: every watch that survived the
-			// restart, whoever holds it, and the truth about down-time fires. A
-			// summary that reads like "everything" but silently omits a sibling-held
-			// watch is how jobs get dropped on the floor.
+			// restart and the truth about down-time fires. A summary that reads like
+			// "everything" but silently omits a watch is how jobs get dropped.
 			const parts: string[] = [];
 			if (rearmed.length > 0) {
 				parts.push(`${rearmed.length} watch(es) re-armed after restart — still waiting: ${rearmed.join(", ")}`);
 			}
-			if (held.length > 0) parts.push(`held by another session: ${held.join(", ")}`);
+			if (held.length > 0) parts.push(`held by another pi process for this session: ${held.join(", ")}`);
 			if (parts.length > 0) {
 				const tail =
 					firedDown > 0
@@ -547,9 +556,9 @@ export class WatchManager {
 			state: "pending",
 			logOffset: 0,
 		};
-		// Ids are minted from the shared store under the lock: `w-<n>`, unique
-		// per cwd across concurrent sessions, and short enough to live in a
-		// status line. (Session identity is the claim's job, not the id's.)
+		// Ids are minted from the session's store under the lock: `w-<n>`, unique
+		// per session across concurrent processes, and short enough to live in a
+		// status line. (Process identity is the claim's job, not the id's.)
 		const minted = this.commit((fileRecs) => {
 			let max = 0;
 			for (const key of [...fileRecs.keys(), ...this.records.keys()]) {
@@ -734,8 +743,8 @@ export class WatchManager {
 		}
 	}
 
-	/** Adopt sibling sessions' updates (their cancels/extends/fires). Cheap:
-	 *  one stat per tick; a full read only when the store actually changed. */
+	/** Adopt another process's updates for this session (cancels/extends/fires).
+	 *  Cheap: one stat per tick; a full read only when the store changed. */
 	private reconcile(): void {
 		try {
 			const st = statSync(this.opts.storePath);
@@ -1064,8 +1073,8 @@ export class WatchManager {
 
 /**
  * Human-facing status chip: what is being waited on and who holds it
- * (`w-2@s200` = a sibling session owns the waiters). Undefined when nothing
- * is pending — the footer reverts to silence.
+ * (`w-2@s200` = another pi process owns the waiters for this session).
+ * Undefined when nothing is pending — the footer reverts to silence.
  */
 export function formatWatchChip(views: WatchView[]): string | undefined {
 	const pending = views.filter((v) => v.state === "pending");

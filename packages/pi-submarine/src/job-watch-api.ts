@@ -1,8 +1,9 @@
 /**
  * job-watch-api.ts — the ONE JobWatchApi implementation behind the `job_watch`
  * tool, for the parent and for subagent children alike. Scoping is a
- * constructor option (parent sees all watches; a child only its own), so both
- * cases run the exact same code path.
+ * constructor option (the parent sees every watch in its session's store; a
+ * child only its own), so both cases run the exact same code path. Watches are
+ * session-scoped by the store itself, so `global` never crosses sessions.
  */
 
 import { spawn } from "node:child_process";
@@ -27,7 +28,9 @@ export interface JobWatchApiOptions {
 	manager(): WatchManager | undefined;
 	/** Owner recorded on every watch created through this api. */
 	owner: WatchOwner;
-	/** Parent scope sees and cancels every watch; child scope only its own. */
+	/** Parent scope sees and cancels every watch in this session's store; child
+	 *  scope only its own. Neither can reach another session's watches — the
+	 *  store is keyed by session id. */
 	global: boolean;
 	/** Permission gate for `run` commands — same ruleset as a bash call. */
 	approveCommand(command: string, ctx: ExtensionContext): Promise<CommandVerdict>;

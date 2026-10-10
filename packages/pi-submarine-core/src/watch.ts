@@ -65,7 +65,7 @@ export interface WatchView {
 	triggers?: WatchTrigger[] | undefined;
 	/** Set when this watch is death-guarded by a pid. */
 	guardPid?: number | undefined;
-	/** Set when a sibling session holds the waiters for this watch. */
+	/** Set when another pi process of this same session holds the waiters. */
 	claimedBy?: number | undefined;
 }
 

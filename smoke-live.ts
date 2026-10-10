@@ -10,8 +10,8 @@
  *   S2 child watch: a subagent registers `job_watch` (SAME surface as the
  *      parent), ends its turn (status shows "waiting"), a fired watch resumes
  *      it, it reports upward.
- *   S3 restart survival: `run` job outlives SIGKILL of pi; the next pi adopts
- *      the record and reports "fired while pi was down" with a verdict.
+ *   S3 restart survival: `run` job outlives SIGKILL of pi; resuming that same
+ *      session re-adopts the record and reports "fired while pi was down".
  *   S4 timeout surfacing: a child segment aborted by the cap is reported as
  *      "Segment aborted after Ns while running: <cmd>", not plain idle.
  *   S5 attach: the model backgrounds work itself (setsid … &), then `attach`
@@ -19,8 +19,8 @@
  *   S6 regex + re-arm: `^LINE$` exact-line matching survives a restart (full
  *      re-scan finds a line written while pi was dead) and a still-pending
  *      watch announces itself at adoption.
- *   S7 concurrent sessions: two live pi processes share one store — the
- *      sibling sees the watch marked "held by session N", and no duplicate
+ *   S7 session isolation: two live sessions in one cwd keep separate stores —
+ *      the second session sees none of the first's watches, and no duplicate
  *      record is created.
  *   X1/X2 subsystem extras — ON DEMAND ONLY (never on a default run): X1
  *      extends a watch's lifetime live; X2 proves silence detection live.
@@ -106,9 +106,10 @@ interface PiRun {
 /** Provider refusals prove nothing about our code — bail loudly on them. */
 const PROVIDER_ERROR = /(payment_required|insufficient|402\b|429\b|too_many_tokens|rate.?limit|quota)/i;
 
-async function runPi(prompt: string, opts: { env?: Record<string, string>; killWhen?: () => boolean; timeoutMs?: number } = {}): Promise<PiRun> {
+async function runPi(prompt: string, opts: { env?: Record<string, string>; killWhen?: () => boolean; timeoutMs?: number; resume?: boolean } = {}): Promise<PiRun> {
 	const args = [
 		"-p", prompt,
+		...(opts.resume ? ["--continue"] : []),
 		"--model", MODEL,
 		"--no-skills", "--no-context-files", "--no-prompt-templates", "--no-themes",
 		"--session-dir", SESSIONS,
@@ -257,6 +258,7 @@ async function s3RestartSurvival(): Promise<void> {
 	const r2 = await runPi(
 		`Call job_watch with action 'list' and quote its output verbatim in your reply. ` +
 			`Then end your reply with exactly the line: SMOKE-OK3`,
+		{ resume: true },
 	);
 	const text2 = deltaSince(before) + r2.out;
 	if (bailOnProviderError(r2, "S3")) return;
@@ -307,6 +309,7 @@ async function s5Attach(): Promise<void> {
 	const r2 = await runPi(
 		`Call job_watch with action 'list' and quote its output verbatim in your reply. ` +
 			`Then end your reply with exactly the line: SMOKE-OK5`,
+		{ resume: true },
 	);
 	const text2 = deltaSince(before) + r2.out;
 	if (bailOnProviderError(r2, "S5b")) return;
@@ -335,6 +338,7 @@ async function s6RegexAndRearm(): Promise<void> {
 	const r2 = await runPi(
 		`Call job_watch with action 'list' and quote its output verbatim in your reply. ` +
 			`Then end your reply with exactly the line: SMOKE-OK6`,
+		{ resume: true },
 	);
 	const text2 = deltaSince(before) + r2.out;
 	if (bailOnProviderError(r2, "S6b")) return;
@@ -344,17 +348,17 @@ async function s6RegexAndRearm(): Promise<void> {
 	assert("S6 agent finished with the marker", text2.includes("SMOKE-OK6"), r2.out.slice(-300));
 }
 
-async function s7ConcurrentSessions(): Promise<void> {
+async function s7SessionIsolation(): Promise<void> {
 	if (!wants("S7")) return;
-	console.log("\nS7: two live sessions, one store (claim + transparency)");
+	console.log("\nS7: session isolation (two live sessions, separate stores)");
 	const before = sessionText();
 	const run1 = runPi(
-		`Do exactly this: (1) Call job_watch with action 'register', deadlineSeconds 900, label 's7-shared', lifetimeMinutes: 30. ` +
+		`Do exactly this: (1) Call job_watch with action 'register', deadlineSeconds 900, label 's7-isolated', lifetimeMinutes: 30. ` +
 			`(2) Run bash 'sleep 25'.`,
 		{ timeoutMs: 120_000 },
 	);
-	await waitFor(() => storeRecords().some((r) => r.label === "s7-shared"), 90_000, "run1 registers its watch");
-	// Second live session, same cwd, while run1 is still up:
+	await waitFor(() => storeRecords().some((r) => r.label === "s7-isolated"), 90_000, "run1 registers its watch");
+	// Second live session, same cwd, while run1 is still up: it must see nothing.
 	const r2 = await runPi(
 		`Call job_watch with action 'list' and quote its output verbatim in your reply. ` +
 			`Then end your reply with exactly the line: SMOKE-OK7`,
@@ -365,9 +369,10 @@ async function s7ConcurrentSessions(): Promise<void> {
 		return;
 	}
 	assert("S7 second pi exited cleanly", r2.code === 0, `code=${r2.code}`);
-	assert("S7 sibling sees the watch, held by the other session", /held by session \d+/.test(text2), text2.slice(-300));
+	assert("S7 the second session sees none of the first's watches", !/s7-isolated/.test(r2.out), r2.out.slice(-300));
+	assert("S7 no cross-session holder line", !/held by pi process/.test(r2.out), r2.out.slice(-300));
 	assert("S7 agent finished with the marker", text2.includes("SMOKE-OK7"), r2.out.slice(-300));
-	const recs = storeRecords().filter((r) => r.label === "s7-shared");
+	const recs = storeRecords().filter((r) => r.label === "s7-isolated");
 	assert("S7 exactly one record exists — no duplication across sessions", recs.length === 1, JSON.stringify(recs));
 	const r1 = await run1;
 	if (bailOnProviderError(r1, "S7a")) return;
@@ -426,7 +431,7 @@ try {
 	await s4TimeoutSurfacing();
 	await s5Attach();
 	await s6RegexAndRearm();
-	await s7ConcurrentSessions();
+	await s7SessionIsolation();
 	await x1ExtendLive();
 	await x2QuietLive();
 } catch (err) {

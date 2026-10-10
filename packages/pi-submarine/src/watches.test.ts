@@ -32,7 +32,7 @@ function makeHarness(overrides: Partial<WatchManagerOptions> = {}): Harness {
 	const events: Harness["events"] = [];
 	const resumes: Harness["resumes"] = [];
 	let deliverable = true;
-	const storePath = watchStorePath(join(dir, "agent"), join(dir, "cwd"));
+	const storePath = watchStorePath(join(dir, "agent"), join(dir, "session"));
 	const manager = new WatchManager({
 		storePath,
 		cwd: join(dir, "cwd"),
@@ -786,7 +786,7 @@ describe("WatchManager", () => {
 
 	it("reaps stale terminal records at load but keeps recent history", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-watches-"));
-		const storePath = watchStorePath(join(dir, "agent"), join(dir, "cwd"));
+		const storePath = watchStorePath(join(dir, "agent"), join(dir, "session"));
 		mkdirSync(join(dir, "agent", "pi-submarine"), { recursive: true });
 		const old = Date.now() - 30 * 24 * 60 * 60_000;
 		const records = Array.from({ length: 25 }, (_, i) => ({
@@ -808,7 +808,10 @@ describe("WatchManager", () => {
 	});
 });
 
-describe("concurrent sessions sharing one store", () => {
+// The store is keyed by session id, so two managers sharing one store path are
+// two processes of the SAME session (e.g. `pi --continue` run twice), not two
+// sessions. Cross-session isolation is covered in the next describe block.
+describe("the same session opened in two processes", () => {
 	interface Duo {
 		dir: string;
 		storePath: string;
@@ -821,7 +824,7 @@ describe("concurrent sessions sharing one store", () => {
 
 	function makeDuo(extra: Partial<WatchManagerOptions> = {}): Duo {
 		const dir = mkdtempSync(join(tmpdir(), "pi-watches-"));
-		const storePath = watchStorePath(join(dir, "agent"), join(dir, "cwd"));
+		const storePath = watchStorePath(join(dir, "agent"), join(dir, "session"));
 		const cwd = join(dir, "cwd");
 		const alive = new Set([100, 200]);
 		const procIdentity = {
@@ -833,6 +836,7 @@ describe("concurrent sessions sharing one store", () => {
 		return { dir, storePath, cwd, alive, procIdentity, a, extra };
 	}
 
+	/** The second process of the same session (same store, different pid). */
 	function sibling(duo: Duo) {
 		return makeHarness({
 			storePath: duo.storePath,
@@ -848,7 +852,7 @@ describe("concurrent sessions sharing one store", () => {
 		rmSync(dir, { recursive: true, force: true });
 	}
 
-	it("a sibling's live claim means hands off — one wake, not two", async () => {
+	it("a sibling process's live claim means hands off — one wake, not two", async () => {
 		const duo = makeDuo();
 		const res = duo.a.manager.register({ kind: "parent" }, {
 			trigger: { kind: "deadline", at: Date.now() + 60 },
@@ -864,13 +868,13 @@ describe("concurrent sessions sharing one store", () => {
 		await delay(120);
 		assert.equal(b.events.filter((e) => /fired at/.test(e.text)).length, 0, "sibling (B) sends no wake — A's waiters, A's wake");
 		assert.equal(b.events.length, 1, "but B's adoption notice inventories the held watch");
-		assert.match(b.events[0]!.text, /held by another session: w-[\w-]+@s100/);
+		assert.match(b.events[0]!.text, /held by another pi process for this session: w-[\w-]+@s100/);
 		const view = b.manager.list().find((v) => v.id === res.id);
-		assert.equal(view?.claimedBy, 100, "but it is visible in B's list, marked held by session 100");
+		assert.equal(view?.claimedBy, 100, "and it is visible in B's list, marked held by process 100");
 		cleanup(duo.dir, duo.a, b);
 	});
 
-	it("cross-session cancel is honored by the owner via reconcile", async () => {
+	it("a cancel from a sibling process is honored by the owner via reconcile", async () => {
 		const duo = makeDuo();
 		const res = duo.a.manager.register({ kind: "parent" }, {
 			trigger: { kind: "deadline", at: Date.now() + 250 },
@@ -887,7 +891,7 @@ describe("concurrent sessions sharing one store", () => {
 		cleanup(duo.dir, duo.a, b);
 	});
 
-	it("cross-session extend pushes out the owner's expiry", async () => {
+	it("an extend from a sibling process pushes out the owner's expiry", async () => {
 		const duo = makeDuo({ defaultLifetimeMs: 150 });
 		const res = duo.a.manager.register({ kind: "parent" }, {
 			trigger: { kind: "deadline", at: Date.now() + 60_000 },
@@ -912,7 +916,7 @@ describe("concurrent sessions sharing one store", () => {
 		});
 		assert.equal(res.ok, true);
 		duo.a.manager.dispose();
-		duo.alive.delete(100); // A's session is gone
+		duo.alive.delete(100); // A's process is gone
 		const b = sibling(duo);
 		b.manager.reattachPending();
 		assert.ok(await waitFor(() => b.events.some((e) => /fired at/.test(e.text)), 2000), "B waited on and fired A's abandoned watch");
@@ -920,7 +924,7 @@ describe("concurrent sessions sharing one store", () => {
 		cleanup(duo.dir, b);
 	});
 
-	it("runtime takeover: a sibling that dies mid-run is adopted on the tick", async () => {
+	it("runtime takeover: a sibling process that dies mid-run is adopted on the tick", async () => {
 		const duo = makeDuo();
 		const res = duo.a.manager.register({ kind: "parent" }, {
 			trigger: { kind: "deadline", at: Date.now() + 600 },
@@ -940,7 +944,7 @@ describe("concurrent sessions sharing one store", () => {
 
 	it("the adoption notice inventories everything and tells the truth about fires", async () => {
 		const duo = makeDuo();
-		// Z: claimed by a session that stays alive through the restart.
+		// Z: claimed by a process that stays alive through the restart.
 		const c = makeHarness({
 			storePath: duo.storePath,
 			cwd: duo.cwd,
@@ -979,13 +983,13 @@ describe("concurrent sessions sharing one store", () => {
 		const notice = b.events.find((e) => /re-armed after restart/.test(e.text));
 		assert.ok(notice, "the adoption notice exists");
 		assert.match(notice.text, /rearm-x/);
-		assert.match(notice.text, /held by another session: w-[\w-]+@s300 \[held-z\]/);
+		assert.match(notice.text, /held by another pi process for this session: w-[\w-]+@s300 \[held-z\]/);
 		assert.match(notice.text, /1 fired while pi was down — see the events above/);
 		assert.doesNotMatch(notice.text, /Nothing fired/);
 		cleanup(duo.dir, c, b);
 	});
 
-	it("sibling records survive each other's saves", async () => {
+	it("records from two processes survive each other's saves", async () => {
 		const duo = makeDuo();
 		do {
 			duo.a.manager.register({ kind: "parent" }, {
@@ -1008,5 +1012,65 @@ describe("concurrent sessions sharing one store", () => {
 		const raw = JSON.parse(readFileSync(duo.storePath, "utf-8")) as { records: Array<{ label: string }> };
 		assert.deepEqual(raw.records.map((r) => r.label).sort(), ["a-1", "a-2", "b-1"]);
 		cleanup(duo.dir, duo.a, b);
+	});
+});
+
+describe("watches are scoped to one pi session", () => {
+	it("two sessions in the same cwd never share a store or see each other's watches", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-watches-"));
+		const agentDir = join(dir, "agent");
+		const cwd = join(dir, "cwd");
+		const a = makeHarness({ storePath: watchStorePath(agentDir, "session-a"), cwd });
+		const b = makeHarness({ storePath: watchStorePath(agentDir, "session-b"), cwd });
+		assert.notEqual(a.storePath, b.storePath, "different sessions → different stores");
+
+		const res = a.manager.register({ kind: "parent" }, {
+			trigger: { kind: "deadline", at: Date.now() + 60 },
+			label: "only-a",
+			lifetimeMinutes: 5,
+		});
+		assert.equal(res.ok, true);
+
+		b.manager.reattachPending();
+		b.manager.flushEvents();
+		assert.equal(b.manager.list().length, 0, "B sees none of A's watches");
+		assert.equal(b.events.length, 0, "B emits no adoption notice");
+
+		assert.ok(await waitFor(() => a.events.some((e) => /fired at/.test(e.text)), 2000), "A fires its own watch");
+		await delay(80);
+		assert.equal(b.events.filter((e) => /fired at/.test(e.text)).length, 0, "B never fires A's watch");
+		a.manager.dispose();
+		b.manager.dispose();
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(a.dir, { recursive: true, force: true });
+		rmSync(b.dir, { recursive: true, force: true });
+	});
+
+	it("resuming the same session re-attaches its watches", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-watches-"));
+		const agentDir = join(dir, "agent");
+		const cwd = join(dir, "cwd");
+		const storePath = watchStorePath(agentDir, "session-a");
+
+		const first = makeHarness({ storePath, cwd });
+		const res = first.manager.register({ kind: "parent" }, {
+			trigger: { kind: "deadline", at: Date.now() + 120 },
+			label: "survives-restart",
+			lifetimeMinutes: 5,
+		});
+		assert.equal(res.ok, true);
+		first.manager.dispose(); // the process dies; the store outlives it
+
+		// Same session id, new process: the manager reopens the same store.
+		const second = makeHarness({ storePath, cwd });
+		second.manager.reattachPending();
+		assert.ok(
+			await waitFor(() => second.events.some((e) => /fired at/.test(e.text)), 2000),
+			"the resumed session waits on and fires its own watch",
+		);
+		second.manager.dispose();
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(first.dir, { recursive: true, force: true });
+		rmSync(second.dir, { recursive: true, force: true });
 	});
 });

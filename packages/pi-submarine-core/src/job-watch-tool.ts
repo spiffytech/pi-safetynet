@@ -187,7 +187,7 @@ export function formatWatchViews(views: Array<Pick<WatchView, "id" | "state" | "
 			if (triggerSet.length > 0) parts.push(`trigger: ${triggerSet.map(triggerDesc).join(" | ")}`);
 			if (v.state === "pending" && v.heartbeatMs) parts.push(`heartbeat ${Math.round(v.heartbeatMs / 1000)}s`);
 			if (v.guardPid !== undefined) parts.push(`guard:pid ${v.guardPid}`);
-			if (v.claimedBy !== undefined) parts.push(`held by session ${v.claimedBy}`);
+			if (v.claimedBy !== undefined) parts.push(`held by pi process ${v.claimedBy}`);
 			if (v.survival) parts.push(v.survival);
 			if (v.verdict) parts.push(`verdict: ${v.verdict}`);
 			if (v.lastLine) parts.push(`last: ${v.lastLine}`);
