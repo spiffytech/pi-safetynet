@@ -23,7 +23,7 @@ function makeCtx() {
     aborted,
     hasUI: true,
     cwd: "/tmp",
-    sessionManager: { getEntries: () => [] },
+    sessionManager: { getEntries: () => [], getBranch: () => [] },
     ui: {
       notify: () => {},
       setWidget: () => {},

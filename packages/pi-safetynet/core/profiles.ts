@@ -1,4 +1,4 @@
-import type { Paradigm, ProfileName, ModeAliases, AppendEntrySink, SessionEntriesSource } from "./types.ts";
+import type { Paradigm, ProfileName, ModeAliases, AppendEntrySink, SessionJournalSource } from "./types.ts";
 import { loadDefaultProfile, loadParadigm } from "./global-config.ts";
 
 let currentParadigm: Paradigm = loadParadigm();
@@ -76,8 +76,11 @@ export function acceptanceModes(): ProfileName[] {
 	return getCurrentProfile() === write ? [write] : [read, write];
 }
 
-export function getLatestCustomEntry<T>(journal: SessionEntriesSource, customType: string): { data?: T } | undefined {
-	const entries = journal.sessionManager.getEntries();
+export function getLatestCustomEntry<T>(journal: SessionJournalSource, customType: string): { data?: T } | undefined {
+	// Branch-scoped: a tree navigation (rewind) must not resurrect a custom entry
+	// written on the abandoned branch — the profile/auto state at the rewind
+	// target is the one that applies.
+	const entries = journal.sessionManager.getBranch();
 	return entries
 		.filter((e) =>
 			e.type === "custom" && e.customType === customType,
@@ -91,7 +94,7 @@ export function persistProfile(pi: AppendEntrySink): void {
 	});
 }
 
-export function restoreProfile(ctx: SessionEntriesSource): void {
+export function restoreProfile(ctx: SessionJournalSource): void {
 	const entry = getLatestCustomEntry<{ enabled: ProfileName }>(ctx, "safetynet:profile");
 	if (entry?.data?.enabled) currentProfile = normalizeProfile(entry.data.enabled);
 }

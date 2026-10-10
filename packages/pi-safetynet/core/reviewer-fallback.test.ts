@@ -9,7 +9,7 @@ function opts(model: string | string[], overrides: Record<string, unknown> = {})
     target: "touch x",
     check: { action: "ask" as const },
     cwd: "/tmp",
-    parentCtx: { sessionManager: { getEntries: () => [] } } as any,
+    parentCtx: { sessionManager: { getEntries: () => [], getBranch: () => [] } } as any,
     profile: "build" as const,
     timeoutMs: 100,
     model,

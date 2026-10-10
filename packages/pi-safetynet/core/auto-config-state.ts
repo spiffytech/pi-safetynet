@@ -2,7 +2,7 @@
  * Auto-approve toggle state persistence.
  * Mirrors the profiles persistence pattern (per-session custom entries).
  */
-import type { AutoApproveConfig, AppendEntrySink, SessionEntriesSource } from "./types.ts";
+import type { AutoApproveConfig, AppendEntrySink, SessionJournalSource } from "./types.ts";
 import { getLatestCustomEntry } from "./profiles.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -39,7 +39,7 @@ export function toggleAutoEnabled(pi: AppendEntrySink): { enabled: boolean; bloc
   return { enabled: autoEnabled };
 }
 
-export function restoreAutoEnabled(ctx: SessionEntriesSource): void {
+export function restoreAutoEnabled(ctx: SessionJournalSource): void {
   const entry = getLatestCustomEntry<{ enabled: boolean }>(ctx, "safetynet:auto");
   if (entry?.data?.enabled !== undefined) autoEnabled = entry.data.enabled;
 }

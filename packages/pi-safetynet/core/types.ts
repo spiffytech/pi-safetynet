@@ -118,7 +118,11 @@ export interface AppendEntrySink {
   appendEntry(customType: string, data?: unknown): void;
 }
 
-/** Structural seam for reading the full session journal (not just the branch). */
+/** Structural seam for reading the full session journal, across every tree
+ *  branch (not just the active path). Use only where whole-file scope is
+ *  genuinely wanted — e.g. a freshly created child session with no branching,
+ *  or footer statistics. State that must follow a rewind belongs on
+ *  SessionJournalSource (getBranch). */
 export interface SessionEntriesSource {
   sessionManager: { getEntries(): readonly JournalEntryLike[] };
 }

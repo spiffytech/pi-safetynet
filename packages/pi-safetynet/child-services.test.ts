@@ -75,7 +75,7 @@ function createMockCtx(overrides: Record<string, unknown> = {}) {
 		abort() {
 			aborted.value = true;
 		},
-		sessionManager: { getEntries: () => [], getSessionId: () => "test-session" },
+		sessionManager: { getEntries: () => [], getBranch: () => [], getSessionId: () => "test-session" },
 		model: { id: "test-model", provider: "test" },
 		modelRegistry: { find: () => undefined },
 		...overrides,

@@ -56,7 +56,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       custom: async () => null,
     },
     abort() { aborted.value = true; },
-    sessionManager: { getEntries: () => [] },
+    sessionManager: { getEntries: () => [], getBranch: () => [] },
     ...overrides,
   };
 }

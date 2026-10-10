@@ -2,7 +2,7 @@
  * reviewer-state.ts — permission-review circuit-breaker state and review
  * execution. Harness-free: transcript source and subagent spawn are injected.
  */
-import type { ReviewVerdict, ReviewerAssessment, SessionEntriesSource, ProfileName } from "./types.ts";
+import type { ReviewVerdict, ReviewerAssessment, SessionJournalSource, ProfileName } from "./types.ts";
 import type { PermissionCheck } from "./check.ts";
 import {
   REVIEWER_SYSTEM_PROMPT,
@@ -127,7 +127,7 @@ export interface SpawnResult {
  *  catalog, and (when present) the session's own model as a last-resort
  *  reviewer model. The registry is structural — `getAll` for spec resolution,
  *  `completeSimple` for the one-shot reviewer (see core/one-shot-review.ts). */
-export interface ReviewParentCtx extends SessionEntriesSource {
+export interface ReviewParentCtx extends SessionJournalSource {
   cwd?: string;
   modelRegistry?: {
     getAll(): Array<{ id: string; provider?: string }>;
@@ -291,7 +291,11 @@ async function runPermissionReviewWithModel(
   let transcriptMs = 0;
   let lastAssistantText = "";
   try {
-    const entries = opts.parentCtx.sessionManager.getEntries();
+    // Active path only. getEntries() is the whole append-only journal and would
+    // still contain an abandoned branch's user messages and assistant intent
+    // after a rewind — the reviewer must not judge a rewound session on context
+    // the user removed.
+    const entries = opts.parentCtx.sessionManager.getBranch();
     const transcriptEntries: TranscriptEntry[] = [];
     for (const e of entries) {
       if (e.type === "message") {

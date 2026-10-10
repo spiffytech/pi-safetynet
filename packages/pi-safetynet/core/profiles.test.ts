@@ -265,7 +265,7 @@ describe("profiles", () => {
     it("returns undefined when no matching entries", () => {
       const ctx = {
         sessionManager: {
-          getEntries: () => [],
+          getBranch: () => [],
         },
       } as unknown as ExtensionContext;
       const result = getLatestCustomEntry(ctx, "safetynet:profile");
@@ -275,7 +275,7 @@ describe("profiles", () => {
     it("returns entry with data field from matching custom entries", () => {
       const ctx = {
         sessionManager: {
-          getEntries: () => [
+          getBranch: () => [
             { type: "custom", customType: "safetynet:profile", data: { enabled: "build" } },
           ],
         },
@@ -287,7 +287,7 @@ describe("profiles", () => {
     it("returns latest entry when multiple matches", () => {
       const ctx = {
         sessionManager: {
-          getEntries: () => [
+          getBranch: () => [
             { type: "custom", customType: "safetynet:profile", data: { enabled: "plan" } },
             { type: "custom", customType: "safetynet:profile", data: { enabled: "build" } },
           ],
@@ -300,7 +300,7 @@ describe("profiles", () => {
     it("ignores entries with different customType", () => {
       const ctx = {
         sessionManager: {
-          getEntries: () => [
+          getBranch: () => [
             { type: "custom", customType: "other", data: { enabled: "build" } },
           ],
         },
@@ -319,7 +319,7 @@ describe("profiles", () => {
       setCurrentProfile("plan");
       const ctx = {
         sessionManager: {
-          getEntries: () => [
+          getBranch: () => [
             { type: "custom", customType: "safetynet:profile", data: { enabled: "build" } },
           ],
         },
@@ -332,7 +332,7 @@ describe("profiles", () => {
       setCurrentProfile("build");
       const ctx = {
         sessionManager: {
-          getEntries: () => [
+          getBranch: () => [
             { type: "custom", customType: "safetynet:profile", data: { enabled: "plan" } },
           ],
         },
@@ -344,7 +344,22 @@ describe("profiles", () => {
     it("keeps default when no entry exists", () => {
       const ctx = {
         sessionManager: {
-          getEntries: () => [],
+          getBranch: () => [],
+        },
+      } as unknown as ExtensionContext;
+      restoreProfile(ctx);
+      assert.equal(getCurrentProfile(), "plan");
+    });
+
+    it("ignores a profile entry that lives on an abandoned branch (rewind)", () => {
+      setCurrentProfile("plan");
+      const ctx = {
+        sessionManager: {
+          // Abandoned branch carries a build toggle; the active path is empty.
+          getBranch: () => [],
+          getEntries: () => [
+            { type: "custom", customType: "safetynet:profile", data: { enabled: "build" } },
+          ],
         },
       } as unknown as ExtensionContext;
       restoreProfile(ctx);
@@ -354,7 +369,7 @@ describe("profiles", () => {
     it("uses latest entry when multiple exist", () => {
       const ctx = {
         sessionManager: {
-          getEntries: () => [
+          getBranch: () => [
             { type: "custom", customType: "safetynet:profile", data: { enabled: "plan" } },
             { type: "custom", customType: "safetynet:profile", data: { enabled: "build" } },
             { type: "custom", customType: "safetynet:profile", data: { enabled: "plan" } },
