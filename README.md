@@ -274,6 +274,7 @@ To make `Escape` a no-op in the prompt, simply bind `denyAbort` to something els
 | `safetynet:build` | Switch to build mode |
 | `safetynet:rules` | Show current permission rules |
 | `safetynet:auto` | Toggle auto-approve mode (route Asks through permissions model) |
+| `safetynet:yolo` | Bypass permission checks for the next turn (catastrophic commands still blocked) |
 
 ## How it compares
 

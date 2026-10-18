@@ -38,6 +38,9 @@ export interface PermissionCheck {
    *  read-only mode). Lets the deny path label the nudge "Mode denied" and
    *  attach mode-specific recovery guidance. */
   modeDenied?: boolean;
+  /** True for denials no user override may bypass: catastrophic commands and
+   *  unparseable input (fail-closed). */
+  unforceable?: boolean;
 }
 
 /** True when the checked action has write side effects: an edit/write tool
@@ -413,11 +416,11 @@ export function checkBashPermission(
   // Fail closed: if the parser could not produce a trustworthy result, deny
   // rather than treating an empty/partial parse as an allow.
   if (parsed.parseFailed) {
-    return { action: "deny", reason: "Could not parse bash command; denied to be safe", unapproved: [] };
+    return { action: "deny", reason: "Could not parse bash command; denied to be safe", unapproved: [], unforceable: true };
   }
 
   if (parsed.catastrophic) {
-    return { action: "deny", reason: "Catastrophic command", unapproved: [] };
+    return { action: "deny", reason: "Catastrophic command", unapproved: [], unforceable: true };
   }
 
   const absCwd = cwd ?? process.cwd();

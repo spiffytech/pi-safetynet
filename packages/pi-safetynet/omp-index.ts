@@ -65,6 +65,9 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 	let storage: PermissionStorage | undefined;
 	let trustExternalPaths = false;
 	let inferred: InferredEngine | undefined;
+	/** /safetynet:yolo — skip permission checks until this turn ends. The
+	 *  catastrophic floor still applies. */
+	let yoloNextTurn = false;
 
 	function deps(ctx: ExtensionContext): OmpPipelineDeps | undefined {
 		if (!storage) return undefined;
@@ -201,6 +204,7 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		yoloNextTurn = false;
 		storage = undefined;
 		inferred = undefined;
 	});
@@ -208,7 +212,21 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 	// Turn-scoped approvals expire when the agent finishes.
 	pi.on("agent_end", async () => {
 		storage?.temp.clearTurnRules();
+		yoloNextTurn = false; // the bypass lasts one turn
 		reviewBumpTurnToken(); // invalidate in-flight auto-review verdicts
+	});
+
+	pi.registerCommand("safetynet:yolo", {
+		description: "Bypass permission checks for the next turn",
+		handler: async (_args, ctx) => {
+			yoloNextTurn = !yoloNextTurn;
+			ctx.ui.notify(
+				yoloNextTurn
+					? "safetynet: YOLO armed — permission checks bypassed until this turn ends (catastrophic commands still blocked)."
+					: "safetynet: YOLO disarmed.",
+				"warning",
+			);
+		},
 	});
 
 	// Review the pending inferred-rule queue (also reachable via widget hint).
@@ -238,6 +256,7 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 	pi.on("session_switch", async (event, ctx) => {
 		if (!storage) return; // no session yet
 		storage.temp.clearTurnRules(); // turn rules never cross a session switch
+		yoloNextTurn = false;
 		// Counters are session evidence — never leak across sessions.
 		inferred = new InferredEngine(ctx.cwd);
 		storage.persisted.setCwd(ctx.cwd); // project scope follows the session cwd
@@ -345,6 +364,19 @@ export default async function safetynetOmp(pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const handlerT0 = Date.now();
+		if (yoloNextTurn) {
+			if (!storage || event.toolName !== "bash") return;
+			const command = typeof event.input.command === "string" ? event.input.command : "";
+			if (!command) return;
+			const profile = getCurrentProfile();
+			const check = checkBashPermission(
+				command, profile, storage.getAllRules(), ctx.cwd,
+				trustExternalPaths, getModeAliases(),
+				inferred?.rulesForProfile(profile, getModeAliases()),
+			);
+			if (check.unforceable) return { block: true, reason: check.reason ?? "Catastrophic command" };
+			return;
+		}
 		if (!storage) return; // no session yet
 
 		const profile = getCurrentProfile();

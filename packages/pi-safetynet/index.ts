@@ -146,6 +146,26 @@ function sendDenial(text: string, mode: "hidden" | "visible"): void {
 let storage: PermissionStorage;
 let inferredEngine: InferredEngine | undefined;
 
+/** /safetynet:yolo — when armed, permission checks are skipped for the rest
+ *  of the current/next turn. The catastrophic floor still applies. */
+let yoloNextTurn = false;
+
+/** Under YOLO everything is allowed except the catastrophic floor (and
+ *  unparseable input, which fails closed). */
+function yoloCheck(event: ToolCallEvent, ctx: ExtensionContext): { block: true; reason: string } | undefined {
+  if (event.toolName !== "bash" || !storage) return undefined;
+  const command = event.input.command as string;
+  if (!command) return undefined;
+  const profile = getCurrentProfile();
+  const check = checkBashPermission(
+    command, profile, storage.getAllRules(), ctx.cwd,
+    trustExternalActive(), getModeAliases(),
+    inferredEngine?.rulesForProfile(profile, getModeAliases()),
+  );
+  if (!check.unforceable) return undefined;
+  return { block: true, reason: check.reason ?? "Catastrophic command" };
+}
+
 /** Per-scope deny-strike counter for the main session (all ruleset/mode/
  *  headless/hazardous denials share it). Resets on agent_end. */
 const hazardousDenyState: HazardousDenyState = { count: 0 };
@@ -238,7 +258,7 @@ async function handleToolCall(
   ctx: ExtensionContext,
 ): Promise<{ block: boolean; reason: string } | undefined> {
   const t0 = Date.now();
-  const result = await handleToolCallInner(event, ctx);
+  const result = yoloNextTurn ? yoloCheck(event, ctx) : await handleToolCallInner(event, ctx);
   const ms = Date.now() - t0;
   if (ms >= SLOW_TOOL_CALL_MS || result?.block) {
     debugLog(
@@ -563,6 +583,19 @@ function registerCommands(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("safetynet:yolo", {
+    description: "Bypass permission checks for the next turn",
+    handler: async (_args, ctx) => {
+      yoloNextTurn = !yoloNextTurn;
+      ctx.ui.notify(
+        yoloNextTurn
+          ? "safetynet: YOLO armed — permission checks bypassed until this turn ends (catastrophic commands still blocked)."
+          : "safetynet: YOLO disarmed.",
+        "warning",
+      );
+    },
+  });
+
   pi.registerCommand("safetynet:inferred", {
     description: "Review pending inferred-rule proposals",
     handler: async (_args, ctx) => {
@@ -818,6 +851,7 @@ export default async function safetynetExtension(api: ExtensionAPI) {
     setSandboxDir(ensureSandboxDir(ctx.sessionManager.getSessionId()));
     loadLearnedBoundaries();
     uiArbiter.reset(); // no stale surface may block a fresh session's prompts
+    yoloNextTurn = false;
 
     // Apply the paradigm FIRST, before profile restore/brand-new default above,
     // so restoreProfile and the default profile normalize against the correct
@@ -897,6 +931,7 @@ export default async function safetynetExtension(api: ExtensionAPI) {
 
   pi.on("agent_end", async (_event, ctx) => {
     storage.temp.clearTurnRules();
+    yoloNextTurn = false; // the bypass lasts one turn
     reviewBumpTurnToken();
     reviewResetDenies();
     hazardousDenyState.count = 0;
@@ -929,6 +964,7 @@ export default async function safetynetExtension(api: ExtensionAPI) {
   pi.on("session_tree", async (_event, ctx) => {
     await restoreSessionState(ctx, { replaceSession: true });
     // Counters are session evidence — a tree switch is a new context.
+    yoloNextTurn = false;
     inferredEngine = new InferredEngine(ctx.cwd);
     storage.persisted.setCwd(ctx.cwd);
     setSandboxDir(ensureSandboxDir(ctx.sessionManager.getSessionId()));
