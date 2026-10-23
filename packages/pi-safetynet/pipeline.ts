@@ -26,7 +26,12 @@ import {
   type DenialSource,
   type DenialUI,
 } from "./core/denial-notice.ts";
-import { isAutoEnabled, loadAutoApproveConfig, setAutoEnabled } from "./core/auto-config-state.ts";
+import {
+  isAutoEnabled,
+  loadAutoApproveConfig,
+  reviewModelSpecs,
+  setAutoEnabled,
+} from "./core/auto-config-state.ts";
 import type { InferredEngine } from "./core/inferred/engine.ts";
 import {
   runPermissionReview, reviewConsecutiveDenies, reviewResetDenies,
@@ -189,6 +194,14 @@ export function denyResultFromPrompt(
     return { block: true, reason, abort: false };
   }
   return undefined;
+}
+
+/** True when an approval of this check cannot become a durable rule: a shell
+ *  glob would widen the matcher, and an opaque payload (`'...'`) is identical
+ *  for every long argument, so either one would authorize a family of commands
+ *  rather than the one approved. Such approvals run once, without a rule. */
+export function isInvocationOnlyApproval(check: PermissionCheck): boolean {
+  return (check.unapproved ?? []).some(patternHasBashGlob) || (check.opaquePayload?.length ?? 0) > 0;
 }
 
 /** Source of a denial, used to label the surfaced line. */
@@ -412,6 +425,16 @@ export async function resolvePermission(
     });
   }
 
+  // ── Scratch-scope nudge ──────────────────────────────────────────────────
+  // A write aimed at another session's scratch is a path mistake, not a
+  // decision for the user: tell the model where its own scratch dir is and
+  // keep the turn alive. No prompt, no reviewer call, no strike.
+  if (action === "ask" && opts.check.narrow !== undefined) {
+    const detail = `Scratch scope: ${opts.check.narrow} (Blocked ${opts.permission}: ${opts.target})`;
+    deps.sendDenial?.(detail, "hidden");
+    return { block: true, reason: detail };
+  }
+
   // ── Auto-review block (runs BEFORE headless check per T13) ───────────────
   if (action === "ask" && isAutoEnabled() && !reviewIsActive()) {
     // Read-only mode short-circuit: reject writes before the reviewer runs.
@@ -421,6 +444,7 @@ export async function resolvePermission(
     const config = loadAutoApproveConfig();
     const timeoutMs = config.timeoutMs ?? 90000;
     const maxDenials = config.maxDenials ?? 3;
+    const modelSpecs = reviewModelSpecs(config);
 
     // One-shot review attempt
     const ctl = new AbortController();
@@ -439,7 +463,7 @@ export async function resolvePermission(
             profile: reviewProfile,
             signal: ctl.signal,
             timeoutMs,
-            ...(config.model ? { model: config.model } : {}),
+            ...(modelSpecs.length > 0 ? { model: modelSpecs } : {}),
           },
           {
             spawn: pickReviewSpawn(deps.reviewSpawn, async (spawnOpts: any) => {
@@ -474,9 +498,10 @@ export async function resolvePermission(
         // A mode flip during the awaited review invalidates the write approval.
         const staleMode = modeFlipBlock();
         if (staleMode) return staleMode;
-        // A glob in an approved command would mint a rule matching a broader
-        // family (`rm -rf *` \u2192 `rm -rf .*`). Approve this invocation only.
-        if (opts.permission === "bash" && (opts.check.unapproved ?? []).some(patternHasBashGlob)) {
+        // A glob or an opaque payload in an approved command would mint a rule
+        // matching a broader family (`rm -rf *` \u2192 `rm -rf .*`; any long
+        // quoted argument \u2192 `'...'`). Approve this invocation only.
+        if (opts.permission === "bash" && isInvocationOnlyApproval(opts.check)) {
           clearDenialBanner(deps.displayCtx.ui);
           deps.displayCtx.ui.notify(` Reviewer allowed (risk: ${v.assessment.risk_level}, auth: ${v.assessment.user_authorization})`, "info");
           deps.sendAutoApproval?.(v.assessment.risk_level, v.assessment.user_authorization);
@@ -499,15 +524,19 @@ export async function resolvePermission(
       }
 
       if (v.kind === "assessment" && v.assessment.outcome === "deny") {
-        // Deny
-        surfaceDenial(deps.displayCtx.ui, {
-          source: "reviewer",
-          permission: opts.permission,
-          target: opts.target,
-          reason: v.assessment.rationale,
-          risk: v.assessment.risk_level,
-          authorization: v.assessment.user_authorization,
-        });
+        // Classifier denies are model-only nudges: no toast/banner. The model
+        // gets the reason and can adapt or ask the user in chat.
+        const nudge = v.assessment.nudge === true;
+        if (!nudge) {
+          surfaceDenial(deps.displayCtx.ui, {
+            source: "reviewer",
+            permission: opts.permission,
+            target: opts.target,
+            reason: v.assessment.rationale,
+            risk: v.assessment.risk_level,
+            authorization: v.assessment.user_authorization,
+          });
+        }
         const detail = denialMessage(opts.permission, opts.target, v.assessment.rationale);
         // Secret-touching denials block but never abort and never consume the
         // reviewer budget: the block protects the secret, while ending the turn
@@ -652,26 +681,33 @@ export async function resolvePermission(
         patterns.push(edited);
       }
     }
-    const globApproved = opts.permission === "bash" && patterns.some(patternHasBashGlob);
+    const opaqueSet = new Set(opts.check.opaquePayload ?? []);
+    const invocationOnly =
+      opts.permission === "bash" && (patterns.some(patternHasBashGlob) || opaqueSet.size > 0);
     // A shell glob can't be persisted as a rule without authorizing a broader
     // family (`rm -rf *` → `rm -rf .*`). When nothing was skipped, approve this
     // invocation only; when items were skipped, drop the glob from the rule set
     // and let the recheck reprompt for it rather than silently approving the
     // skipped items.
-    if (globApproved && skipped.length === 0) {
+    if (invocationOnly && skipped.length === 0) {
       const staleGlob = modeFlipBlock();
       if (staleGlob) return staleGlob;
-      deps.displayCtx.ui.notify("Approved for this call only: a shell glob can't be saved as a rule.", "warning");
+      deps.displayCtx.ui.notify("Approved for this call only: a shell glob or an opaque payload can't be saved as a rule.", "warning");
       clearDenialBanner(deps.displayCtx.ui);
       deps.sendManualApproval();
       return undefined;
     }
-    const rulePatterns = globApproved ? patterns.filter((p) => !patternHasBashGlob(p)) : patterns;
+    const rulePatterns = invocationOnly
+      ? patterns.filter((p) => !patternHasBashGlob(p) && !opaqueSet.has(p))
+      : patterns;
 
     // Counters only consume durable bash approvals ("once" declined persistence),
     // and only the subcommands that were actually subject to approval.
     if (opts.permission === "bash") {
-      deps.inferred?.recordApproval((opts.check.unapproved ?? []).filter((s) => !patternHasBashGlob(s)), deps.allowModes);
+      deps.inferred?.recordApproval(
+        (opts.check.unapproved ?? []).filter((s) => !patternHasBashGlob(s) && !opaqueSet.has(s)),
+        deps.allowModes,
+      );
     }
 
     const redirectPatterns: Array<{ permission: "read" | "edit"; pattern: string }> = [];

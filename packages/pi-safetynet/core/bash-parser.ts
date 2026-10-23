@@ -104,6 +104,12 @@ export function initBashParser(): Promise<void> {
 interface Rendered {
   canonical: string;
   display: string;
+  /** True when this token collapsed an opaque literal (a quoted string that is
+   *  multi-line or longer than OPAQUE_STRING_THRESHOLD) to a `...` placeholder.
+   *  The placeholder is IDENTICAL for every such literal, so a rule minted from
+   *  it would match any other long argument — consumers must keep such
+   *  approvals invocation-only. */
+  opaque?: boolean;
 }
 
 /** Convert a tree-sitter word-ish node into a canonical + display token
@@ -125,7 +131,7 @@ function renderNode(node: Node): Rendered | null {
     case "raw_string": {
       const inner = node.text.slice(1, -1);
       if (inner === "") return { canonical: "''", display: "''" };
-      if (isOpaqueString(inner)) return { canonical: "'...'", display: "'...'" };
+      if (isOpaqueString(inner)) return { canonical: "'...'", display: "'...'", opaque: true };
       // Display the original source text so the UI shows what was written.
       return { canonical: inner, display: node.text };
     }
@@ -138,7 +144,7 @@ function renderNode(node: Node): Rendered | null {
       if (hasExpansion) return { canonical: '"..."', display: '"..."' };
       const literal = unescapeDoubleQuoted(node.text.slice(1, -1));
       if (literal === "") return { canonical: '""', display: '""' };
-      if (isOpaqueString(literal)) return { canonical: '"..."', display: '"..."' };
+      if (isOpaqueString(literal)) return { canonical: '"..."', display: '"..."', opaque: true };
       // Display the original source text (including its escapes) so the user
       // approves exactly what will run; re-quoting the unescaped literal would
       // corrupt e.g. `"a\"b"` into `"a"b"`.
@@ -147,14 +153,16 @@ function renderNode(node: Node): Rendered | null {
     case "concatenation": {
       let canonical = "";
       let display = "";
+      let opaque = false;
       for (const child of node.namedChildren) {
         const r = renderNode(child);
         if (r) {
           canonical += r.canonical;
           display += r.display;
+          if (r.opaque) opaque = true;
         }
       }
-      return { canonical, display };
+      return opaque ? { canonical, display, opaque: true } : { canonical, display };
     }
     case "simple_expansion":
     case "expansion":
@@ -599,9 +607,10 @@ function isCatastrophic(tokens: string[]): boolean {
 // token extraction for a `command` node
 // ---------------------------------------------------------------------------
 
-function commandTokens(cmd: Node): { tokens: string[]; displays: string[] } {
+function commandTokens(cmd: Node): { tokens: string[]; displays: string[]; opaque: boolean } {
   const tokens: string[] = [];
   const displays: string[] = [];
+  let opaque = false;
   for (let i = 0; i < cmd.childCount; i++) {
     const child = cmd.child(i);
     if (!child || !child.isNamed) continue;
@@ -617,9 +626,10 @@ function commandTokens(cmd: Node): { tokens: string[]; displays: string[] } {
     if (r) {
       tokens.push(r.canonical);
       displays.push(r.display);
+      if (r.opaque) opaque = true;
     }
   }
-  return { tokens, displays };
+  return { tokens, displays, opaque };
 }
 
 // ---------------------------------------------------------------------------
@@ -631,15 +641,20 @@ interface Acc {
   display: string[];
   words: string[][];
   displayWords: string[][];
+  /** Parallel to `canonical`: this subcommand collapsed an opaque literal. */
+  opaque: boolean[];
   redirects: RedirectTarget[];
   catastrophic: boolean;
+  /** Set when a node could not be split into trustworthy subcommands. */
+  parseFailed?: boolean;
 }
 
-function addSub(acc: Acc, tokens: string[], displays: string[], suffix = ""): void {
+function addSub(acc: Acc, tokens: string[], displays: string[], suffix = "", opaque = false): void {
   acc.canonical.push(tokens.join(" ") + suffix);
   acc.display.push(displays.join(" ") + suffix);
   acc.words.push(tokens);
   acc.displayWords.push(displays);
+  acc.opaque.push(opaque);
 }
 
 function findDangerous(tokens: string[]): "exec" | "delete" | null {
@@ -650,7 +665,7 @@ function findDangerous(tokens: string[]): "exec" | "delete" | null {
 }
 
 function emitCommand(cmd: Node, reds: RedirectInfo[], acc: Acc): void {
-  const { tokens, displays } = commandTokens(cmd);
+  const { tokens, displays, opaque } = commandTokens(cmd);
   if (!tokens.length) return;
   const suffix = redirectSuffix(reds);
   const name = tokens[0]!;
@@ -681,11 +696,11 @@ function emitCommand(cmd: Node, reds: RedirectInfo[], acc: Acc): void {
     const prefixD = displays.slice(0, effectiveIdx);
     const wrapperT = [...prefixT, tokens[effectiveIdx]!, tokens[effectiveIdx + 1]!];
     const wrapperD = [...prefixD, displays[effectiveIdx]!, displays[effectiveIdx + 1]!];
-    addSub(acc, wrapperT, wrapperD, suffix);
+    addSub(acc, wrapperT, wrapperD, suffix, opaque);
     const innerT = tokens.slice(effectiveIdx + 2);
     const innerD = displays.slice(effectiveIdx + 2);
     if (innerT.length) {
-      addSub(acc, [...prefixT, ...innerT], [...prefixD, ...innerD], suffix);
+      addSub(acc, [...prefixT, ...innerT], [...prefixD, ...innerD], suffix, opaque);
     }
     return;
   }
@@ -698,12 +713,12 @@ function emitCommand(cmd: Node, reds: RedirectInfo[], acc: Acc): void {
     const innerD = displays.slice(innerStart);
     const allT = [...prefixT, ...innerT];
     const allD = [...prefixD, ...innerD];
-    if (allT.length) addSub(acc, allT, allD, suffix);
+    if (allT.length) addSub(acc, allT, allD, suffix, opaque);
     else addSub(acc, ["echo"], ["echo"], suffix);
     return;
   }
 
-  addSub(acc, tokens, displays, suffix);
+  addSub(acc, tokens, displays, suffix, opaque);
 }
 
 function emitTest(cmd: Node, acc: Acc): void {
@@ -719,18 +734,51 @@ function emitTest(cmd: Node, acc: Acc): void {
   }
 }
 
-function recurseChildren(node: Node, acc: Acc): void {
-  for (const child of node.namedChildren) walk(child, acc);
+function recurseChildren(node: Node, acc: Acc, allowSplit: boolean): void {
+  for (const child of node.namedChildren) walk(child, acc, allowSplit);
 }
 
-function walk(node: Node, acc: Acc): void {
+function newlineCount(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) if (s[i] === "\n") n++;
+  return n;
+}
+
+/** Newlines that are literal text inside a quoted string or heredoc body. */
+function quotedNewlines(node: Node): number {
+  let n = 0;
+  for (const child of node.namedChildren) {
+    if (
+      child.type === "string" ||
+      child.type === "raw_string" ||
+      child.type === "heredoc_body" ||
+      child.type === "translated_string"
+    ) {
+      n += newlineCount(child.text);
+    } else {
+      n += quotedNewlines(child);
+    }
+  }
+  return n;
+}
+
+/** tree-sitter-bash 0.25.1 misparses a pipeline followed by a line containing
+ *  `2>&1 |` as ONE `command` node spanning both lines (`cat\necho x`). Any
+ *  newline inside a command node that is not inside a quoted string means two
+ *  logical commands were merged; the caller must re-parse and splice, or fail
+ *  closed. */
+function hasUnquotedNewline(node: Node): boolean {
+  return newlineCount(node.text) > quotedNewlines(node);
+}
+
+function walk(node: Node, acc: Acc, allowSplit = true): void {
   if (node.type === "variable_assignment") {
     // Bare assignments (`F=.env`) are their own subcommand so the variable
     // can be resolved against later operands. Prefixed assignments (`F=x cmd`)
     // do not exist to the shell as separate state and are skipped by
     // commandTokens.
     if (node.parent?.type !== "command") addSub(acc, [node.text], [node.text]);
-    recurseChildren(node, acc);
+    recurseChildren(node, acc, allowSplit);
     return;
   }
 
@@ -740,7 +788,7 @@ function walk(node: Node, acc: Acc): void {
     for (const child of node.namedChildren) {
       if (child.type === "variable_assignment") addSub(acc, [child.text], [child.text]);
     }
-    recurseChildren(node, acc);
+    recurseChildren(node, acc, allowSplit);
     return;
   }
 
@@ -748,32 +796,54 @@ function walk(node: Node, acc: Acc): void {
     const body = node.childForFieldName("body");
     const reds = collectRedirects(node);
     if (body) {
-      if (body.type === "command") {
+      if (body.type === "command" && allowSplit && hasUnquotedNewline(body)) {
+        // The body merged two commands; surface its redirects, then let the
+        // command walker split it.
+        for (const r of [...reds, ...directRedirectChildren(body)]) {
+          if (r.direction) acc.redirects.push({ path: r.target, direction: r.direction });
+        }
+        walk(body, acc, allowSplit);
+      } else if (body.type === "command") {
         emitCommand(body, [...reds, ...directRedirectChildren(body)], acc);
-        recurseChildren(body, acc);
+        recurseChildren(body, acc, allowSplit);
       } else {
         for (const r of reds) {
           if (r.direction) acc.redirects.push({ path: r.target, direction: r.direction });
         }
-        walk(body, acc);
+        walk(body, acc, allowSplit);
       }
     }
     for (const child of node.namedChildren) {
       if (body && child.id === body.id) continue;
-      walk(child, acc);
+      walk(child, acc, allowSplit);
     }
     return;
   }
 
   if (node.type === "command") {
+    if (allowSplit && hasUnquotedNewline(node)) {
+      // Re-parse the merged text without splitting again (guards recursion).
+      const split = parseCommandInternal(node.text, false);
+      if (!split.parseFailed && split.subcommands.length > 1) {
+        for (let i = 0; i < split.subcommands.length; i++) {
+          addSub(acc, split.subcommandWords[i]!, split.subcommandDisplayWords[i]!);
+        }
+        for (const r of split.redirects) acc.redirects.push(r);
+        if (split.catastrophic) acc.catastrophic = true;
+        return;
+      }
+      // Could not split: fail closed rather than emit a merged command.
+      acc.parseFailed = true;
+      return;
+    }
     emitCommand(node, directRedirectChildren(node), acc);
-    recurseChildren(node, acc);
+    recurseChildren(node, acc, allowSplit);
     return;
   }
 
   if (node.type === "test_command") {
     emitTest(node, acc);
-    recurseChildren(node, acc);
+    recurseChildren(node, acc, allowSplit);
     return;
   }
 
@@ -789,7 +859,7 @@ function walk(node: Node, acc: Acc): void {
     }
   }
 
-  recurseChildren(node, acc);
+  recurseChildren(node, acc, allowSplit);
 }
 
 function dedup(acc: Acc): void {
@@ -798,6 +868,7 @@ function dedup(acc: Acc): void {
   const display: string[] = [];
   const words: string[][] = [];
   const displayWords: string[][] = [];
+  const opaque: boolean[] = [];
   for (let i = 0; i < acc.canonical.length; i++) {
     const key = acc.canonical[i]!;
     if (seen.has(key)) continue;
@@ -806,11 +877,13 @@ function dedup(acc: Acc): void {
     display.push(acc.display[i]!);
     words.push(acc.words[i]!);
     displayWords.push(acc.displayWords[i]!);
+    opaque.push(acc.opaque[i] === true);
   }
   acc.canonical = canonical;
   acc.display = display;
   acc.words = words;
   acc.displayWords = displayWords;
+  acc.opaque = opaque;
 }
 
 // ---------------------------------------------------------------------------
@@ -844,6 +917,10 @@ export interface ParsedCommand {
    *  same shape may (see check.ts).  Scoped per subcommand: in a compound
    *  command only the offending subcommands are listed. */
   dangerousUnresolvedOperands: string[];
+  /** Canonical subcommands that collapsed an opaque literal to a `...`
+   *  placeholder. A rule minted from one would match every other long argument
+   *  in the same position, so approvals of these must stay invocation-only. */
+  opaqueSubcommands: string[];
   /** True when the parser could not produce a trustworthy result (null tree
    *  or an unexpected internal failure).  Callers must fail CLOSED on this
    *  rather than treating the empty/partial result as an allow. */
@@ -861,20 +938,21 @@ function failedResult(command: string): ParsedCommand {
     redirects: [],
     catastrophic: first ? SYSTEM_HALT_COMMANDS.has(first) : false,
     dangerousUnresolvedOperands: [],
+    opaqueSubcommands: [],
     parseFailed: true,
   };
 }
 
-export function parseCommand(command: string): ParsedCommand {
+function parseCommandInternal(command: string, allowSplit: boolean): ParsedCommand {
   if (!parser) {
     throw new Error("bash parser not initialized; call initBashParser() first");
   }
-  const acc: Acc = { canonical: [], display: [], words: [], displayWords: [], redirects: [], catastrophic: false };
+  const acc: Acc = { canonical: [], display: [], words: [], displayWords: [], opaque: [], redirects: [], catastrophic: false };
   try {
     const tree = parser.parse(command);
     if (!tree) return failedResult(command);
     try {
-      walk(tree.rootNode, acc);
+      walk(tree.rootNode, acc, allowSplit);
     } finally {
       tree.delete();
     }
@@ -884,6 +962,7 @@ export function parseCommand(command: string): ParsedCommand {
     return failedResult(command);
   }
 
+  if (acc.parseFailed) return failedResult(command);
   dedup(acc);
   // Dangerous verbs whose operand cannot be pinned down are scoped to the
   // subcommands that actually carry them: in a compound command only the
@@ -900,8 +979,13 @@ export function parseCommand(command: string): ParsedCommand {
     redirects: acc.redirects,
     catastrophic: acc.catastrophic,
     dangerousUnresolvedOperands,
+    opaqueSubcommands: acc.canonical.filter((_, i) => acc.opaque[i] === true),
     parseFailed: false,
   };
+}
+
+export function parseCommand(command: string): ParsedCommand {
+  return parseCommandInternal(command, true);
 }
 
 /** Per-subcommand canonical token lists for a command string. Parallel to

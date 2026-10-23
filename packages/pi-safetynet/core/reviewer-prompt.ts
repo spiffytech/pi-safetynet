@@ -169,7 +169,9 @@ export function truncateText(text: string, maxChars: number): string {
   return text.slice(0, maxChars - 20) + "\n... <truncated/>";
 }
 
-export function formatActionJson(opts: ActionJsonOpts): string {
+/** The planned-action object before serialization. Classifier reviews pass
+ *  this structured form as state; the prompt form is the pretty-printed JSON. */
+export function buildActionObject(opts: ActionJsonOpts): Record<string, unknown> {
   const obj: Record<string, unknown> = {
     tool: opts.permission,
     target: opts.target,
@@ -180,8 +182,15 @@ export function formatActionJson(opts: ActionJsonOpts): string {
   if (opts.redirectTargets && opts.redirectTargets.length > 0) obj.redirectTargets = opts.redirectTargets;
   if (opts.hazardous) obj.hazardous = true;
   if (opts.reason) obj.reason = opts.reason;
-  const text = JSON.stringify(obj, null, 2);
-  return truncateText(text, MAX_ACTION_CHARS);
+  return obj;
+}
+
+export function formatActionObject(obj: Record<string, unknown>): string {
+  return truncateText(JSON.stringify(obj, null, 2), MAX_ACTION_CHARS);
+}
+
+export function formatActionJson(opts: ActionJsonOpts): string {
+  return formatActionObject(buildActionObject(opts));
 }
 
 // ─── Verdict validation ────────────────────────────────────────────────────

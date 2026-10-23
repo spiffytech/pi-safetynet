@@ -4,9 +4,12 @@
  */
 import type { ReviewVerdict, ReviewerAssessment, SessionJournalSource, ProfileName } from "./types.ts";
 import type { PermissionCheck } from "./check.ts";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import {
   REVIEWER_SYSTEM_PROMPT,
-  formatActionJson,
+  buildActionObject,
+  formatActionObject,
   truncateText,
   validateAssessment,
   buildSubmitVerdictTool,
@@ -18,6 +21,7 @@ import {
 import { isReadOnly } from "./profiles.ts";
 import { debugLog, reviewLog } from "./debug-log.ts";
 import { reviewMode } from "./auto-config-state.ts";
+import { getSandboxDir } from "./sandbox.ts";
 
 /** JSON.stringify that never throws (circular refs, BigInt). */
 function safeStringify(value: unknown): string {
@@ -99,6 +103,28 @@ export function formatReviewerFallback(
  *  reviewer via `pickReviewSpawn`; tests inject their own. */
 export type ReviewSpawnFn = (opts: SpawnOpts) => Promise<SpawnResult>;
 
+/** Structured inputs for one review, suitable as classifier state. The
+ *  markdown task prompt carries the same data for session/one-shot reviewers. */
+export interface ReviewContext {
+  projectRoot: string;
+  /** Compacted user-only transcript (bounded by compactTranscript). */
+  transcript: string;
+  /** Assistant's latest prose, explicitly untrusted context. */
+  assistantIntent?: string;
+  /** Planned action as structured JSON (target/command, cwd, profile, ...). */
+  action: Record<string, unknown>;
+  /** Reason this review is a retry, when applicable. */
+  retryReason?: string;
+  /** Paths this session may treat as its own: project root, session scratch
+   *  dir, agent state. Boundary context, not an allowlist. */
+  trustedRoots?: string[];
+  /** The user's latest message, repeated in classifier state so a long
+   *  transcript cannot bury the current request. */
+  currentRequest?: string;
+  /** Active session scratch directory, when one exists. */
+  scratchDir?: string;
+}
+
 export interface SpawnOpts {
   taskType: "explore" | "build";
   prompt: string;
@@ -112,6 +138,16 @@ export interface SpawnOpts {
   trustExternalPaths?: boolean;
   cwd: string;
   model?: any;
+  /** The model spec this attempt was configured with (e.g.
+   *  "neuralwatt/clef-flash"), even when `model` could not be resolved in the
+   *  chat catalog. Classifier reviewers resolve their model from this. */
+  modelSpec?: string;
+  /** Structured review inputs for methodologies that do not consume the
+   *  markdown task prompt (classifier state). */
+  reviewContext?: ReviewContext;
+  /** Probability of allow required for approval in classifier mode. When
+   *  absent the classifier reads `autoApprove.classifierThreshold`. */
+  classifierThreshold?: number;
   thinkingLevel?: string;
   /** Structured-verdict tool the reviewer must call. Forwarded to the subagent
    *  runner, which registers it and returns its arguments as `details.verdict`. */
@@ -196,10 +232,11 @@ function specProvider(
   ctx: ReviewCallOpts["parentCtx"],
   spec: string,
 ): string | undefined {
-  const resolved = resolveModelSpec(ctx, spec);
-  if (resolved?.provider) return resolved.provider;
+  // Prefer the explicit prefix: classifier specs are not in the chat catalog,
+  // so resolving them first would log a misleading "not found" warning.
   const slash = spec.indexOf("/");
-  return slash > 0 ? spec.slice(0, slash) : undefined;
+  if (slash > 0) return spec.slice(0, slash);
+  return resolveModelSpec(ctx, spec)?.provider;
 }
 
 /** Run a permission review and classify the result.
@@ -279,6 +316,30 @@ export async function runPermissionReview(
   return { kind: "transient", message: "No reviewer model configured" };
 }
 
+/** Escalation reasons that describe the ruleset's own default rather than a
+ *  substantive concern. Feeding them to the classifier reads as suspicion
+ *  ("outside project root") and turns routine external reads into prompts. */
+const NON_SUBSTANTIVE_REASON = /^Path is outside project root$/;
+
+/** The user's actual ask, stripped of injected skill/protocol blocks. A skill
+ *  blob can run to kilobytes and bury the request at its end; system reminders
+ *  are not requests at all. */
+function userRequestText(text: string): string {
+  const close = text.lastIndexOf("</skill>");
+  const body = close >= 0 ? text.slice(close + "</skill>".length) : text;
+  if (/^\s*<system-reminder>/.test(body)) return "";
+  return body.trim();
+}
+
+/** Drop subcommands the parser collapsed to an opaque placeholder. The raw
+ *  command is already in `target`, so the placeholder entry adds no
+ *  information — and it reads as "an unknown script", which pushes a reviewer
+ *  toward asking even when the payload is plainly a read-only diagnostic. */
+function dropOpaque(subcommands: string[]): string[] | undefined {
+  const kept = subcommands.filter((s) => !/(['"])\.\.\.\1/.test(s));
+  return kept.length > 0 ? kept : undefined;
+}
+
 /** Run a single review attempt against one resolved model spec. */
 async function runPermissionReviewWithModel(
   opts: ReviewCallOpts,
@@ -290,6 +351,7 @@ async function runPermissionReviewWithModel(
   let transcriptStr = "(no transcript available)";
   let transcriptMs = 0;
   let lastAssistantText = "";
+  let lastUserText = "";
   try {
     // Active path only. getEntries() is the whole append-only journal and would
     // still contain an abandoned branch's user messages and assistant intent
@@ -312,7 +374,10 @@ async function runPermissionReviewWithModel(
             : "";
         if (!text.trim()) continue;
         if (msg.role === "user") {
-          transcriptEntries.push({ role: msg.role, text, timestamp: (e as { timestamp?: string }).timestamp ?? "" });
+          const request = userRequestText(text);
+          if (!request) continue;
+          transcriptEntries.push({ role: msg.role, text: request, timestamp: (e as { timestamp?: string }).timestamp ?? "" });
+          lastUserText = request;
         } else if (msg.role === "assistant") {
           lastAssistantText = text.trim();
         }
@@ -327,17 +392,19 @@ async function runPermissionReviewWithModel(
   // Build action JSON. Canonicalize the mode to the ro/rw pair the reviewer
   // prompt defines: plan→ro, build→rw, ro/rw pass through unchanged. The
   // reviewer must not have to know which paradigm the session uses.
+  const subcommands = opts.check.unapproved ? dropOpaque(opts.check.unapproved) : undefined;
   const actionOpts: ActionJsonOpts = {
     permission: opts.permission,
     target: opts.target,
     cwd: opts.cwd,
-    ...(opts.check.unapproved ? { subcommands: opts.check.unapproved } : {}),
+    profile: isReadOnly(opts.profile) ? "ro" : "rw",
+    ...(subcommands ? { subcommands } : {}),
     ...(opts.check.redirectTargets ? { redirectTargets: opts.check.redirectTargets } : {}),
     ...(opts.check.hazardous ? { hazardous: true } : {}),
-    ...(opts.check.reason ? { reason: opts.check.reason } : {}),
-    profile: isReadOnly(opts.profile) ? "ro" : "rw",
+    ...(opts.check.reason && !NON_SUBSTANTIVE_REASON.test(opts.check.reason) ? { reason: opts.check.reason } : {}),
   };
-  const actionJson = formatActionJson(actionOpts);
+  const action = buildActionObject(actionOpts);
+  const actionJson = formatActionObject(action);
 
   // Build task prompt. State the project root explicitly (as well as inside the
   // action JSON) so the reviewer cannot mistake a directory mentioned in the
@@ -351,11 +418,23 @@ async function runPermissionReviewWithModel(
   }
 
   // Resolve the configured reviewer model against the parent catalog (falls
-  // back to the parent model when unset or unresolvable).
-  const modelOverride = resolveModelSpec(opts.parentCtx, modelSpec);
+  // back to the parent model when unset or unresolvable). Classifier models
+  // live outside the chat catalog, so that methodology resolves its own model
+  // from `modelSpec` inside the spawn.
+  const modelOverride = reviewMode() === "classifier"
+    ? undefined
+    : resolveModelSpec(opts.parentCtx, modelSpec);
 
   // Run the reviewer subagent
   const spawnT0 = Date.now();
+  const sandboxDir = getSandboxDir();
+  const trustedRoots = [
+    ...new Set([
+      opts.cwd,
+      ...(sandboxDir ? [sandboxDir] : []),
+      join(homedir(), ".pi", "agent"),
+    ]),
+  ];
   const result = await deps.spawn({
     taskType: "explore",
     prompt: taskPrompt,
@@ -366,7 +445,18 @@ async function runPermissionReviewWithModel(
     cwd: opts.cwd,
     trustExternalPaths: true,
     verdictTool: buildSubmitVerdictTool(),
+    ...(modelSpec ? { modelSpec } : {}),
     ...(modelOverride ? { model: modelOverride } : {}),
+    reviewContext: {
+      projectRoot: opts.cwd,
+      transcript: transcriptStr,
+      ...(lastUserText ? { currentRequest: truncateText(lastUserText, 2000) } : {}),
+      ...(trustedRoots.length > 0 ? { trustedRoots } : {}),
+      ...(sandboxDir ? { scratchDir: sandboxDir } : {}),
+      ...(lastAssistantText ? { assistantIntent: truncateText(lastAssistantText, 2000) } : {}),
+      action,
+      ...(opts.retryReason ? { retryReason: opts.retryReason } : {}),
+    },
   });
   // Turn count + tool activity answer the recurring question of whether the
   // reviewer is a genuine investigating subagent (reads/greps/research) or an
@@ -387,7 +477,7 @@ async function runPermissionReviewWithModel(
   reviewLog({
     ts: new Date().toISOString(),
     mode: reviewMode(),
-    model: modelSpec || "(parent model)",
+    model: typeof result.details.model === "string" ? result.details.model : modelSpec || "(parent model)",
     permission: opts.permission,
     target: opts.target.slice(0, 300),
     ms: Date.now() - reviewT0,
@@ -395,11 +485,13 @@ async function runPermissionReviewWithModel(
     outcome: verdict.kind === "assessment" ? verdict.assessment.outcome : undefined,
     risk: verdict.kind === "assessment" ? verdict.assessment.risk_level : undefined,
     auth: verdict.kind === "assessment" ? verdict.assessment.user_authorization : undefined,
+    category: verdict.kind === "assessment" ? verdict.assessment.category : undefined,
     rationale: verdict.kind === "assessment" ? verdict.assessment.rationale : undefined,
     message: verdict.kind === "assessment" ? undefined : verdict.message,
     turns: result.details.turnCount,
     tools: activities,
     usage: result.details.usage,
+    ...(result.details.classifier ? { classifier: result.details.classifier } : {}),
   });
   return verdict;
 }
@@ -409,6 +501,14 @@ async function runPermissionReviewWithModel(
  *  aside from diagnostics so it is unit-testable. */
 export function classifyReviewResult(result: SpawnResult, modelSpec: string): ReviewVerdict {
   const text = result.content.map((c) => c.text).join("\n").trim();
+  // The classifier chose `ask` (or a weak `allow`): fall through to the normal
+  // permission prompt. The user's yes runs the action; there is no permit.
+  if (result.details.ask) {
+    return {
+      kind: "transient",
+      message: String(result.details.askReason ?? "classifier requested your approval"),
+    };
+  }
   if (result.details.error) {
     const errMsg = String(result.details.error);
     // A session that boots without a model is a transient state (model/auth
@@ -425,6 +525,8 @@ export function classifyReviewResult(result: SpawnResult, modelSpec: string): Re
       errMsg.includes("create") ||
       errMsg.includes("not found") ||
       errMsg.includes("Unknown provider") ||
+      errMsg.includes("invalid verdict") ||
+      errMsg.includes("no usable") ||
       isAuthFailure(errMsg) ||
       isBillingFailure(errMsg)
     ) {
@@ -453,6 +555,17 @@ export function classifyReviewResult(result: SpawnResult, modelSpec: string): Re
         `safetynet: reviewer "${modelSpec}" ${SUBMIT_VERDICT_TOOL_NAME} arguments failed validation: ${safeStringify(rawVerdict).slice(0, 300)}`,
       );
       return { kind: "fatal", message: "Reviewer submitted an invalid verdict" };
+    }
+    // Classifier denies are model-only nudges; the pipeline keeps the user out
+    // of the loop unless the model asks or repeated nudges end the turn.
+    const classifier = result.details.classifier as { nudge?: unknown; choice?: unknown } | undefined;
+    if (classifier?.nudge === true) assessment.nudge = true;
+    if (
+      classifier?.choice === "allow" ||
+      classifier?.choice === "narrow" ||
+      classifier?.choice === "deny"
+    ) {
+      assessment.category = classifier.choice;
     }
     return { kind: "assessment", assessment };
   }

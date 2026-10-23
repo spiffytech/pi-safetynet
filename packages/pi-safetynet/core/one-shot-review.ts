@@ -22,6 +22,7 @@ import {
   buildSubmitVerdictTool,
 } from "./reviewer-prompt.ts";
 import { reviewMode } from "./auto-config-state.ts";
+import { spawnClassifierReviewer } from "./classifier-review.ts";
 import { debugLog } from "./debug-log.ts";
 
 // ─── Structural seams (no SDK imports) ─────────────────────────────────────
@@ -203,11 +204,16 @@ export async function spawnOneShotReviewer(opts: SpawnOpts): Promise<SpawnResult
  *  - `injected` (tests / explicit override) always wins.
  *  - `autoApprove.reviewMode: "session"` (or SAFETYNET_REVIEW_MODE=session)
  *    reactivates the intense session reviewer.
+ *  - `reviewMode: "classifier"` uses a structured decision model
+ *    (core/classifier-review.ts).
  *  - Otherwise the one-shot reviewer is the active methodology. */
 export function pickReviewSpawn(
   injected: ReviewSpawnFn | undefined,
   sessionSpawn: ReviewSpawnFn,
 ): ReviewSpawnFn {
   if (injected) return injected;
-  return reviewMode() === "session" ? sessionSpawn : (spawnOneShotReviewer as ReviewSpawnFn);
+  const mode = reviewMode();
+  if (mode === "session") return sessionSpawn;
+  if (mode === "classifier") return spawnClassifierReviewer as ReviewSpawnFn;
+  return spawnOneShotReviewer as ReviewSpawnFn;
 }

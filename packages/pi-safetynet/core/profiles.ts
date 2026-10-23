@@ -152,7 +152,9 @@ Subagents get clean sessions. Provide complete, self-sufficient prompts — the 
  *  the cached prompt prefix on stable turns. */
 export function getScratchSpaceBlock(sandboxDir: string): string {
 	return `## Scratch space
-Write throwaway files under \`${sandboxDir}/\` — both read-only and read-write modes allow reads and writes there, so redirects, scratch fixtures, and files handed to sandboxed tools don't need approval. In read-only mode this is the one permitted write target; everything else stays read-only. Sensitive names (e.g. \`.env\`, \`id_rsa\`) are still blocked everywhere.`;
+Write throwaway files under \`${sandboxDir}/\` — both read-only and read-write modes allow reads and writes there, so redirects, scratch fixtures, and files handed to sandboxed tools don't need approval. In read-only mode this is the one permitted write target; everything else stays read-only. Sensitive names (e.g. \`.env\`, \`id_rsa\`) are still blocked everywhere.
+
+This is the only scratch directory that needs no approval. Other directories under the shared scratch tree belong to other sessions; writing there is redirected back here.`;
 }
 
 /** Pick the system-prompt stanza for the active mode. */

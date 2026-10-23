@@ -208,7 +208,14 @@ describe("pickReviewSpawn", () => {
   });
 
   it("defaults to the one-shot reviewer", () => {
-    assert.equal(pickReviewSpawn(undefined, sessionSpawn), spawnOneShotReviewer);
+    // Hermetic: the user's real config may select another methodology.
+    const originalHome = process.env.HOME;
+    process.env.HOME = join(process.cwd(), ".test-tmp-home-no-config");
+    try {
+      assert.equal(pickReviewSpawn(undefined, sessionSpawn), spawnOneShotReviewer);
+    } finally {
+      process.env.HOME = originalHome;
+    }
   });
 
   it("lets an injected spawn win (test seam / explicit override)", () => {

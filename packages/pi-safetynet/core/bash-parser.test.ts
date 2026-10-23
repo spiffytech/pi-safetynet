@@ -662,6 +662,26 @@ describe("tree-sitter port regressions", () => {
   });
 });
 
+describe("merged-command regression (tree-sitter-bash 0.25.1)", () => {
+  it("splits a pipeline followed by a 2>&1 line", () => {
+    const p = parseCommand("echo a | cat | cat\necho x 2>&1 | grep y");
+    assert.equal(p.parseFailed, false);
+    assert.deepEqual(p.subcommands, ["echo a", "cat", "echo x", "grep y"]);
+  });
+
+  it("keeps a quoted newline inside one command", () => {
+    const p = parseCommand('echo "line1\nline2" | cat');
+    assert.equal(p.parseFailed, false);
+    assert.equal(p.subcommands.length, 2);
+  });
+
+  it("keeps a heredoc body out of the subcommand list", () => {
+    const p = parseCommand("cat <<'EOF'\na\nb\nEOF");
+    assert.equal(p.parseFailed, false);
+    assert.equal(p.subcommands.length, 1);
+  });
+});
+
 describe("dangerous-command hardening", () => {
   const BLOCKED = [
     "env rm -rf /",

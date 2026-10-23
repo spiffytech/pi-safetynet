@@ -82,7 +82,12 @@ import {
 	reviewLatencyEma,
 } from "./core/reviewer-state.ts";
 import { pickReviewSpawn } from "./core/one-shot-review.ts";
-import { loadAutoApproveConfig, isAutoEnabled } from "./core/auto-config-state.ts";
+import {
+	loadAutoApproveConfig,
+	reviewMode,
+	reviewModelSpecs,
+	isAutoEnabled,
+} from "./core/auto-config-state.ts";
 
 export interface OmpPipelineDeps {
 	storage: PermissionStorage;
@@ -107,6 +112,14 @@ export interface ResolveOpts {
 	target: string;
 	check: PermissionCheck;
 	recheck: () => PermissionCheck;
+}
+
+/** True when an approval of this check cannot become a durable rule: a shell
+ *  glob would widen the matcher, and an opaque payload (`'...'`) is identical
+ *  for every long argument, so either one would authorize a family of commands
+ *  rather than the one approved. Such approvals run once, without a rule. */
+function isInvocationOnlyApproval(check: PermissionCheck): boolean {
+	return (check.unapproved ?? []).some(patternHasBashGlob) || (check.opaquePayload?.length ?? 0) > 0;
 }
 
 function makeTempRule(permission: "bash" | "read" | "edit", pattern: string, modes: ProfileName[]): TempRule {
@@ -182,6 +195,15 @@ export async function resolveOmpPermission(
 
 		// ── ask ──────────────────────────────────────────────────────────────
 
+		// A scratch-scope miss is a corrective nudge, not a user decision:
+		// tell the model where its own scratch dir is and keep the turn alive.
+		if (check.narrow !== undefined) {
+			return {
+				block: true,
+				reason: `Scratch scope: ${check.narrow} (Blocked ${opts.permission}: ${opts.target})`,
+			};
+		}
+
 		// Auto-review: a read-only reviewer subagent judges the action against
 		// the risk policy before we bother the user. Circuit-breaker state and
 		// verdict classification live in core/reviewer-state.ts.
@@ -219,9 +241,13 @@ export async function resolveOmpPermission(
 				// order-preserving. core/reviewer-state tries each spec until one
 				// produces a verdict, so a rate-limited or unresolvable first model
 				// degrades to the next instead of failing the whole review.
-				const modelSpecs = Array.isArray(config.model) ? [...config.model] : config.model ? [config.model] : [];
+				const modelSpecs = reviewModelSpecs(config);
+				// SAFETYNET_REVIEWER_MODEL is a chat-model override; classifier
+				// models live in their own catalog and are configured separately.
 				const envModel = process.env.SAFETYNET_REVIEWER_MODEL?.trim();
-				if (envModel && !modelSpecs.includes(envModel)) modelSpecs.push(envModel);
+				if (reviewMode() !== "classifier" && envModel && !modelSpecs.includes(envModel)) {
+					modelSpecs.push(envModel);
+				}
 				const verdict = await runPermissionReview(
 					{
 						permission: opts.permission,
@@ -263,11 +289,11 @@ export async function resolveOmpPermission(
 						if (deps.currentProfile && !isReadOnly(deps.profile) && isReadOnly(deps.currentProfile())) {
 							return { block: true, reason: "Session switched to read-only while this action was being reviewed; the approval no longer applies." };
 						}
-						// A glob would mint a rule matching a broader family; approve this
-						// invocation only.
-						if (opts.permission === "bash" && (check.unapproved ?? []).some(patternHasBashGlob)) {
+						// A glob or an opaque payload would mint a rule matching a broader
+						// family; approve this invocation only.
+						if (opts.permission === "bash" && isInvocationOnlyApproval(check)) {
 							clearDenialBanner(deps.ctx.ui);
-							deps.ctx.ui.notify("Auto-review allowed this call only: a shell glob can't be saved as a rule.", "info");
+							deps.ctx.ui.notify("Auto-review allowed this call only: a shell glob or an opaque payload can't be saved as a rule.", "info");
 							return undefined;
 						}
 						// Turn-scoped rules so the approval dies with the turn.
@@ -280,21 +306,31 @@ export async function resolveOmpPermission(
 							return undefined;
 						}
 					} else if (verdict.assessment.outcome === "deny") {
-						surfaceDenial(deps.ctx.ui, {
-							source: "reviewer",
-							permission: opts.permission,
-							target: opts.target,
-							reason: verdict.assessment.rationale,
-							risk: verdict.assessment.risk_level,
-							authorization: verdict.assessment.user_authorization,
-						});
+						// Classifier denies are model-only nudges: no toast/banner.
+						const nudge = verdict.assessment.nudge === true;
+						if (!nudge) {
+							surfaceDenial(deps.ctx.ui, {
+								source: "reviewer",
+								permission: opts.permission,
+								target: opts.target,
+								reason: verdict.assessment.rationale,
+								risk: verdict.assessment.risk_level,
+								authorization: verdict.assessment.user_authorization,
+							});
+						}
 						const count = reviewIncrementDenies();
 						const maxDenials = config.maxDenials ?? 3;
 						if (count >= maxDenials) {
 							deps.ctx.abort();
-							return { block: true, reason: `Auto-review denied ${count} consecutive actions; ending the turn.` };
+							deps.ctx.ui.notify(`safetynet auto-review nudged ${count} consecutive actions; ending the turn.`, "warning");
+							return { block: true, reason: `Auto-review nudged ${count} consecutive actions; ending the turn.` };
 						}
-						return { block: true, reason: `Auto-review denied: ${verdict.assessment.rationale}` };
+						return {
+							block: true,
+							reason: nudge
+								? `Auto-review nudge: ${verdict.assessment.rationale}`
+								: `Auto-review denied: ${verdict.assessment.rationale}`,
+						};
 					}
 				}
 				// stale / transient / fatal → fall through to the interactive prompt.
@@ -302,7 +338,14 @@ export async function resolveOmpPermission(
 				if (capped) {
 					deps.ctx.ui.notify("safetynet auto-review exceeded its time budget; asking you instead.", "warning");
 				} else if (verdict.kind !== "assessment") {
-					deps.ctx.ui.notify(`safetynet auto-review unavailable (${verdict.kind}: ${verdict.message}); asking you instead.`, "warning");
+					const needsUser =
+						verdict.kind === "transient" && /approval|not confident/i.test(verdict.message);
+					deps.ctx.ui.notify(
+						needsUser
+							? `safetynet auto-review: ${verdict.message}; asking you instead.`
+							: `safetynet auto-review unavailable (${verdict.kind}: ${verdict.message}); asking you instead.`,
+						"warning",
+					);
 				} else if (token !== reviewTurnToken()) {
 					deps.ctx.ui.notify("safetynet auto-review verdict arrived after turn end; discarded.", "warning");
 				}
@@ -414,14 +457,18 @@ export async function resolveOmpPermission(
 		// family of commands. When nothing was skipped, approve this invocation
 		// only; when items were skipped, drop the glob and let the recheck reprompt
 		// rather than silently approving the skipped items.
-		const globApproved = opts.permission === "bash" && patterns.some((p) => patternHasBashGlob(p.pattern));
-		if (globApproved && skipped.length === 0) {
+		const opaqueSet = new Set(check.opaquePayload ?? []);
+		const invocationOnly =
+			opts.permission === "bash" && (patterns.some((p) => patternHasBashGlob(p.pattern)) || opaqueSet.size > 0);
+		if (invocationOnly && skipped.length === 0) {
 			const staleGlob = modeFlipBlock();
 			if (staleGlob) return staleGlob;
-			deps.ctx.ui.notify("Approved for this call only: a shell glob can't be saved as a rule.", "warning");
+			deps.ctx.ui.notify("Approved for this call only: a shell glob or an opaque payload can't be saved as a rule.", "warning");
 			return undefined;
 		}
-		const rulePatterns = globApproved ? patterns.filter((p) => !patternHasBashGlob(p.pattern)) : patterns;
+		const rulePatterns = invocationOnly
+			? patterns.filter((p) => !patternHasBashGlob(p.pattern) && !opaqueSet.has(p.pattern))
+			: patterns;
 
 		const newRules: Ruleset = rulePatterns.map(
 			(p): Rule => ({ permission: p.permission, pattern: p.pattern, action: "allow", modes: [deps.profile] }),
@@ -443,7 +490,7 @@ export async function resolveOmpPermission(
 		// "once": that branch continues or returns above.)
 		if (opts.permission === "bash") {
 			deps.inferred?.recordApproval(
-				(check.unapproved ?? []).filter((s) => !patternHasBashGlob(s)),
+				(check.unapproved ?? []).filter((s) => !patternHasBashGlob(s) && !opaqueSet.has(s)),
 				[deps.profile],
 			);
 		}

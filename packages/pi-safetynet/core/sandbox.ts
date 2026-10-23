@@ -37,6 +37,11 @@ export function computeSandboxDir(sessionId: string): string {
   return join(sandboxBase(), sanitizeSessionId(sessionId));
 }
 
+/** The shared parent of every session sandbox. */
+export function scratchBaseDir(): string {
+  return sandboxBase();
+}
+
 /** Active session's sandbox directory, or undefined when none is set. */
 let currentSandboxDir: string | undefined;
 
@@ -82,5 +87,18 @@ export function isWithinSandbox(filePath: string, cwd: string): boolean {
   if (!dir) return false;
   const abs = resolveAbsolute(filePath, cwd);
   const base = normalize(dir);
+  return abs === base || abs.startsWith(base + sep);
+}
+
+/**
+ * True when `filePath` resolves under the shared scratch tree but NOT inside
+ * the active session's own directory — i.e. another session's scratch (or the
+ * shared parent itself). Used to nudge a write back to the session dir rather
+ * than prompt the user: trust stays per-session, not per-`/tmp`.
+ */
+export function isWithinScratchBase(filePath: string, cwd: string): boolean {
+  if (!currentSandboxDir) return false;
+  const abs = resolveAbsolute(filePath, cwd);
+  const base = normalize(sandboxBase());
   return abs === base || abs.startsWith(base + sep);
 }

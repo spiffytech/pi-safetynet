@@ -1006,3 +1006,44 @@ describe("resolvePermission — reviewer unavailable is fail-closed", () => {
     assert.equal(result?.block, true, "a stale pending verdict must not allow the action");
   });
 });
+
+// ─── Scratch-scope nudge (ruleset narrow hint) ──────────────────────────────
+
+describe("resolvePermission — scratch-scope nudge", () => {
+  it("blocks with a hidden nudge, never calls the reviewer, and never prompts", async () => {
+    setAutoEnabled(true, { appendEntry: () => {} } as any);
+    let reviewerCalls = 0;
+    let prompted = 0;
+    const ctx = makeCtx({
+      ui: {
+        notify: () => {},
+        getToolsExpanded: () => false,
+        setToolsExpanded: () => {},
+        custom: async () => { prompted++; return null; },
+      },
+    });
+    const denials: Array<[string, string]> = [];
+    const hint = "That path is another session's scratch, not this session's. Use /tmp/pi-safetynet/s1/ for scratch files.";
+    const result = await resolvePermission(
+      baseDeps({
+        displayCtx: ctx,
+        sendDenial: (t: string, m: string) => denials.push([t, m]),
+        reviewSpawn: async () => { reviewerCalls++; return { content: [], details: {} }; },
+      }),
+      {
+        permission: "bash",
+        target: "mkdir -p /tmp/pi-safetynet/other-session/x",
+        check: { action: "ask", narrow: hint },
+        recheck: ASK_RECHECK,
+      },
+    );
+
+    assert.equal(result?.block, true);
+    assert.match(result!.reason, /Scratch scope/);
+    assert.match(result!.reason, /\/tmp\/pi-safetynet\/s1\//);
+    assert.equal(reviewerCalls, 0, "a scope miss must not spend a classifier call");
+    assert.equal(prompted, 0, "a scope miss must not prompt the user");
+    assert.equal(ctx.aborted.value, false, "a scope miss must not abort the turn");
+    assert.deepEqual(denials.map(([, mode]) => mode), ["hidden"]);
+  });
+});

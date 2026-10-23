@@ -79,14 +79,19 @@ pi-safetynet provides a two-tier security model so you can keep the agent read-o
 
 **Build mode** — Full tool access. Allowlisted commands run silently. Unknown commands prompt for approval. Catastrophic commands are always blocked. Escalation from plan to build requires your approval; de-escalation is automatic.
 
-**Auto-approve** — `/safetynet:auto` toggles automatic permission approval. When enabled, every action the ruleset flags as Ask is routed to a configurable permissions model (a read-only subagent with read/grep/find/ls) that judges the action against a risk policy instead of prompting the user. It runs alongside whatever profile (plan or build) you're in — status shows `+auto`.
+**Auto-approve** — `/safetynet:auto` toggles automatic permission approval. When enabled, every action the ruleset flags as Ask is routed to the configured review methodology instead of prompting the user. It runs alongside whatever profile (plan or build) you're in — status shows `+auto`.
 
-The reviewer reports its verdict by calling the `submit_verdict` tool with `{risk_level, user_authorization, outcome, rationale}` — a JSON-schema-constrained tool call where the provider supports constrained sampling, never JSON parsed out of prose:
+Three methodologies are available (`autoApprove.reviewMode`, or env `SAFETYNET_REVIEW_MODE`):
 
-- It judges against the **user's own messages only** — the transcript it sees contains just the human conversation, never the assistant's tool calls or outputs, so its own momentum can't look like consent. It can still verify local state itself with read-only tools.
-- **Egress is high risk.** Pushing to a remote, connecting to a host, publishing, or deploying to a destination the user never named is treated as unauthorized egress and denied, not waved through as routine.
+- **`one-shot`** (default) — one chat-model completion decides. No session boot, no tool loop. The model calls `submit_verdict` with `{risk_level, user_authorization, outcome, rationale}`; a JSON verdict in prose is accepted as a fallback.
+- **`classifier`** — a structured decision model (System One style) answers **one choice**: `allow`, `narrow`, `ask`, or `deny`. The default is `typesafe/jev-latest`. The policy judges **excess, not category**: work inside the session's trusted roots (project root, its own scratch dir, agent state) is routine, read-only inspection is routine anywhere non-sensitive, and a task-level go-ahead ("go", "do what you need", an approved plan) covers the concrete steps of that task and its **named destinations** — including deploys, ssh, and scp. It asks when an action exceeds the task, or names a destination the user did not (new egress, production data writes beyond the task, destructive/hard-to-reverse changes, secret reads). `narrow` is a model-only nudge for an over-broad search or a write aimed at another session's scratch dir. `ask` falls through to the normal permission prompt — your yes runs the action; there is no permit. `deny` is a hard block for catastrophic or credential-exfiltration actions; the ruleset’s catastrophic floor runs before the classifier. A weak `allow` becomes `ask` only when the choice is genuinely contested: below `classifierThreshold` (default **0.6**) the pipeline keeps the model's own `allow` if it still leads the runner-up by more than 0.05 and is at least 0.5 — otherwise `narrow` if that is the close alternative, else `ask`. Measured on the review ledger, 13 of 20 such downgrades had a decisive margin (e.g. 0.55 allow vs 0.44 ask) and were pure prompt noise. The model receives the planned command, the project root, **trusted roots**, **the latest user request**, the user-only transcript, and the assistant’s untrusted stated intent. Jev authenticates from `JEV_API_KEY` (or `TYPESAFE_API_KEY`). This path needs a registry that exposes `classify()` (the pi host does; the omp host does not).
+- **`session`** — the intense reviewer: an explore-style child session with read/grep/find/ls that can verify local state itself.
+
+The transcript always contains the **user's own messages only** — never the assistant's tool calls or outputs, so the reviewer's own momentum can't look like consent.
+
+- **Egress is high risk.** Pushing to a remote, connecting to a host, publishing, or deploying to a destination the user never named is treated as unauthorized egress — denied, or escalated to the prompt in classifier mode — not waved through as routine.
 - **Authorization defaults to `unknown`.** Only the user's own messages establish `user_authorization`; a missing score defaults to `unknown` rather than guessing lenient.
-- **Allow** — creates a turn-scoped temp rule so repeats in the same turn skip re-review. The model sees a hidden nudge. A shell-glob command, or one where some subcommands were skipped, is approved for that call only — no rule is minted.
+- **Allow** — creates a turn-scoped temp rule so repeats in the same turn skip re-review. The model sees a hidden nudge. A shell-glob command, one containing an **opaque payload** (a quoted argument too long or too multi-line to inline, which the parser collapses to `'...'`), or one where some subcommands were skipped, is approved for that call only — no rule is minted. An opaque payload is the sharper case: the placeholder is identical for every long argument, so a durable rule minted from `ssh host '<script>'` would silently authorize *any* script on that host while still failing to match a short benign one.
 - **Deny** — blocks with the rationale, keeps the turn alive so the model can try a safer alternative. After `autoApprove.maxDenials` consecutive reviewer denials (default 3) the turn is aborted. Denials that touch a sensitive file (e.g. `cat .env`) are exempt from that budget. Ruleset, read-only/mode, and headless denials use a separate per-turn budget (`autoDeny.maxStrikes`); hazardous-file denials never abort at all.
 Every denial is surfaced in three places:
 - **On the rejected tool call** — the blocked call's error result reads `Auto-denied <permission>: <target> — <rationale>` (a `Ruleset denied …` or `Denied …` prefix for deny-rule/headless denials). The reviewer's internal risk/authorization scores are not shown to the model.
@@ -97,8 +102,29 @@ Every denial is surfaced in three places:
 Configure which model handles review and timeouts in global config:
 
 ```json
-{ "autoApprove": { "model": "provider/model-id", "timeoutMs": 90000, "maxDenials": 3 } }
+{
+  "autoApprove": {
+    "model": "provider/model-id",
+    "reviewMode": "one-shot",
+    "timeoutMs": 90000,
+    "maxDenials": 3
+  }
+}
 ```
+
+For classifier mode, the default is TypeSafe Jev; no model field is required:
+
+```json
+{
+  "autoApprove": {
+    "reviewMode": "classifier",
+    "classifierModel": "typesafe/jev-latest",
+    "classifierThreshold": 0.6
+  }
+}
+```
+
+Set `JEV_API_KEY` (or `TYPESAFE_API_KEY`) in your shell profile. Expect roughly 90% to run or narrow; about 5-6% will ask you, concentrated on deploys, pushes, remote exec, destructive state changes, and secrets. `classifierModel` also accepts a fallback list; Neuralwatt's `neuralwatt/clef-flash` works but is much less conservative. `SAFETYNET_REVIEW_MODE=classifier` flips the methodology for one session without editing the file.
 
 
 ### Catastrophic command blocking
@@ -142,13 +168,15 @@ Allowed inside the sandbox:
 
 - Output and input redirects (`>`, `>>`, `<`), including in plan/ro mode where they would otherwise be denied as edit-like.
 - The `read`, `edit`, and `write` tools.
-- `cd` into the sandbox.
-- Sandbox-local file management: `mkdir`, `touch`, `rm`, `rmdir`, `cp`, `mv`, `ln` when every path operand resolves inside the sandbox.
+- `cd` into the sandbox. A `cd` earlier in a compound command is tracked, so later relative operands (`cd <sandbox> && rm x`) resolve against it.
+- Sandbox-local file management: `mkdir`, `touch`, `rm`, `rmdir`, `cp`, `mv`, `ln`, in-place edits (`sed -i`), `tee`, `dd of=…`, and `chmod`/`chown` when every path operand resolves inside the sandbox.
+- Running a script file from the sandbox (`bun run <sandbox>/x.ts`, `<sandbox>/x.sh`, `bash <sandbox>/x.sh`). Inline code (`node -e`, `python -c`, `bash -c`) is not covered — it can write anywhere.
 
 Not allowed:
 
 - Hazardous names (`.env`, `id_rsa`, credentials, …) stay denied inside the sandbox too. The guard is a pure path-name check, so exempting the sandbox would require resolving what a path actually points at — a symlink or hardlink, or a copy that planted a real secret under a trusted name — which is not statically decidable.
 - Paths outside the sandbox, including a sibling that merely shares the prefix (`/tmp/pi-safetynet/abc-evil` is not inside `/tmp/pi-safetynet/abc`).
+- Another session's scratch dir. Trust is per-session, not per-`/tmp`: a write aimed at `<tmpdir>/pi-safetynet/<other-session>/` is answered with a model-only nudge (“use your session scratch dir”), not a prompt.
 - Variable, `cd`-relative, and glob operands that can't be pinned to the sandbox statically fail closed and prompt as usual.
 
 The path is computed once per session and is stable, so it does not churn the cached system-prompt prefix. Subagents share the parent session's sandbox. Nothing is cleaned up automatically; `/tmp` reclaims it.

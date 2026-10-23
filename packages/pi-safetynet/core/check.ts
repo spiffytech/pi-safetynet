@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import type { ProfileName, PermissionAction, Rule, Ruleset, ModeAliases } from "./types.ts";
 import { evaluatePermission } from "./permissions/ruleset.ts";
 import { getBaselineRules } from "./permissions/index.ts";
@@ -6,7 +5,7 @@ import { parseCommand, subcommandTokenLists, isHazardousFile, isEditLikeBashComm
 import { normalizePathForMatching, expandHome, isExternalPath } from "pi-submarine-core";
 import { newVarMap, resolveDisplayWord, recordAssignment } from "./expansion.ts";
 import type { VarMap } from "./expansion.ts";
-import { isWithinSandbox } from "./sandbox.ts";
+import { getSandboxDir, isWithinSandbox, isWithinScratchBase, resolveAbsolute } from "./sandbox.ts";
 import { patternMatches } from "./inferred/shapes.ts";
 import type { InferredBashRule } from "./inferred/store.ts";
 /** Device files that are always safe to use as redirect targets. */
@@ -41,6 +40,15 @@ export interface PermissionCheck {
   /** True for denials no user override may bypass: catastrophic commands and
    *  unparseable input (fail-closed). */
   unforceable?: boolean;
+  /** Corrective hint instead of a user prompt: the action is safe but aimed at
+   *  the wrong place (e.g. another session's scratch dir). The pipeline sends
+   *  it to the model as a hidden nudge and does not prompt or review. Only set
+   *  when every ask in the command is a scope miss. */
+  narrow?: string;
+  /** Subcommands awaiting approval that contain an opaque (collapsed) literal.
+   *  A durable rule minted from one would match any other long argument in the
+   *  same position, so callers must approve these for this invocation only. */
+  opaquePayload?: string[];
 }
 
 /** True when the checked action has write side effects: an edit/write tool
@@ -64,6 +72,23 @@ export function actionWrites(permission: "bash" | "read" | "edit", check: Permis
 export function patternHasBashGlob(pattern: string): boolean {
   return /[*?]/.test(pattern);
 }
+
+/**
+ * True when a subcommand must stay invocation-only: persisting it as a durable
+ * rule would authorize a FAMILY of commands rather than the one approved.
+ *
+ *  Two shapes do that. A shell glob is widened by the matcher (`rm -rf *` →
+ *  `rm -rf .*`). An OPAQUE PAYLOAD — a quoted string too long or too multi-line
+ *  to inline, which the parser collapses to `'...'` — is the sharper hazard:
+ *  the placeholder is identical for every long argument, so approving
+ *  `ssh host '<a 200-char script>'` once would silently authorize any other
+ *  script on that host. (Measured: a durable rule minted from a long ssh
+ *  payload allowed a destructive payload to the same host and did NOT match a
+ *  short, benign one.)
+ *
+ *  The parser reports the second case structurally (`opaqueSubcommands`), not
+ *  by string inspection: `"..."` is ALSO how a quoted expansion renders
+ *  (`rm -rf "$DIR"`), and those approvals must keep working. */
 
 export function checkFileTarget(
   filePath: string,
@@ -159,37 +184,28 @@ function isBareAssignment(tokens: string[]): boolean {
     && tokens.every((t) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
 }
 
-/**
- * Check whether a subcommand is `cd <path>` where <path> resolves to
- * cwd or a directory below it.  Such commands are always safe and
- * auto-approved. When `trustExternalPaths` is set, cd to ANY directory
- * (including those outside cwd) is auto-approved.
- */
-function isCdWithinProject(subcommand: string, cwd: string, trustExternalPaths = false): boolean {
+/** Parsed `cd` target. `unknown` covers `cd -` (OLDPWD is not statically
+ *  knowable). Returns null when the subcommand is not a `cd`. */
+type CdTarget = { kind: "path"; target: string } | { kind: "unknown" };
+
+function cdTargetOf(subcommand: string): CdTarget | null {
   const trimmed = subcommand.trim();
-  if (trimmed === "cd") return true; // bare cd → $HOME, harmless
+  if (trimmed === "cd") return { kind: "path", target: "~" };
 
   const cdMatch = trimmed.match(/^cd\s+(.+)$/);
-  if (!cdMatch) return false;
+  if (!cdMatch) return null;
 
   let target = cdMatch[1]!.trim();
-
-  // Strip quotes
   if (
     (target.startsWith('"') && target.endsWith('"')) ||
     (target.startsWith("'") && target.endsWith("'"))
   ) {
     target = target.slice(1, -1);
   }
-
   target = expandHome(target);
-
-  // Resolve relative paths against cwd.
-  const resolved = target.startsWith("/") ? target : resolve(cwd, target);
-
-  // Target must be within or equal to cwd, or inside the session sandbox.
-  // When external paths are trusted, auto-approve cd to any directory.
-  return trustExternalPaths || resolved.startsWith(cwd + "/") || resolved === cwd || isWithinSandbox(resolved, cwd);
+  if (target === "-") return { kind: "unknown" };
+  if (!target) return null;
+  return { kind: "path", target };
 }
 
 /** Does an inferred rule apply to this profile? Mirrors the alias-aware
@@ -355,34 +371,172 @@ function globHazard(pattern: string, dotglob = false): "hazard" | "broad" | null
 }
 
 /**
- * Verbs whose only effect is on their path operands. When every operand of
- * such a command resolves inside the session sandbox, it touches scratch space
- * only and can run without approval. An explicit `deny` rule still wins.
+ * Verbs whose write effect is confined to their path operands. When every
+ * operand resolves inside the session scratch dir, the command touches
+ * scratch space only and can run without approval. An explicit `deny` rule
+ * still wins, and a hazardous name still hard-denies.
  */
-const SANDBOX_LOCAL_VERBS = new Set([
+const SANDBOX_WRITE_VERBS = new Set([
   "mkdir", "touch", "rm", "rmdir", "cp", "mv", "ln",
+  "sed", "tee", "dd", "chmod", "chown",
 ]);
 
-/** True when a write-capable subcommand's path operands all resolve inside the
- *  session sandbox. Unresolvable operands fail closed. */
-function isSandboxLocalCommand(
+/** Interpreters that run a script FILE (never inline code) — see
+ *  `sandboxScriptTarget`, which rejects `-e`/`-c`. */
+const SCRIPT_RUNNERS = new Set([
+  "bun", "bunx", "node", "deno", "python", "python3", "bash", "sh",
+  "zsh", "dash", "ruby", "perl", "tsx", "ts-node",
+]);
+
+/** Path-shaped enough to be a script file, so package-script names (`test`,
+ *  `build:honker`) are not mistaken for one. */
+function looksLikeScriptPath(word: string): boolean {
+  return word.includes("/") || /\.[A-Za-z0-9]{1,5}$/.test(word);
+}
+
+/** Resolve a write verb's path operands, or null when the subcommand is not a
+ *  statically-resolvable write (unresolvable operands fail closed). */
+function sandboxWriteOperands(
+  verb: string,
   tokens: string[],
   dwords: string[],
   vars: VarMap,
   cwd: string,
-): boolean {
+): string[] | null {
+  if (!SANDBOX_WRITE_VERBS.has(verb)) return null;
+  const resolveAll = (indexes: number[]): string[] | null => {
+    const out: string[] = [];
+    for (const j of indexes) {
+      const resolved = resolveDisplayWord(dwords[j]!, vars, cwd);
+      if (resolved === undefined) return null;
+      out.push(resolved);
+    }
+    return out.length > 0 ? out : null;
+  };
+
+  if (verb === "sed") {
+    // Only in-place edits write. `sed -n` / `sed 's/a/b/' f` do not.
+    const inPlace = tokens
+      .slice(1)
+      .some((t) => t === "-i" || t.startsWith("-i.") || t.startsWith("--in-place"));
+    if (!inPlace) return null;
+    const text = textOperandIndexes("sed", tokens);
+    const idx: number[] = [];
+    for (let j = 1; j < dwords.length; j++) {
+      if (dwords[j]!.startsWith("-") || text.has(j)) continue;
+      idx.push(j);
+    }
+    return resolveAll(idx);
+  }
+
+  if (verb === "dd") {
+    const idx: number[] = [];
+    for (let j = 1; j < dwords.length; j++) if (dwords[j]!.startsWith("of=")) idx.push(j);
+    return resolveAll(idx)?.map((p) => p.slice(3)) ?? null;
+  }
+
+  if (verb === "chmod" || verb === "chown") {
+    // First non-flag operand is the mode/owner (text); the rest are paths.
+    let sawText = false;
+    const idx: number[] = [];
+    for (let j = 1; j < dwords.length; j++) {
+      if (dwords[j]!.startsWith("-")) continue;
+      if (!sawText) {
+        sawText = true;
+        continue;
+      }
+      idx.push(j);
+    }
+    return resolveAll(idx);
+  }
+
+  const idx: number[] = [];
+  for (let j = 1; j < dwords.length; j++) {
+    if (dwords[j]!.startsWith("-")) continue;
+    idx.push(j);
+  }
+  return resolveAll(idx);
+}
+
+/** "local" = this session's scratch dir; "sibling" = the shared scratch tree
+ *  but another session's dir (retarget nudge, not a user prompt). */
+type ScratchTarget = "local" | "sibling" | null;
+
+function classifyScratchPath(path: string, cwd: string): ScratchTarget {
+  if (isWithinSandbox(path, cwd)) return "local";
+  if (isWithinScratchBase(path, cwd)) return "sibling";
+  return null;
+}
+
+/** A write subcommand whose operands all land in scratch. */
+function sandboxTargetOfCommand(
+  tokens: string[],
+  dwords: string[],
+  vars: VarMap,
+  cwd: string,
+): ScratchTarget {
   const verb = tokens[0];
-  if (!verb || !SANDBOX_LOCAL_VERBS.has(verb)) return false;
-  const operands: string[] = [];
+  if (!verb) return null;
+  const operands = sandboxWriteOperands(verb, tokens, dwords, vars, cwd);
+  if (!operands) return null;
+  let local = 0;
+  let sibling = 0;
+  for (const op of operands) {
+    const t = classifyScratchPath(op, cwd);
+    if (t === "local") local++;
+    else if (t === "sibling") sibling++;
+    else return null; // one outside operand makes the whole command non-scratch
+  }
+  if (sibling > 0) return "sibling";
+  return local > 0 ? "local" : null;
+}
+
+/** A command that executes a script file from scratch (not inline code). */
+function sandboxScriptTarget(
+  tokens: string[],
+  dwords: string[],
+  vars: VarMap,
+  cwd: string,
+): ScratchTarget {
+  if (!tokens.length) return null;
+  const runner = tokens[0]!;
+  // Direct execution: `./x.sh`, `/abs/x.sh`, `~/x.sh`.
+  if (
+    runner.startsWith("./") ||
+    runner.startsWith("../") ||
+    runner.startsWith("/") ||
+    runner.startsWith("~")
+  ) {
+    if (!looksLikeScriptPath(runner)) return null;
+    const resolved = resolveDisplayWord(dwords[0]!, vars, cwd);
+    return resolved ? classifyScratchPath(resolved, cwd) : null;
+  }
+  if (!SCRIPT_RUNNERS.has(runner)) return null;
+  // Inline code is not a scratch file; it can write anywhere.
+  if (tokens.slice(1).some((t) => t === "-e" || t === "--eval" || t === "-c" || t === "-p")) {
+    return null;
+  }
+  // First positional after flags and an optional `run`/`exec` subcommand.
+  let scriptAt = -1;
   for (let j = 1; j < dwords.length; j++) {
     const w = dwords[j]!;
     if (w.startsWith("-")) continue;
-    const resolved = resolveDisplayWord(w, vars, cwd);
-    if (resolved === undefined) return false;
-    operands.push(resolved);
+    if (scriptAt === -1 && (w === "run" || w === "exec")) continue;
+    if (!looksLikeScriptPath(w)) return null;
+    scriptAt = j;
+    break;
   }
-  if (operands.length === 0) return false;
-  return operands.every((o) => isWithinSandbox(o, cwd));
+  if (scriptAt === -1) return null;
+  const resolved = resolveDisplayWord(dwords[scriptAt]!, vars, cwd);
+  return resolved ? classifyScratchPath(resolved, cwd) : null;
+}
+
+/** Model-facing correction for a write aimed at another session's scratch. */
+function scratchNudge(): string {
+  const dir = getSandboxDir();
+  return dir
+    ? `That path is outside this session's scratch dir. Use ${dir}/ for scratch files.`
+    : "That path is outside the project and is not this session's scratch dir.";
 }
 
 /**
@@ -452,16 +606,67 @@ export function checkBashPermission(
   // Variable state for `$F`-shaped operands: bare assignments update it in
   // order, everything else is resolver from the ambient environment.
   const vars = newVarMap(absCwd);
+  // Effective working directory inside a compound command. A `cd` changes how
+  // later relative operands resolve; without this, `cd <scratch> && rm x`
+  // resolved `x` against the project root and asked.
+  let effectiveCwd = absCwd;
+  let cwdKnown = true;
+  // A retarget nudge replaces the user prompt only when EVERY ask in the
+  // command is a scratch-scope miss. Any genuine ask forces the prompt.
+  let narrowHint: string | undefined;
+  let hardAsk = false;
+  const recordAsk = (sub: string, index: number): void => {
+    if (worstAction !== "deny") worstAction = "ask";
+    if (!unapproved.includes(sub)) {
+      unapproved.push(sub);
+      unapprovedDisplay.push(parsed.displaySubcommands[index] ?? sub);
+    }
+  };
 
   for (let i = 0; i < parsed.subcommands.length; i++) {
     const sub = parsed.subcommands[i]!;
-    // Auto-approve cd when the target is within (or equal to) cwd.
-    // cd to the project or a subdirectory is always safe and the LLM
-    // frequently emits it as a preamble (e.g. "cd <cwd> && git diff").
-    if (isCdWithinProject(sub, absCwd, trustExternalPaths)) continue;
-
     const tokens = parsed.subcommandWords[i] ?? [];
     const dwords = parsed.subcommandDisplayWords[i] ?? tokens;
+
+    // `cd` is safe when it targets the project, the session scratch dir, or
+    // the shared scratch tree (traversal only — writes are judged below).
+    // Adopt a resolved target so later operands resolve against it.
+    const cd = cdTargetOf(sub);
+    let cdPath: string | null | undefined;
+    // An absolute (or `~`) target does not depend on the shell's current
+    // directory. A relative one does — and after `cd -` the directory is
+    // unknowable, so it must not be auto-approved or adopted.
+    const cdAbsolute = cd?.kind === "path" && (cd.target.startsWith("/") || cd.target.startsWith("~"));
+    if (cd !== null) {
+      if (cd.kind === "unknown") {
+        // `cd -` goes to OLDPWD, which is not statically knowable.
+        cdPath = null;
+        cwdKnown = false;
+        continue;
+      }
+      cdPath = resolveAbsolute(cd.target, effectiveCwd);
+      const target = cdPath;
+      // A bare `cd` goes to $HOME; the old behavior auto-approved it as a
+      // harmless preamble. Adoption below makes later relative operands
+      // resolve against $HOME (and therefore look external).
+      const bareCd = sub.trim() === "cd";
+      const safeTarget =
+        bareCd ||
+        ((cwdKnown || cdAbsolute) &&
+          (trustExternalPaths ||
+            target === absCwd ||
+            target.startsWith(absCwd + "/") ||
+            isWithinSandbox(target, absCwd) ||
+            isWithinScratchBase(target, absCwd)));
+      if (safeTarget) {
+        effectiveCwd = target;
+        cwdKnown = true;
+        continue;
+      }
+      // External cd: fall through to the ruleset. If an explicit rule allows
+      // it, the target is adopted below so the rest of the command resolves
+      // against the new directory.
+    }
 
     // Bare variable assignments (e.g. ORDER_ID=abc) update the resolution state
     // for later subcommands in the same command string — this is how
@@ -471,7 +676,7 @@ export function checkBashPermission(
       isBareAssignment(tokens) ||
       (tokens[0] === "export" && dwords.slice(1).every((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w)));
     if (bareUpdatesState) {
-      for (const w of dwords) recordAssignment(w, vars, absCwd);
+      for (const w of dwords) recordAssignment(w, vars, effectiveCwd);
       continue;
     }
 
@@ -486,7 +691,7 @@ export function checkBashPermission(
       const textSlots = textOperandIndexes(verb, tokens);
       for (let j = 0; j < dwords.length; j++) {
         if (textSlots.has(j)) continue;
-        const resolved = resolveDisplayWord(dwords[j]!, vars, absCwd);
+        const resolved = resolveDisplayWord(dwords[j]!, vars, effectiveCwd);
         if (resolved === undefined) {
           // A `$F` operand we cannot pin down could be a secured file or an
           // external path — escalate, never allow silently.
@@ -503,7 +708,17 @@ export function checkBashPermission(
     // the ruleset verdict — the file tools and bash redirects block these, and an
     // allowlisted verb must not read them silently. Runs before the action branch
     // so `rm .env` (verdict ask) is blocked too.
-    if (verb && findHazardousOperand(candidates, command.includes("dotglob"))) {
+    const hazardOperand = verb
+      ? findHazardousOperand(candidates, command.includes("dotglob"))
+      : undefined;
+    // Scratch-local writes and script runs (this session's dir) run silently;
+    // a write aimed at another session's scratch is a retarget nudge, not a
+    // user decision.
+    const scratchTarget = cwdKnown && result.action !== "deny" && !hazardOperand
+      ? sandboxTargetOfCommand(tokens, dwords, vars, effectiveCwd)
+        ?? sandboxScriptTarget(tokens, dwords, vars, effectiveCwd)
+      : null;
+    if (hazardOperand) {
       worstAction = "deny";
       hazardous = true;
       if (!denyReasons.includes(HAZARDOUS_REASON)) denyReasons.push(HAZARDOUS_REASON);
@@ -511,8 +726,11 @@ export function checkBashPermission(
         unapproved.push(sub);
         unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
       }
-    } else if (result.action !== "deny" && isSandboxLocalCommand(tokens, dwords, vars, absCwd)) {
-      // Sandbox-local write (mkdir/cp/mv/rm/…): touches scratch space only.
+    } else if (scratchTarget === "local") {
+      // Scratch-local write or script run: touches this session's scratch only.
+    } else if (scratchTarget === "sibling") {
+      narrowHint ??= scratchNudge();
+      recordAsk(sub, i);
     } else if (
       verb &&
       unresolvedOperand &&
@@ -525,11 +743,8 @@ export function checkBashPermission(
       result.action !== "deny" &&
       !(result.action === "allow" && isExplicitRule(result.matchedRule))
     ) {
-      if (worstAction !== "deny") worstAction = "ask";
-      if (!unapproved.includes(sub)) {
-        unapproved.push(sub);
-        unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
-      }
+      hardAsk = true;
+      recordAsk(sub, i);
     } else if (result.action === "allow") {
       if (result.matchedRule !== undefined && isExactShapeRule(result.matchedRule)) {
         exactShapeAllowed.add(sub);
@@ -538,17 +753,24 @@ export function checkBashPermission(
       // outside the project root must be approved, not run silently. But only
       // baseline catch-all rules are downgraded (mirrors checkFileTarget) — a
       // rule the user explicitly approved must override, or approval could
-      // never stick and every recheck would re-ask forever. Sandbox paths are
-      // trusted and never count as external.
+      // never stick and every recheck would re-ask forever. Scratch paths
+      // (this session's dir or the shared tree) never count as external.
       const externalOperand =
         !trustExternalPaths &&
-        candidates.some((tok) => isExternalPathOperand(tok, absCwd) && !isWithinSandbox(tok, absCwd));
+        candidates.some((tok) => {
+          if (isWithinSandbox(tok, effectiveCwd) || isWithinScratchBase(tok, effectiveCwd)) return false;
+          if (!cwdKnown && tok.includes("/") && !tok.startsWith("/")) return true;
+          return isExternalPathOperand(tok, effectiveCwd);
+        });
       if (!isExplicitRule(result.matchedRule) && externalOperand) {
-        if (worstAction !== "deny") worstAction = "ask";
-        if (!unapproved.includes(sub)) {
-          unapproved.push(sub);
-          unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
-        }
+        hardAsk = true;
+        recordAsk(sub, i);
+      } else if (cdPath !== null && cdPath !== undefined && (cwdKnown || cdAbsolute)) {
+        // An external `cd` allowed by an explicit rule: adopt it so the rest
+        // of the compound command resolves against the new directory. A
+        // relative target after `cd -` cannot be resolved safely.
+        effectiveCwd = cdPath;
+        cwdKnown = true;
       }
     } else if (result.action === "deny") {
       worstAction = "deny";
@@ -569,18 +791,15 @@ export function checkBashPermission(
           )
         : false;
       if (!inferredAllow) {
-        if (worstAction !== "deny") worstAction = "ask";
-        if (!unapproved.includes(sub)) {
-          unapproved.push(sub);
-          unapprovedDisplay.push(parsed.displaySubcommands[i] ?? sub);
-        }
+        hardAsk = true;
+        recordAsk(sub, i);
       }
     }
   }
 
   for (const target of parsed.redirects) {
     const perm = target.direction === "input" ? "read" : "edit";
-    const targetResult = checkFileTarget(target.path, perm, profile, rules, cwd, trustExternalPaths, modeAliases);
+    const targetResult = checkFileTarget(target.path, perm, profile, rules, effectiveCwd, trustExternalPaths, modeAliases);
     if (targetResult.action === "deny") {
       worstAction = "deny";
       redirectTargets.push({ permission: perm, path: target.path });
@@ -589,8 +808,16 @@ export function checkBashPermission(
         denyReasons.push(targetResult.reason);
       }
     } else if (targetResult.action === "ask") {
-      if (worstAction !== "deny") worstAction = "ask";
-      redirectTargets.push({ permission: perm, path: target.path });
+      // A write redirect into another session's scratch is the same retarget
+      // mistake as a sibling `rm`/`mkdir`: nudge, don't prompt.
+      if (perm === "edit" && cwdKnown && isWithinScratchBase(target.path, effectiveCwd) && !isWithinSandbox(target.path, effectiveCwd)) {
+        narrowHint ??= scratchNudge();
+        if (worstAction !== "deny") worstAction = "ask";
+      } else {
+        hardAsk = true;
+        if (worstAction !== "deny") worstAction = "ask";
+        redirectTargets.push({ permission: perm, path: target.path });
+      }
     }
   }
 
@@ -616,6 +843,11 @@ export function checkBashPermission(
 
   const result: PermissionCheck = { action: worstAction, unapproved, unapprovedDisplay, redirectTargets };
   if (hazardous) result.hazardous = true;
+  const opaque = unapproved.filter((s) => parsed.opaqueSubcommands.includes(s));
+  if (opaque.length > 0) result.opaquePayload = opaque;
+  if (worstAction === "ask" && narrowHint !== undefined && !hardAsk && !hazardous) {
+    result.narrow = narrowHint;
+  }
   if (worstAction === "deny" && denyReasons.length > 0) {
     result.reason = denyReasons.join("; ");
   }

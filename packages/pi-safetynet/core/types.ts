@@ -66,6 +66,12 @@ export interface ReviewerAssessment {
   user_authorization: "unknown" | "low" | "medium" | "high";
   outcome: "allow" | "deny";
   rationale: string;
+  /** Internal only: the classifier's category. */
+  category?: "allow" | "narrow" | "ask" | "deny";
+  /** Internal only (never set by the reviewer model's tool): this deny is a
+   *  model-only corrective nudge, so the pipeline should not interrupt the
+   *  user with a denial banner. */
+  nudge?: boolean;
 }
 
 /** Classified result of a review attempt. */
@@ -84,9 +90,18 @@ export interface AutoApproveConfig {
    *  milliseconds. Default 8000. */
   latencyWarnEmaMs?: number;
   /** Review methodology: "one-shot" (default) = one model completion decides;
-   *  "session" = the intense session reviewer with read/grep/glob research.
-   *  Env SAFETYNET_REVIEW_MODE overrides this value. */
-  reviewMode?: "one-shot" | "session";
+   *  "session" = the intense session reviewer with read/grep/glob research;
+   *  "classifier" = a structured decision model (e.g. neuralwatt/clef-flash)
+   *  answers risk/authorization/approve questions and we compare the approve
+   *  probability against `classifierThreshold`. Env SAFETYNET_REVIEW_MODE
+   *  overrides this value. */
+  reviewMode?: "one-shot" | "session" | "classifier";
+  /** Structured classifier model spec (or fallback list), e.g.
+   *  "typesafe/jev-latest". Only used by reviewMode "classifier". */
+  classifierModel?: string | string[];
+  /** Minimum P(allow) for the classifier's `allow` choice. Below this the
+   *  action asks the user instead. Default 0.6. Clamped to [0,1]. */
+  classifierThreshold?: number;
 }
 
 /** Configurable prompt keybindings (key identifiers as understood by

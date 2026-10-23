@@ -1083,6 +1083,50 @@ describe("checkBashPermission — operand scanning scoped to file verbs and reso
   });
 });
 
+describe("opaque payloads cannot become durable rules", () => {
+  const HOST = "ssh -o BatchMode=yes root@host";
+
+  // A real payload from the qnap session: multi-line, so the parser collapses it.
+  const LONG = `${HOST} '\n  echo "=== host memory ==="\n  free -h | sed "s/^/  /"\n  systemd-detect-virt\n  uptime\n'`;
+
+  it("reports the opaque subcommand on the check", () => {
+    const r = checkBashPermission(LONG, "build", RULES, CWD);
+    assert.equal(r.action, "ask");
+    assert.deepEqual(r.opaquePayload, [`${HOST} '...'`]);
+  });
+
+  it("does not flag a short payload, which stays transparent", () => {
+    const r = checkBashPermission(`${HOST} 'free -h'`, "build", RULES, CWD);
+    assert.equal(r.opaquePayload, undefined);
+  });
+
+  it("does not flag a quoted expansion, whose approval must keep working", () => {
+    // `"..."` is ambiguous in canonical form: it renders both an opaque literal
+    // and `"$DIR"`. The parser distinguishes them, so an approved
+    // `rm -rf "$DIR"` shape still satisfies its own recheck.
+    const r = checkBashPermission('rm -rf "$DIR"', "build", RULES, CWD);
+    assert.equal(r.opaquePayload, undefined);
+  });
+
+  it("shows the escalation the guard prevents", () => {
+    // Legacy semantics: a rule minted from one long payload matches ANY long
+    // payload to the same host, while missing a short benign one.
+    const rules: Ruleset = [
+      ...RULES,
+      { permission: "bash", pattern: `${HOST} '...'`, action: "allow", modes: ["build"] },
+    ];
+    const hostile = checkBashPermission(
+      `${HOST} 'rm -rf /srv/data && systemctl stop postgresql'`,
+      "build",
+      rules,
+      CWD,
+    );
+    assert.equal(hostile.action, "allow", "why such rules must not be minted");
+    const benign = checkBashPermission(`${HOST} 'free -h'`, "build", rules, CWD);
+    assert.equal(benign.action, "ask", "and why they are useless anyway");
+  });
+});
+
 describe("patternHasBashGlob", () => {
   it("flags the metacharacters that would broaden a minted rule", () => {
     assert.equal(patternHasBashGlob("rm -rf *"), true);
@@ -1167,5 +1211,65 @@ describe("session sandbox", () => {
   it("does not auto-allow a sandbox-local verb with an outside operand", () => {
     const result = checkBashPermission(`cp file.txt ${SANDBOX}/out.txt`, "rw", RULES, CWD);
     assert.equal(result.action, "ask");
+  });
+
+  it("resolves operands against a cd into the sandbox", () => {
+    const result = checkBashPermission(`cd ${SANDBOX} && rm -f a && cp a b && mkdir -p d`, "rw", RULES, CWD, false, RW_ALIASES);
+    assert.equal(result.action, "allow");
+  });
+
+  it("allows an in-place edit inside the sandbox (relative path)", () => {
+    const result = checkBashPermission(`cd ${SANDBOX} && sed -i 's/a/b/' queue-it.ts`, "rw", RULES, CWD, false, RW_ALIASES);
+    assert.equal(result.action, "allow");
+  });
+
+  it("still asks for an in-place edit outside the sandbox", () => {
+    const result = checkBashPermission(`sed -i 's/a/b/' ${CWD}/x.ts`, "rw", RULES, CWD, false, RW_ALIASES);
+    assert.equal(result.action, "ask");
+  });
+
+  it("allows tee, chmod, and dd writes inside the sandbox", () => {
+    assert.equal(checkBashPermission(`echo hi | tee ${SANDBOX}/out.txt`, "rw", RULES, CWD, false, RW_ALIASES).action, "allow");
+    assert.equal(checkBashPermission(`chmod +x ${SANDBOX}/run.sh`, "rw", RULES, CWD, false, RW_ALIASES).action, "allow");
+    assert.equal(
+      checkBashPermission(`dd if=/dev/zero of=${SANDBOX}/x bs=1 count=1`, "rw", RULES, CWD, false, RW_ALIASES).action,
+      "allow",
+    );
+  });
+
+  it("runs a script from this session's sandbox", () => {
+    assert.equal(checkBashPermission(`bun run ${SANDBOX}/queue-it.ts`, "rw", RULES, CWD, false, RW_ALIASES).action, "allow");
+    assert.equal(checkBashPermission(`cd ${SANDBOX} && bun run queue-it.ts`, "rw", RULES, CWD, false, RW_ALIASES).action, "allow");
+    assert.equal(checkBashPermission(`bash ${SANDBOX}/run.sh`, "rw", RULES, CWD, false, RW_ALIASES).action, "allow");
+  });
+
+  it("does not treat inline interpreter code as a scratch script", () => {
+    assert.equal(checkBashPermission(`node -e 'require("fs")'`, "rw", RULES, CWD, false, RW_ALIASES).action, "ask");
+    assert.equal(checkBashPermission(`python3 -c 'import os'`, "rw", RULES, CWD, false, RW_ALIASES).action, "ask");
+  });
+
+  it("nudges to the session dir instead of asking for a sibling scratch write", () => {
+    const result = checkBashPermission(`mkdir -p /tmp/pi-safetynet/other-session/x`, "rw", RULES, CWD, false, RW_ALIASES);
+    assert.equal(result.action, "ask");
+    assert.match(result.narrow ?? "", /outside this session's scratch dir/);
+    assert.ok((result.narrow ?? "").includes(SANDBOX));
+  });
+
+  it("nudges for a redirect into a sibling scratch dir", () => {
+    const result = checkBashPermission(`echo hi > /tmp/pi-safetynet/other-session/out.txt`, "rw", RULES, CWD, false, RW_ALIASES);
+    assert.equal(result.action, "ask");
+    assert.match(result.narrow ?? "", /outside this session's scratch dir/);
+  });
+
+  it("nudges for a sibling scratch script run", () => {
+    const result = checkBashPermission(`bun run /tmp/pi-safetynet/other-session/x.ts`, "rw", RULES, CWD, false, RW_ALIASES);
+    assert.equal(result.action, "ask");
+    assert.match(result.narrow ?? "", /outside this session's scratch dir/);
+  });
+
+  it("does not turn a genuine external ask into a nudge", () => {
+    const result = checkBashPermission(`cd /tmp && rm -rf honker-peek`, "rw", RULES, CWD, false, RW_ALIASES);
+    assert.equal(result.action, "ask");
+    assert.equal(result.narrow, undefined);
   });
 });
